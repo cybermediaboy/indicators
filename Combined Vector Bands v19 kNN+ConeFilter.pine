@@ -58,7 +58,7 @@ w4 = input.float(1.0, "Weight 4", minval=0.0, step=0.1, group=grp_basket)
 w5 = input.float(1.0, "Weight 5", minval=0.0, step=0.1, group=grp_basket)
 
 grp_perf = "Performance & Heavy Calculations"
-max_heavy_bars = input.int(5000, "Max Heavy Bars Limit", minval=500, maxval=4999, group=grp_perf, tooltip="Unified limit for expensive calculations (LTF correlation tracking, Transfer Entropy) applied to most recent N bars. Saves computation while keeping visible chart area smooth. Recommended: 1500-2000 for fast load, 2500-3000 for deep history.")
+max_heavy_bars = input.int(5000, "Max Heavy Bars Limit", minval=500, maxval=10000, group=grp_perf, tooltip="Unified limit for expensive calculations (LTF correlation tracking, Transfer Entropy) applied to most recent N bars. Saves computation while keeping visible chart area smooth. Recommended: 1500-2000 for fast load, 2500-3000 for deep history.")
 percentile_scan_interval = input.int(100, "Percentile Scan Interval", minval=10, maxval=500, group=grp_perf, tooltip="Recalculate oscillator percentiles every N bars instead of per-bar. Higher = faster performance, lower = more responsive adaptive thresholds. Recommended: 100 bars.")
 max_validation_bars = input.int(500, "Max Validation Bars", minval=100, maxval=2000, group=grp_perf, tooltip="Only validate setups on the most recent N bars of history. Lower = faster load, higher = more historical validation. 500 recommended for performance.")
 mc_validator_direction_mode = input.string("Setup Direction", "Validator Direction Mode", options=["Setup Direction", "Best MC Direction"], group=grp_perf, tooltip="Setup Direction: validate only the setup's intended side. Best MC Direction: score both long and short interpretations on the same MC paths and use the stronger MC direction.")
@@ -993,17 +993,10 @@ bool is_partial = corr_damping >= corr_damp_p20 and corr_damping < corr_damp_p80
 bool is_attached = corr_damping >= corr_damp_p80
 
 // --- LTF CORRELATION TRACKING (ZG MAGNET STYLE) ---
-// Auto-calculate LTF timeframe (1/3 to 1/8 of chart timeframe)
-// TradingView premium supports request.security_lower_tf for intraday timeframes
-string ltf_timeframe = ltf_manual_tf  // Default to manual
+string ltf_timeframe = ltf_manual_tf
 if ltf_mode == "Auto (1/3 to 1/8 of Chart TF)"
-    // Get current chart timeframe in minutes
     int chart_tf_mins = timeframe.in_seconds() / 60
-    
-    // Calculate target LTF (1/5 of chart TF as middle ground between 1/3 and 1/8)
     int target_ltf_mins = math.max(1, math.round(chart_tf_mins / 5.0))
-    
-    // Snap to TradingView-supported timeframes
     if target_ltf_mins <= 1
         ltf_timeframe := "1"
     else if target_ltf_mins <= 3
@@ -1017,150 +1010,110 @@ if ltf_mode == "Auto (1/3 to 1/8 of Chart TF)"
     else
         ltf_timeframe := "60"
 
-// Fetch lower timeframe data for correlation tracking
 bool ltf_calc_active = ltf_enabled
 
-// Fetch LTF close prices for primary asset and basket
-array<float> ltf_pri_close = ltf_calc_active ? request.security_lower_tf(syminfo.tickerid, ltf_timeframe, close) : array.new<float>(0)
+array<float> ltf_pri_close  = ltf_calc_active ? request.security_lower_tf(syminfo.tickerid, ltf_timeframe, close)  : array.new<float>(0)
 array<float> ltf_pri_volume = ltf_calc_active ? request.security_lower_tf(syminfo.tickerid, ltf_timeframe, volume) : array.new<float>(0)
 array<float> ltf_sym1_close = ltf_calc_active ? request.security_lower_tf(sym1, ltf_timeframe, close) : array.new<float>(0)
 array<float> ltf_sym2_close = ltf_calc_active ? request.security_lower_tf(sym2, ltf_timeframe, close) : array.new<float>(0)
 array<float> ltf_sym3_close = ltf_calc_active ? request.security_lower_tf(sym3, ltf_timeframe, close) : array.new<float>(0)
 array<float> ltf_sym4_close = ltf_calc_active ? request.security_lower_tf(sym4, ltf_timeframe, close) : array.new<float>(0)
 
-// Calculate LTF basket close array
 array<float> ltf_bas_close = array.new<float>(0)
 if ltf_calc_active and array.size(ltf_sym1_close) > 0 and array.size(ltf_sym2_close) > 0 and array.size(ltf_sym3_close) > 0 and array.size(ltf_sym4_close) > 0
     int basket_size = math.min(array.size(ltf_sym1_close), math.min(array.size(ltf_sym2_close), math.min(array.size(ltf_sym3_close), array.size(ltf_sym4_close))))
     ltf_bas_close := array.new<float>(basket_size)
     for i = 0 to basket_size - 1
-        float sym1_val = array.get(ltf_sym1_close, i)
-        float sym2_val = array.get(ltf_sym2_close, i)
-        float sym3_val = array.get(ltf_sym3_close, i)
-        float sym4_val = array.get(ltf_sym4_close, i)
-        float basket_avg = (sym1_val + sym2_val + sym3_val + sym4_val) / 4.0
-        array.set(ltf_bas_close, i, basket_avg)
-// REMOVED: ltf_sym5_close
+        array.set(ltf_bas_close, i, (array.get(ltf_sym1_close, i) + array.get(ltf_sym2_close, i) + array.get(ltf_sym3_close, i) + array.get(ltf_sym4_close, i)) / 4.0)
 
 float current_intrabar_vwap = na
 if ltf_calc_active and array.size(ltf_pri_close) > 0 and array.size(ltf_pri_volume) > 0
     float sum_cv = 0.0
-    float sum_v = 0.0
+    float sum_v  = 0.0
     int vwap_n = math.min(array.size(ltf_pri_close), array.size(ltf_pri_volume))
     for i = 0 to vwap_n - 1
-        float ltf_close_val = array.get(ltf_pri_close, i)
-        float ltf_vol_val = array.get(ltf_pri_volume, i)
-        sum_cv += ltf_close_val * ltf_vol_val
-        sum_v += ltf_vol_val
+        sum_cv += array.get(ltf_pri_close, i) * array.get(ltf_pri_volume, i)
+        sum_v  += array.get(ltf_pri_volume, i)
     if sum_v > 0
         current_intrabar_vwap := sum_cv / sum_v
 
 var vwap_history = array.new<float>()
-// VWAP history update on new bar (raw barstate check - execution context not yet defined)
 if barstate.isnew
     array.push(vwap_history, current_intrabar_vwap)
     if array.size(vwap_history) > kb_pivot_len + 20
         array.shift(vwap_history)
 
-// ===== KALMAN BETA TRACKER — State-Space Model: y_t = β_t x_t + ε_t =====
-// Modern Quant Practice: Track hedge ratio (Beta) directly using observation equation
-// var state persists across HTF bars; ltf_prev_pri/bas carry the last LTF close
-// into the first sub-bar of the next HTF bar, making updates truly incremental
-var float ltf_kalman_beta   = 1.0   // Beta state estimate (hedge ratio)
-var float ltf_kalman_P     = 1.0   // Error covariance
-var float ltf_prev_pri     = na    // last LTF close — primary
-var float ltf_prev_bas     = na    // last LTF close — basket
-
-float ltf_kalman_Q    = 0.015  // Process noise (increased from 0.005 to 0.015 for faster adaptation)
-float ltf_kalman_R    = 0.15   // Measurement noise (reduced from 0.1 to 0.15 for higher gain)
-
+// ===== LTF KALMAN CORRELATION TRACKER =====
+// FIX 1: init beta to 0.0 (correlation domain [-1,+1], not beta domain)
+// FIX 2: measurement uses properly normalised Pearson rho on LTF return pairs
+// FIX 3: ltf_ema_smooth is now applied
+var float ltf_kalman_beta = 0.0   // FIX 1: was 1.0 → mismatched domain caused ~200-bar drag
+var float ltf_kalman_P    = 1.0
+var float ltf_prev_pri    = na
+var float ltf_prev_bas    = na
+float ltf_kalman_Q = 0.015
+float ltf_kalman_R = 0.15
 var int ltf_kalman_bar_count = 0
+
 if ltf_calc_active
     ltf_kalman_bar_count := ltf_kalman_bar_count + 1
 
 float ltf_corr_raw = na
 if ltf_calc_active and array.size(ltf_pri_close) > 1 and array.size(ltf_bas_close) > 1
-    // Get current prices (last elements of arrays) - use separate indices for safety
-    int pri_last_idx = array.size(ltf_pri_close) - 1
-    int bas_last_idx = array.size(ltf_bas_close) - 1
-    float pri_price = array.get(ltf_pri_close, pri_last_idx)
-    float bas_price = array.get(ltf_bas_close, bas_last_idx)
-    
+    int pri_last = array.size(ltf_pri_close) - 1
+    int bas_last = array.size(ltf_bas_close) - 1
+    float pri_price = array.get(ltf_pri_close, pri_last)
+    float bas_price = array.get(ltf_bas_close, bas_last)
+
     if not na(ltf_prev_pri) and not na(ltf_prev_bas) and ltf_prev_pri > 0 and ltf_prev_bas > 0
-        // Calculate returns for observation equation
-        float y_t = math.log(pri_price / ltf_prev_pri)  // Asset return (dependent variable)
-        float x_t = math.log(bas_price / ltf_prev_bas)  // Basket return (independent variable)
-        
-        // Skip if basket return is too small (division by zero protection)
+        float y_t = math.log(pri_price / ltf_prev_pri)
+        float x_t = math.log(bas_price / ltf_prev_bas)
+
         if math.abs(x_t) > 1e-8
-            // Add warmup gate for stability
-            bool is_warm = ltf_kalman_bar_count > 50
-            
-            // Declare measurement variable outside conditional blocks
-            float measurement = na
-            
-            if is_warm
-                // Modern Quant Practice: Use Pearson correlation directly (bounded [-1,+1])
-                // Calculate rolling correlation on recent LTF data for measurement
-                int corr_window = math.min(20, math.min(array.size(ltf_pri_close), array.size(ltf_bas_close)))
-                float rho_measurement = na
-                
-                if corr_window >= 10
-                    // Use simple correlation of recent returns instead of arrays
-                    // Extract recent returns for correlation calculation
-                    float recent_returns_corr = 0.0
-                    int valid_pairs = 0
-                    
-                    for i = 1 to math.min(corr_window - 1, 10)  // Use last 10 pairs for efficiency
-                        if pri_last_idx >= i and bas_last_idx >= i
-                            float pri_ret = math.log(array.get(ltf_pri_close, pri_last_idx - i + 1) / array.get(ltf_pri_close, pri_last_idx - i))
-                            float bas_ret = math.log(array.get(ltf_bas_close, bas_last_idx - i + 1) / array.get(ltf_bas_close, bas_last_idx - i))
-                            if math.abs(pri_ret) > 1e-8 and math.abs(bas_ret) > 1e-8
-                                recent_returns_corr := recent_returns_corr + pri_ret * bas_ret
-                                valid_pairs := valid_pairs + 1
-                    
-                    if valid_pairs > 0
-                        float mean_product = recent_returns_corr / valid_pairs
-                        rho_measurement := math.max(-1.0, math.min(mean_product * 10.0, 1.0))  // Scale and clamp
-                
-                // Use correlation as measurement instead of beta (bounded and stable)
-                measurement := not na(rho_measurement) ? rho_measurement : ltf_kalman_beta
-            else
-                // During warmup, use simple beta calculation
-                measurement := ltf_kalman_beta
-            
-            // Kalman predict step
-            float beta_pred = ltf_kalman_beta
-            float P_pred = ltf_kalman_P + ltf_kalman_Q
-            
-            // Observation equation: measurement = beta_pred + innovation
-            // Direct correlation measurement (bounded [-1,+1])
-            float innov = measurement - beta_pred
-            
-            // Kalman update equations (simplified for direct correlation)
-            float S = P_pred + ltf_kalman_R  // Innovation covariance
-            float K = P_pred / S             // Kalman gain
-            
-            // Update state and covariance
-            ltf_kalman_beta := beta_pred + K * innov
-            ltf_kalman_P := (1.0 - K) * P_pred
-            
-            // Output is already correlation (no conversion needed)
-            ltf_corr_raw := math.max(-1.0, math.min(ltf_kalman_beta, 1.0))
+            // FIX 2: compute proper Pearson rho from recent LTF return pairs
+            // Normalize by rolling stdev product — not an arbitrary constant
+            int corr_win = math.min(20, math.min(pri_last, bas_last))
+            float measurement = ltf_kalman_beta  // fallback
+
+            if ltf_kalman_bar_count > 10 and corr_win >= 5
+                float sum_xy = 0.0, float sum_xx = 0.0, float sum_yy = 0.0
+                int valid = 0
+                for i = 1 to corr_win - 1
+                    if pri_last >= i and bas_last >= i
+                        float ry = math.log(array.get(ltf_pri_close, pri_last - i + 1) / array.get(ltf_pri_close, pri_last - i))
+                        float rx = math.log(array.get(ltf_bas_close, bas_last - i + 1) / array.get(ltf_bas_close, bas_last - i))
+                        if math.abs(ry) > 1e-10 and math.abs(rx) > 1e-10
+                            sum_xy += ry * rx
+                            sum_xx += rx * rx
+                            sum_yy += ry * ry
+                            valid  += 1
+                if valid >= 3
+                    float denom_rho = math.sqrt(sum_xx * sum_yy)
+                    measurement := denom_rho > 1e-10 ? math.max(-1.0, math.min(sum_xy / denom_rho, 1.0)) : ltf_kalman_beta
+
+            // Kalman update
+            float P_pred  = ltf_kalman_P + ltf_kalman_Q
+            float innov   = measurement - ltf_kalman_beta
+            float S       = P_pred + ltf_kalman_R
+            float K       = P_pred / S
+            ltf_kalman_beta := math.max(-1.0, math.min(ltf_kalman_beta + K * innov, 1.0))
+            ltf_kalman_P    := (1.0 - K) * P_pred
+            ltf_corr_raw    := ltf_kalman_beta
         else
-            ltf_corr_raw := ltf_kalman_beta  // Use previous estimate if x_t too small
-            
+            ltf_corr_raw := ltf_kalman_beta
+
     ltf_prev_pri := pri_price
     ltf_prev_bas := bas_price
 
-// Kalman IS the smoother — no separate EMA pass needed
+// FIX 3: apply ltf_ema_smooth (was hardwired bypass)
 var float ltf_corr_ema = na
 if not na(ltf_corr_raw)
-    ltf_corr_ema := ltf_corr_raw
+    ltf_corr_ema := na(ltf_corr_ema) ? ltf_corr_raw : ltf_corr_ema + (2.0 / (ltf_ema_smooth + 1)) * (ltf_corr_raw - ltf_corr_ema)
 
-// LTF Z-score computation (moved early for SubPane + f_norm_system)
-float ltf_rho_mean = ta.sma(nz(ltf_corr_ema, 0.0), 2 * ltf_corr_len)
-float ltf_rho_stdev = ta.stdev(nz(ltf_corr_ema, 0.0), 2 * ltf_rho_mean > 0 ? 2 * ltf_corr_len : 100)
+// FIX 6: parenthesise ternary to avoid operator-precedence ambiguity
+int _ltf_z_len = 2 * ltf_corr_len
+float ltf_rho_mean  = ta.sma(nz(ltf_corr_ema, 0.0), _ltf_z_len)
+float ltf_rho_stdev = ta.stdev(nz(ltf_corr_ema, 0.0), _ltf_z_len)
 float ltf_rho_z = ltf_rho_stdev > 0 ? (nz(ltf_corr_ema, 0.0) - ltf_rho_mean) / ltf_rho_stdev : 0.0
 
 // LTF Decoupling/Recoupling Detection
