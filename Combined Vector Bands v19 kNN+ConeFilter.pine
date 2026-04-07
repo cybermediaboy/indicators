@@ -1077,7 +1077,7 @@ if ltf_calc_active and array.size(ltf_pri_close) > 1 and array.size(ltf_bas_clos
             int corr_win = math.min(20, math.min(pri_last, bas_last))
             float measurement = ltf_kalman_beta  // fallback
 
-            if ltf_kalman_bar_count > 10 and corr_win >= 5
+            if ltf_kalman_bar_count > 10 and corr_win >= 3
                 float sum_xy = 0.0, float sum_xx = 0.0, float sum_yy = 0.0
                 int valid = 0
                 for i = 1 to corr_win - 1
