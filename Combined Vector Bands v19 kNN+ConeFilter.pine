@@ -1108,12 +1108,12 @@ if ltf_calc_active and array.size(ltf_pri_close) > 1 and array.size(ltf_bas_clos
             log.info("LTF_KALMAN,bar={0},count={1},x_t_zero=true,beta={2}", bar_index, ltf_kalman_bar_count, ltf_kalman_beta)
     else
         log.info("LTF_KALMAN,bar={0},count={1},prev_na=true,prev_pri={2},prev_bas={3}", bar_index, ltf_kalman_bar_count, ltf_prev_pri, ltf_prev_bas)
-else if ltf_calc_active
-    // DEBUG: Log why correlation calculation was skipped
-    log.info("LTF_SKIP,bar={0},pri_size={1},bas_size={2},active={3}", bar_index, array.size(ltf_pri_close), array.size(ltf_bas_close), ltf_calc_active)
 
     ltf_prev_pri := pri_price
     ltf_prev_bas := bas_price
+else if ltf_calc_active
+    // DEBUG: Log why correlation calculation was skipped
+    log.info("LTF_SKIP,bar={0},pri_size={1},bas_size={2},active={3}", bar_index, array.size(ltf_pri_close), array.size(ltf_bas_close), ltf_calc_active)
 
 // FIX 3: apply ltf_ema_smooth (was hardwired bypass)
 var float ltf_corr_ema = na
