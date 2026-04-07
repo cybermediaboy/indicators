@@ -1025,6 +1025,8 @@ if ltf_calc_active and array.size(ltf_sym1_close) > 0 and array.size(ltf_sym2_cl
     ltf_bas_close := array.new<float>(basket_size)
     for i = 0 to basket_size - 1
         array.set(ltf_bas_close, i, (array.get(ltf_sym1_close, i) + array.get(ltf_sym2_close, i) + array.get(ltf_sym3_close, i) + array.get(ltf_sym4_close, i)) / 4.0)
+    // DEBUG: Log basket array sizes
+    log.info("LTF_DEBUG,bar={0},pri={1},bas={2},s1={3},s2={4},s3={5},s4={6}", bar_index, array.size(ltf_pri_close), basket_size, array.size(ltf_sym1_close), array.size(ltf_sym2_close), array.size(ltf_sym3_close), array.size(ltf_sym4_close))
 
 float current_intrabar_vwap = na
 if ltf_calc_active and array.size(ltf_pri_close) > 0 and array.size(ltf_pri_volume) > 0
@@ -1099,8 +1101,16 @@ if ltf_calc_active and array.size(ltf_pri_close) > 1 and array.size(ltf_bas_clos
             ltf_kalman_beta := math.max(-1.0, math.min(ltf_kalman_beta + K * innov, 1.0))
             ltf_kalman_P    := (1.0 - K) * P_pred
             ltf_corr_raw    := ltf_kalman_beta
+            // DEBUG: Log Kalman correlation calculation
+            log.info("LTF_KALMAN,bar={0},count={1},corr_win={2},meas={3},beta={4},raw={5}", bar_index, ltf_kalman_bar_count, corr_win, measurement, ltf_kalman_beta, ltf_corr_raw)
         else
             ltf_corr_raw := ltf_kalman_beta
+            log.info("LTF_KALMAN,bar={0},count={1},x_t_zero=true,beta={2}", bar_index, ltf_kalman_bar_count, ltf_kalman_beta)
+    else
+        log.info("LTF_KALMAN,bar={0},count={1},prev_na=true,prev_pri={2},prev_bas={3}", bar_index, ltf_kalman_bar_count, ltf_prev_pri, ltf_prev_bas)
+else if ltf_calc_active
+    // DEBUG: Log why correlation calculation was skipped
+    log.info("LTF_SKIP,bar={0},pri_size={1},bas_size={2},active={3}", bar_index, array.size(ltf_pri_close), array.size(ltf_bas_close), ltf_calc_active)
 
     ltf_prev_pri := pri_price
     ltf_prev_bas := bas_price
@@ -1109,6 +1119,9 @@ if ltf_calc_active and array.size(ltf_pri_close) > 1 and array.size(ltf_bas_clos
 var float ltf_corr_ema = na
 if not na(ltf_corr_raw)
     ltf_corr_ema := na(ltf_corr_ema) ? ltf_corr_raw : ltf_corr_ema + (2.0 / (ltf_ema_smooth + 1)) * (ltf_corr_raw - ltf_corr_ema)
+    log.info("LTF_EMA,bar={0},raw={1},ema={2},smooth={3}", bar_index, ltf_corr_raw, ltf_corr_ema, ltf_ema_smooth)
+else
+    log.info("LTF_EMA,bar={0},raw_na=true,ema={1}", bar_index, ltf_corr_ema)
 
 // FIX 6: parenthesise ternary to avoid operator-precedence ambiguity
 int _ltf_z_len = 2 * ltf_corr_len
@@ -1118,6 +1131,7 @@ if not na(ltf_corr_ema)
 float ltf_rho_mean  = ta.sma(ltf_corr_ema, _ltf_z_len)
 float ltf_rho_stdev = ta.stdev(ltf_corr_ema, _ltf_z_len)
 float ltf_rho_z = (ltf_z_warmup >= _ltf_z_len and ltf_rho_stdev > 1e-6) ? (ltf_corr_ema - ltf_rho_mean) / ltf_rho_stdev : 0.0
+log.info("LTF_ZSCORE,bar={0},warmup={1},zlen={2},mean={3},stdev={4},z={5},ema={6}", bar_index, ltf_z_warmup, _ltf_z_len, ltf_rho_mean, ltf_rho_stdev, ltf_rho_z, ltf_corr_ema)
 
 // LTF Decoupling/Recoupling Detection
 var bool ltf_is_decoupled = false
