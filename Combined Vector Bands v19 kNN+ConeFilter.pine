@@ -1112,9 +1112,12 @@ if not na(ltf_corr_raw)
 
 // FIX 6: parenthesise ternary to avoid operator-precedence ambiguity
 int _ltf_z_len = 2 * ltf_corr_len
-float ltf_rho_mean  = ta.sma(nz(ltf_corr_ema, 0.0), _ltf_z_len)
-float ltf_rho_stdev = ta.stdev(nz(ltf_corr_ema, 0.0), _ltf_z_len)
-float ltf_rho_z = ltf_rho_stdev > 0 ? (nz(ltf_corr_ema, 0.0) - ltf_rho_mean) / ltf_rho_stdev : 0.0
+var int ltf_z_warmup = 0
+if not na(ltf_corr_ema)
+    ltf_z_warmup := ltf_z_warmup + 1
+float ltf_rho_mean  = ta.sma(ltf_corr_ema, _ltf_z_len)
+float ltf_rho_stdev = ta.stdev(ltf_corr_ema, _ltf_z_len)
+float ltf_rho_z = (ltf_z_warmup >= _ltf_z_len and ltf_rho_stdev > 1e-6) ? (ltf_corr_ema - ltf_rho_mean) / ltf_rho_stdev : 0.0
 
 // LTF Decoupling/Recoupling Detection
 var bool ltf_is_decoupled = false
