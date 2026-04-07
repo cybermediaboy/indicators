@@ -1,0 +1,378 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © cybermediaboy
+
+//@version=6
+library("BasketLib", overlay=true)
+
+import cybermediaboy/TAUtilityLib/45 as TAUtilityLib
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BASKET AUTO SCAN - CORRELATION-BASED RANKING
+// ═══════════════════════════════════════════════════════════════════════════
+// Automatically selects top 4 correlated assets from a pool of 10 candidates
+// Uses rolling correlation + EMA smoothing for stable basket composition
+// Supports basket latching (one-time selection) or periodic rescanning
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SCAN CANDIDATE STRUCTURE
+// ═══════════════════════════════════════════════════════════════════════════
+export type ScanCandidate
+    string symbol
+    float price
+    float return_1bar
+    float correlation_raw
+    float correlation_ema
+    float score
+    bool is_self
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BASKET SELECTION RESULT
+// ═══════════════════════════════════════════════════════════════════════════
+export type BasketSelection
+    string sym1
+    string sym2
+    string sym3
+    string sym4
+    float score1
+    float score2
+    float score3
+    float score4
+    int idx1
+    int idx2
+    int idx3
+    int idx4
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CALCULATE SCAN CORRELATION SCORES (BATCH)
+// ═══════════════════════════════════════════════════════════════════════════
+// Calculates correlation scores for multiple scan candidates in one call
+// Returns array of scores with all intermediate calculations in function scope
+// Generic implementation - works with any base asset and scan candidate set
+//
+// @param base_ret Base asset 1-bar return
+// @param scan_prices Array of scan candidate prices (typically 10)
+// @param scan_syms Array of scan candidate symbols (typically 10)
+// @param corr_len Correlation calculation length
+// @param smooth_len EMA smoothing length for correlation
+// @param base_ticker Base asset ticker for self-reference check
+// @returns Array of correlation scores (na or -1.0 for invalid, 0-1 for valid)
+export f_calc_scan_correlation_scores(float base_ret, array<float> scan_prices, array<string> scan_syms,
+                                       int corr_len, int smooth_len, string base_ticker) =>
+    int num_candidates = array.size(scan_prices)
+    array<float> scores = array.new<float>(num_candidates, -1.0)
+    
+    // Process each candidate
+    for i = 0 to num_candidates - 1
+        float candidate_price = array.get(scan_prices, i)
+        string candidate_sym = array.get(scan_syms, i)
+        
+        // Calculate 1-bar return
+        float candidate_ret = ta.roc(candidate_price, 1)
+        
+        // Calculate raw correlation
+        float corr_raw = ta.correlation(base_ret, candidate_ret, corr_len)
+        
+        // Smooth correlation with EMA
+        float corr_ema = ta.ema(corr_raw, smooth_len)
+        
+        // Check self-reference
+        bool is_self = str.contains(str.upper(candidate_sym), str.upper(base_ticker))
+        
+        // Calculate final score (70% raw + 30% smoothed, filter negatives and self-refs)
+        float final_score = is_self or na(corr_raw) or na(corr_ema) ? na : 
+                           (corr_raw > 0 ? corr_raw * 0.7 + math.max(0, corr_ema) * 0.3 : na)
+        
+        // Store score (use -1.0 for invalid instead of na for array compatibility)
+        array.set(scores, i, nz(final_score, -1.0))
+    
+    scores
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CALCULATE CORRELATION SCORE (SINGLE)
+// ═══════════════════════════════════════════════════════════════════════════
+// Blends raw correlation with EMA-smoothed correlation for stability
+// Filters out negative correlations and self-references
+//
+// @param base_return Base asset 1-bar return
+// @param candidate_return Candidate asset 1-bar return
+// @param corr_len Correlation calculation length
+// @param smooth_len EMA smoothing length
+// @param is_self Whether candidate is the base asset itself
+// @returns Correlation score (0.7 * raw + 0.3 * ema), or na if invalid
+export f_calc_correlation_score(float base_return, float candidate_return, int corr_len, int smooth_len, bool is_self) =>
+    if is_self
+        na
+    else
+        float corr_raw = ta.correlation(base_return, candidate_return, corr_len)
+        float corr_ema = ta.ema(corr_raw, smooth_len)
+        
+        // Only accept positive correlations
+        if na(corr_raw) or na(corr_ema) or corr_raw <= 0
+            na
+        else
+            // Blend raw and smoothed (70% raw, 30% ema)
+            corr_raw * 0.7 + math.max(0, corr_ema) * 0.3
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RANK AND SELECT TOP N ASSETS
+// ═══════════════════════════════════════════════════════════════════════════
+// Selects top N assets by correlation score using greedy selection
+// Returns indices of selected assets in descending score order
+//
+// @param scores Array of correlation scores
+// @param n Number of assets to select (typically 4)
+// @returns Array of selected indices [idx1, idx2, idx3, idx4]
+export f_rank_and_select(array<float> scores, int n) =>
+    array<int> selected_indices = array.new<int>()
+    array<float> working_scores = array.copy(scores)
+    
+    for pick = 0 to n - 1
+        float best_score = -1.0
+        int best_idx = -1
+        
+        // Find highest score
+        for idx = 0 to array.size(working_scores) - 1
+            float candidate_score = array.get(working_scores, idx)
+            if candidate_score > best_score
+                best_score := candidate_score
+                best_idx := idx
+        
+        // Add to selection and mark as used
+        if best_idx >= 0
+            array.push(selected_indices, best_idx)
+            array.set(working_scores, best_idx, -1.0)
+    
+    selected_indices
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CHECK IF ASSET IS SELF-REFERENCE
+// ═══════════════════════════════════════════════════════════════════════════
+// Checks if candidate symbol contains the base asset ticker
+// Prevents selecting the same asset as part of its own basket
+//
+// @param candidate_symbol Full symbol string (e.g., "BINANCE:BTCUSDT")
+// @param base_ticker Base asset ticker (e.g., "BTC")
+// @returns True if candidate is the base asset
+export f_is_self_reference(string candidate_symbol, string base_ticker) =>
+    str.contains(str.upper(candidate_symbol), str.upper(base_ticker))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ROUTE SCAN INDEX TO PRICE
+// ═══════════════════════════════════════════════════════════════════════════
+// Maps integer index to corresponding scan candidate price
+// Used for compile-time safe routing in Auto Scan mode
+//
+// @param idx Index (0-9)
+// @param prices Array of 10 scan candidate prices
+// @returns Price at index, or na if invalid
+export f_route_scan_idx(int idx, array<float> prices) =>
+    if idx < 0 or idx >= array.size(prices)
+        na
+    else
+        array.get(prices, idx)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PRESET BASKET CONFIGURATIONS
+// ═══════════════════════════════════════════════════════════════════════════
+// Returns predefined basket symbols for common presets
+//
+// @param preset_name Name of preset ("Basket B (Memes)", etc.)
+// @returns [sym1, sym2, sym3, sym4, sym5, use_sym5]
+export f_get_preset_basket(string preset_name) =>
+    string sym1 = "BINANCE:ETHUSDT"
+    string sym2 = "BINANCE:SOLUSDT"
+    string sym3 = "BINANCE:BNBUSDT"
+    string sym4 = "BINANCE:APTUSDT"
+    string sym5 = "BINANCE:DOGEUSDT"
+    bool use_sym5 = false
+    
+    if preset_name == "Basket B (Memes)"
+        sym1 := "BINANCE:DOGEUSDT"
+        sym2 := "BINANCE:SHIBUSDT"
+        sym3 := "BINANCE:BONKUSDT"
+        sym4 := "BINANCE:SOLUSDT"
+        sym5 := "BINANCE:DOGEUSDT"
+        use_sym5 := false
+    else if preset_name == "Basket C (DeFi + New L1)"
+        sym1 := "BINANCE:ETHUSDT"
+        sym2 := "BINANCE:SOLUSDT"
+        sym3 := "BINANCE:APTUSDT"
+        sym4 := "BINANCE:BNBUSDT"
+        sym5 := "BINANCE:DOGEUSDT"
+        use_sym5 := false
+    else if preset_name == "Basket D (Universal 5)"
+        sym1 := "BINANCE:ETHUSDT"
+        sym2 := "BINANCE:SOLUSDT"
+        sym3 := "BINANCE:DOGEUSDT"
+        sym4 := "BINANCE:APTUSDT"
+        sym5 := "BINANCE:BNBUSDT"
+        use_sym5 := true
+    else if preset_name == "Basket E (TON Niches)"
+        sym1 := "BINANCE:ETHUSDT"
+        sym2 := "BINANCE:BTCUSDT"
+        sym3 := "BINANCE:TONUSDT"
+        sym4 := "BINANCE:AVAXUSDT"
+        sym5 := "BINANCE:DOGEUSDT"
+        use_sym5 := false
+    
+    [sym1, sym2, sym3, sym4, sym5, use_sym5]
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DEFAULT SCAN CANDIDATES
+// ═══════════════════════════════════════════════════════════════════════════
+// Returns array of 10 default scan candidate symbols
+export f_get_default_scan_symbols() =>
+    array<string> symbols = array.new<string>(10)
+    array.set(symbols, 0, "BINANCE:BTCUSDT")
+    array.set(symbols, 1, "BINANCE:ETHUSDT")
+    array.set(symbols, 2, "BINANCE:SOLUSDT")
+    array.set(symbols, 3, "BINANCE:BNBUSDT")
+    array.set(symbols, 4, "BINANCE:DOGEUSDT")
+    array.set(symbols, 5, "BINANCE:SHIBUSDT")
+    array.set(symbols, 6, "BINANCE:BONKUSDT")
+    array.set(symbols, 7, "BINANCE:APTUSDT")
+    array.set(symbols, 8, "BINANCE:TONUSDT")
+    array.set(symbols, 9, "BINANCE:AVAXUSDT")
+    symbols
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CALCULATE BASKET FIT PERCENTAGE
+// ═══════════════════════════════════════════════════════════════════════════
+// Calculates average correlation score as basket fit quality metric
+//
+// @param score1 Correlation score of asset 1
+// @param score2 Correlation score of asset 2
+// @param score3 Correlation score of asset 3
+// @param score4 Correlation score of asset 4
+// @returns Basket fit percentage (0-100)
+export f_calc_basket_fit(float score1, float score2, float score3, float score4) =>
+    float avg_score = (nz(score1, 0) + nz(score2, 0) + nz(score3, 0) + nz(score4, 0)) / 4.0
+    math.min(100.0, avg_score * 100.0)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BASKET FIT QUALITY LABEL
+// ═══════════════════════════════════════════════════════════════════════════
+// Returns quality label based on basket fit percentage
+//
+// @param fit_pct Basket fit percentage (0-100)
+// @returns Quality label ("Excellent", "Good", "Fair", "Poor")
+export f_get_fit_label(float fit_pct) =>
+    if fit_pct >= 70
+        "Excellent"
+    else if fit_pct >= 50
+        "Good"
+    else if fit_pct >= 30
+        "Fair"
+    else
+        "Poor"
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BASKET FIT COLOR
+// ═══════════════════════════════════════════════════════════════════════════
+// Returns color based on basket fit quality
+//
+// @param fit_pct Basket fit percentage (0-100)
+// @returns Color (lime, aqua, orange, red)
+export f_get_fit_color(float fit_pct) =>
+    if fit_pct >= 70
+        color.lime
+    else if fit_pct >= 50
+        color.aqua
+    else if fit_pct >= 30
+        color.orange
+    else
+        color.red
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PROCESS AUTO SCAN PIPELINE
+// ═══════════════════════════════════════════════════════════════════════════
+// Main Auto Scan logic: ranks 10 candidates by correlation score and selects top 4
+// Supports basket latching (one-time selection) or periodic rescanning
+//
+// @param scan_scores Array of 10 correlation scores
+// @param scan_symbols Array of 10 candidate symbols
+// @param basket_scan_ready Whether warmup period is complete
+// @param basket_latched Whether basket has been latched (var state)
+// @param basket_rescan_due Whether rescan is due (based on interval)
+// @param fallback_sym1-4 Default symbols to use before warmup
+// @param fallback_use_sym5 Whether to use 5th symbol in fallback
+// @returns [sym1, sym2, sym3, sym4, sym5, use_sym5, auto_score_1-4, scan_idx_1-4, basket_mode_label, new_basket_latched]
+export f_process_auto_scan(
+     array<float> scan_scores, 
+     array<string> scan_symbols,
+     bool basket_scan_ready,
+     bool basket_latched,
+     bool basket_rescan_due,
+     string fallback_sym1,
+     string fallback_sym2,
+     string fallback_sym3,
+     string fallback_sym4,
+     string fallback_sym5,
+     bool fallback_use_sym5,
+     int prev_scan_idx_1,
+     int prev_scan_idx_2,
+     int prev_scan_idx_3,
+     int prev_scan_idx_4) =>
+    
+    // Initialize outputs with fallback values
+    string sym1 = fallback_sym1
+    string sym2 = fallback_sym2
+    string sym3 = fallback_sym3
+    string sym4 = fallback_sym4
+    string sym5 = fallback_sym5
+    bool use_sym5 = fallback_use_sym5
+    float auto_score_1 = na
+    float auto_score_2 = na
+    float auto_score_3 = na
+    float auto_score_4 = na
+    int scan_idx_1 = prev_scan_idx_1
+    int scan_idx_2 = prev_scan_idx_2
+    int scan_idx_3 = prev_scan_idx_3
+    int scan_idx_4 = prev_scan_idx_4
+    string basket_mode_label = basket_scan_ready ? "Auto Ready" : "Auto Warmup"
+    bool new_basket_latched = basket_latched
+    
+    // Process Auto Scan if ready and not latched (or rescan is due)
+    if basket_scan_ready and (not basket_latched or basket_rescan_due)
+        array<float> ranked_scores = array.copy(scan_scores)
+        
+        // Select top 4 by greedy ranking
+        for pick = 0 to 3
+            float best_score = -1.0
+            int best_idx = -1
+            
+            // Find highest score
+            for idx = 0 to 9
+                float candidate_score = array.get(ranked_scores, idx)
+                if candidate_score > best_score
+                    best_score := candidate_score
+                    best_idx := idx
+            
+            // Assign to output slot
+            if best_idx >= 0
+                string best_sym = array.get(scan_symbols, best_idx)
+                if pick == 0
+                    sym1 := best_sym
+                    auto_score_1 := best_score
+                    scan_idx_1 := best_idx
+                else if pick == 1
+                    sym2 := best_sym
+                    auto_score_2 := best_score
+                    scan_idx_2 := best_idx
+                else if pick == 2
+                    sym3 := best_sym
+                    auto_score_3 := best_score
+                    scan_idx_3 := best_idx
+                else
+                    sym4 := best_sym
+                    auto_score_4 := best_score
+                    scan_idx_4 := best_idx
+                
+                // Mark as used
+                array.set(ranked_scores, best_idx, -1.0)
+        
+        use_sym5 := false
+        basket_mode_label := "Auto 10→4"
+        new_basket_latched := true
+    
+    [sym1, sym2, sym3, sym4, sym5, use_sym5, auto_score_1, auto_score_2, auto_score_3, auto_score_4, scan_idx_1, scan_idx_2, scan_idx_3, scan_idx_4, basket_mode_label, new_basket_latched]

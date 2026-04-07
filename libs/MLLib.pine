@@ -1,0 +1,111 @@
+//@version=6
+// @description Machine Learning Library - Adaptive learning algorithms for parameter optimization
+library("MLLib", overlay = false)
+
+// @type SGD learning state for tracking parameter updates
+// @field param Current parameter value
+// @field updates Number of updates performed
+// @field last_error Last prediction error
+export type SGDState
+    float param
+    int updates = 0
+    float last_error = na
+
+// @function Pivot-based SGD for adaptive sensitivity tuning (Kirschenbaum method)
+// @param feature_z Z-score of the predictive feature (e.g., basket vector)
+// @param baseline_ma Baseline moving average (center line)
+// @param baseline_dev Standard deviation for band calculation
+// @param pivot_high Recent pivot high price (na if none)
+// @param pivot_low Recent pivot low price (na if none)
+// @param sensitivity_current Current sensitivity parameter value
+// @param learning_rate Learning rate for SGD updates
+// @param sensitivity_min Minimum allowed sensitivity value
+// @param sensitivity_max Maximum allowed sensitivity value
+// @param coupling_strength Coupling strength for gating updates (0-1)
+// @param coupling_gate Minimum coupling threshold for updates
+// @param pivot_lookback Lookback period to historical feature/price at pivot
+// @param proximity_pct Proximity threshold (0-1) for pivot to be "near band"
+// @param survival_prob Survival probability for band calculation (e.g., 0.68 for 1-sigma)
+// @returns [new_sensitivity, update_count] Updated sensitivity and number of updates performed
+export f_kirschenbaum_sgd(float feature_z, float baseline_ma, float baseline_dev, float pivot_high, float pivot_low, float sensitivity_current, float learning_rate, float sensitivity_min, float sensitivity_max, float coupling_strength, float coupling_gate, int pivot_lookback, float proximity_pct, float survival_prob) =>
+    float sens_out = sensitivity_current
+    int updates = 0
+    
+    // Process pivot high (resistance test)
+    if not na(pivot_high)
+        float hist_feature_z = nz(feature_z[pivot_lookback])
+        float hist_ma = nz(baseline_ma[pivot_lookback])
+        float hist_dev = nz(baseline_dev[pivot_lookback])
+        
+        if hist_dev > 0
+            // Calculate predicted band using historical feature
+            float hist_shift = hist_feature_z * sensitivity_current
+            float pred_up = hist_ma + hist_dev * math.sqrt(-2.0 * math.log(1.0 - survival_prob)) + hist_shift
+            
+            // Check if pivot was near the predicted band
+            float dist_to_ma = pivot_high - hist_ma
+            float band_width = pred_up - hist_ma
+            float proximity = band_width > 0 ? dist_to_ma / band_width : 0.0
+            
+            if proximity_pct >= 1.0 or (proximity >= (1.0 - proximity_pct))
+                // Calculate prediction error
+                float pred_z = (pred_up - hist_ma) / hist_dev
+                float actual_z = (pivot_high - hist_ma) / hist_dev
+                float error = pred_z - actual_z
+                
+                // SGD update with coupling gate
+                float gradient = error * hist_feature_z
+                float effective_lr = learning_rate
+                if coupling_strength < coupling_gate
+                    effective_lr *= coupling_strength / coupling_gate
+                
+                sens_out := math.max(sensitivity_min, math.min(sensitivity_max, sens_out - effective_lr * gradient))
+                updates += 1
+    
+    // Process pivot low (support test)
+    if not na(pivot_low)
+        float hist_feature_z = nz(feature_z[pivot_lookback])
+        float hist_ma = nz(baseline_ma[pivot_lookback])
+        float hist_dev = nz(baseline_dev[pivot_lookback])
+        
+        if hist_dev > 0
+            // Calculate predicted band using historical feature
+            float hist_shift = hist_feature_z * sensitivity_current
+            float pred_dn = hist_ma - hist_dev * math.sqrt(-2.0 * math.log(1.0 - survival_prob)) + hist_shift
+            
+            // Check if pivot was near the predicted band
+            float dist_to_ma = hist_ma - pivot_low
+            float band_width = hist_ma - pred_dn
+            float proximity = band_width > 0 ? dist_to_ma / band_width : 0.0
+            
+            if proximity_pct >= 1.0 or (proximity >= (1.0 - proximity_pct))
+                // Calculate prediction error (note: inverted for lower band)
+                float pred_z = (hist_ma - pred_dn) / hist_dev
+                float actual_z = (hist_ma - pivot_low) / hist_dev
+                float error = pred_z - actual_z
+                
+                // SGD update with coupling gate (inverted gradient for lower band)
+                float gradient = error * hist_feature_z * -1.0
+                float effective_lr = learning_rate
+                if coupling_strength < coupling_gate
+                    effective_lr *= coupling_strength / coupling_gate
+                
+                sens_out := math.max(sensitivity_min, math.min(sensitivity_max, sens_out - effective_lr * gradient))
+                updates += 1
+    
+    [sens_out, updates]
+
+// @function Generic SGD parameter update with optional gating
+// @param param_current Current parameter value
+// @param gradient Gradient (error * feature)
+// @param learning_rate Learning rate
+// @param param_min Minimum parameter value
+// @param param_max Maximum parameter value
+// @param gate_strength Gating strength (0-1, optional)
+// @param gate_threshold Minimum gate strength to allow full update
+// @returns float Updated parameter value
+export f_sgd_update(float param_current, float gradient, float learning_rate, float param_min, float param_max, float gate_strength, float gate_threshold) =>
+    float effective_lr = learning_rate
+    if gate_strength < gate_threshold
+        effective_lr *= gate_strength / gate_threshold
+    math.max(param_min, math.min(param_max, param_current - effective_lr * gradient))

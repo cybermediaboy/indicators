@@ -1,0 +1,176 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © cybermediaboy
+//test line
+//@version=6
+library("BandsLib", overlay=true)
+
+import cybermediaboy/TAUtilityLib/45 as TAUtilityLib
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SURVIVAL BANDS CALCULATION
+// ═══════════════════════════════════════════════════════════════════════════
+// Calculates asymmetric survival bands based on probability, shift, and mean reversion
+// Uses exponential probability adjustment and z-score conversion
+//
+// @param basis Base price level (MA, median, etc.)
+// @param dev Standard deviation or volatility measure
+// @param shift_z Directional shift factor (e.g., vector pressure, momentum)
+// @param prob_pct Survival probability percentage (e.g., 10 = 10%)
+// @param mr_shift Mean reversion shift (optional, contrarian to shift_z)
+// @returns [band_upper, band_lower] Tuple of upper and lower survival bands
+export f_calc_survival_bands(float basis, float dev, float shift_z, float prob_pct, float mr_shift) =>
+    // Convert percentage to probability (e.g. 10% -> 0.1)
+    float prob = prob_pct / 100.0
+    
+    // Apply Shift (Vector Pressure + Optional MR Factor)
+    // Positive Shift (Bullish) -> Upper Band expands (Prob decreases), Lower Band contracts (Prob increases)
+    // MR shift: positive MR (price > FV) suggests mean reversion down -> bearish shift
+    // Negative MR (price < FV) suggests mean reversion up -> bullish shift
+    float combined_shift = shift_z - mr_shift  // Subtract because MR is contrarian
+    float bound_shift = TAUtilityLib.f_tanh(combined_shift)
+    
+    // Adjust Probabilities
+    // Use ln(2) = 0.693 scaling from TKBY5
+    float adj_prob_upper = prob * math.exp(-bound_shift * 0.693)
+    float adj_prob_lower = prob * math.exp(bound_shift * 0.693)
+    
+    // Clamp
+    adj_prob_upper := math.max(0.0001, math.min(adj_prob_upper, 0.5))
+    adj_prob_lower := math.max(0.0001, math.min(adj_prob_lower, 0.5))
+    
+    // Convert to Z-score
+    float z_upper = math.sqrt(-2.0 * math.log(adj_prob_upper))
+    float z_lower = math.sqrt(-2.0 * math.log(adj_prob_lower))
+    
+    // Calculate Bands
+    float band_upper = basis + (z_upper * dev)
+    float band_lower = basis - (z_lower * dev)
+    
+    [band_upper, band_lower]
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SQUEEZE DETECTION
+// ═══════════════════════════════════════════════════════════════════════════
+// Detects band squeeze (low volatility) and breakout confirmation
+// Uses bandwidth percentile, ROC, and volume expansion
+//
+// @param band_up Upper band level
+// @param band_dn Lower band level
+// @param price Current price
+// @param damping Correlation damping factor (0-1)
+// @returns [sq_bull, sq_bear, final_squeeze, bw_pct] Tuple of bullish/bearish squeeze signals and bandwidth percentile
+export f_detect_squeeze(float band_up, float band_dn, float price, float damping) =>
+    float bw = band_up - band_dn
+    float bw_roc = (bw - nz(bw[1])) / math.max(nz(bw[1]), syminfo.mintick)
+    float bw_roc2 = bw_roc - nz(bw_roc[1])
+    float bw_min_30 = ta.lowest(bw, 30)
+    bool is_squeeze = bw < bw_min_30 * 1.05
+    bool bw_expanding = bw_roc > 0.0 and (bw_roc2 > 0.0 or nz(bw_roc2[1]) > 0.0)
+    bool bottleneck_break = is_squeeze[1] and bw_expanding
+    
+    // Bandwidth percentile calculation
+    float _bw_pct = 0.0
+    int bw_pct_len = 100
+    for i = 0 to bw_pct_len - 1
+        if bw >= nz(bw[i])
+            _bw_pct += 1.0
+    _bw_pct := _bw_pct / bw_pct_len
+    
+    // Volume expansion detection
+    float vol_short = ta.stdev(price, 5)
+    float vol_long = ta.stdev(price, 30)
+    float vol_ratio = vol_short / math.max(vol_long, syminfo.mintick)
+    float bw_roc_z = bw_roc / math.max(ta.stdev(bw_roc, 20), 0.001)
+    bool expand_by_bw = bw_roc_z > 1.5
+    bool expand_by_vol = ta.crossover(vol_ratio, 0.80) and nz(vol_ratio[3]) < 0.65
+    bool expansion_confirmed = expand_by_bw or expand_by_vol
+    
+    // Final squeeze confirmation
+    float squeeze_intensity = math.max(0.0, 1.0 - _bw_pct)
+    bool confirmed_break = squeeze_intensity > 0.70 and expansion_confirmed and bottleneck_break
+    float break_dir = math.sign(price - nz(price[3], price))
+    bool dir_ok = damping > 0.4
+    bool _final_sq = confirmed_break and dir_ok
+    bool sq_bull = _final_sq and break_dir > 0
+    bool sq_bear = _final_sq and break_dir < 0
+    
+    [sq_bull, sq_bear, _final_sq, _bw_pct]
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CONFLUENCE DETECTION
+// ═══════════════════════════════════════════════════════════════════════════
+// Detects price levels where multiple technical levels converge
+// Clusters levels within ATR tolerance and draws boxes for significant confluences
+//
+// @param basis Base price level (MA, median, etc.)
+// @param fv Fair value or equilibrium price
+// @param dev Standard deviation or volatility measure
+// @param tol_mult ATR multiplier for clustering tolerance
+// @param min_lines Minimum number of converging lines to trigger confluence
+export f_detect_confluence(float basis, float fv, float dev, float tol_mult, int min_lines) =>
+    float atr_tol = ta.atr(14) * tol_mult
+    var array<float> levels = array.new<float>()
+    array.clear(levels)
+    array.push(levels, basis)
+    array.push(levels, fv)
+    
+    // Add deviation-based levels
+    if dev > 0
+        for k = 1 to 6
+            float mult = k * 0.5
+            array.push(levels, basis + mult * dev)
+            array.push(levels, basis - mult * dev)
+            if math.abs(fv - basis) > atr_tol * 2
+                array.push(levels, fv + mult * dev)
+                array.push(levels, fv - mult * dev)
+    
+    array.sort(levels, order.ascending)
+    var array<float> prev_cluster_levels = array.new<float>()
+    var array<float> next_cluster_levels = array.new<float>()
+    array.clear(next_cluster_levels)
+    
+    int n_levels = array.size(levels)
+    if n_levels > 0
+        int i = 0
+        while i < n_levels
+            float base_level = array.get(levels, i)
+            int current_count = 1
+            float current_sum = base_level
+            int j = i + 1
+            while j < n_levels
+                float check_level = array.get(levels, j)
+                if check_level - base_level <= atr_tol
+                    current_count += 1
+                    current_sum += check_level
+                    j += 1
+                else
+                    break
+            
+            if current_count >= min_lines
+                float avg_level = current_sum / current_count
+                array.push(next_cluster_levels, avg_level)
+                
+                // Draw confluence box
+                bool is_new = true
+                int prev_size = array.size(prev_cluster_levels)
+                if prev_size > 0
+                    for p = 0 to prev_size - 1
+                        float prev_level = array.get(prev_cluster_levels, p)
+                        if math.abs(avg_level - prev_level) < atr_tol
+                            is_new := false
+                            break
+                
+                if is_new
+                    color conf_color = current_count >= min_lines + 2 ? color.new(color.orange, 85) : color.new(color.yellow, 90)
+                    box.new(bar_index - 1, avg_level + atr_tol * 0.5, bar_index + 10, avg_level - atr_tol * 0.5, 
+                             border_color=color.new(conf_color, 50), bgcolor=conf_color, 
+                             border_width=1, extend=extend.right, xloc=xloc.bar_index, force_overlay=true)
+            
+            i := j
+    
+    // Update previous cluster levels
+    array.clear(prev_cluster_levels)
+    int _ncl_size = array.size(next_cluster_levels)
+    if _ncl_size > 0
+        for c = 0 to _ncl_size - 1
+            array.push(prev_cluster_levels, array.get(next_cluster_levels, c))

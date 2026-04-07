@@ -1,0 +1,788 @@
+//@version=6
+library("kNNLib", overlay = false)
+
+// @description kNN + TurboQuant v3 library with Lloyd-Max quantization
+// Implements 24-bit packed vector encoding (6 features × 4 bits), Hamming screening, and K-nearest neighbor retrieval
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 1. LLOYD-MAX TURBOQUANT ENCODING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// @function Quantize a single feature to 3-bit index + 1-bit residual (4 bits total)
+// @param val Feature value (should be clamped to [-3, +3] range)
+// @returns [int, int] Tuple of (3-bit index, 1-bit residual)
+export f_turboquant(float val) =>
+    // Inlined Lloyd-Max centroids (no array allocation)
+    int best_idx = 0
+    float best_dist = 1e10
+    
+    // Manual centroid comparison (8 levels)
+    float d0 = math.abs(val - (-2.152))
+    if d0 < best_dist
+        best_dist := d0
+        best_idx := 0
+    float d1 = math.abs(val - (-1.344))
+    if d1 < best_dist
+        best_dist := d1
+        best_idx := 1
+    float d2 = math.abs(val - (-0.756))
+    if d2 < best_dist
+        best_dist := d2
+        best_idx := 2
+    float d3 = math.abs(val - (-0.245))
+    if d3 < best_dist
+        best_dist := d3
+        best_idx := 3
+    float d4 = math.abs(val - 0.245)
+    if d4 < best_dist
+        best_dist := d4
+        best_idx := 4
+    float d5 = math.abs(val - 0.756)
+    if d5 < best_dist
+        best_dist := d5
+        best_idx := 5
+    float d6 = math.abs(val - 1.344)
+    if d6 < best_dist
+        best_dist := d6
+        best_idx := 6
+    float d7 = math.abs(val - 2.152)
+    if d7 < best_dist
+        best_dist := d7
+        best_idx := 7
+    
+    // Residual bit: above or below centroid
+    float centroid_val = best_idx == 0 ? -2.152 : (best_idx == 1 ? -1.344 : (best_idx == 2 ? -0.756 : (best_idx == 3 ? -0.245 : (best_idx == 4 ? 0.245 : (best_idx == 5 ? 0.756 : (best_idx == 6 ? 1.344 : 2.152))))))
+    int residual_bit = val > centroid_val ? 1 : 0
+    
+    [best_idx, residual_bit]
+
+// @function Pack 6 features into single 24-bit integer
+// @param i0-i5 3-bit indices for features 0-5
+// @param r0-r5 1-bit residuals for features 0-5
+// @returns int Packed 24-bit vector
+export f_pack_vector(int i0, int r0, int i1, int r1, int i2, int r2, int i3, int r3, int i4, int r4, int i5, int r5) => (i0) + (r0 * 8) +(i1 * 16)  + (r1 * 128) +(i2 * 256)  + (r2 * 2048) +(i3 * 4096) + (r3 * 32768) +(i4 * 65536) + (r4 * 524288) +(i5 * 1048576) + (r5 * 8388608)
+
+// @function Pack 7 features into single 28-bit integer
+// @param i0-i6 3-bit indices for features 0-6
+// @param r0-r6 1-bit residuals for features 0-6
+// @returns int Packed 28-bit vector
+export f_pack_vector_7(int i0, int r0, int i1, int r1, int i2, int r2, int i3, int r3, int i4, int r4, int i5, int r5, int i6, int r6) => (i0) + (r0 * 8) +(i1 * 16)  + (r1 * 128) +(i2 * 256)  + (r2 * 2048) +(i3 * 4096) + (r3 * 32768) +(i4 * 65536) + (r4 * 524288) +(i5 * 1048576) + (r5 * 8388608) + (i6 * 16777216) + (r6 * 134217728)
+
+// @function Unpack and reconstruct centroid value with half-step refinement
+// @param packed 24-bit packed vector
+// @param feat_idx Feature index (0-5)
+// @returns float Reconstructed feature value
+export f_unpack_centroid(int packed, int feat_idx) =>
+    // Precomputed Lloyd-Max centroids for N(0,1) distribution, 8 levels
+    array<float> CENTROIDS_8 = array.from(-2.152, -1.344, -0.756, -0.245, 0.245, 0.756, 1.344, 2.152)
+    // Precomputed powers of 2 for replacing bitwise shifts: POW2_4[feat] = 2^(feat*4)
+    array<int> POW2_4 = array.from(1, 16, 256, 4096, 65536, 1048576)
+    
+    int divisor = array.get(POW2_4, feat_idx)  // = 2^(feat*4)
+    int shifted = int(packed / divisor)         // = packed >> shift
+    int idx = shifted % 8                       // 3 bits
+    int res = int(shifted / 8) % 2              // bit #3
+    
+    float base = array.get(CENTROIDS_8, idx)
+    
+    // Half-step refinement
+    float half_step = 0.0
+    if idx < 7
+        half_step := (array.get(CENTROIDS_8, idx + 1) - base) * 0.25
+    else
+        half_step := (base - array.get(CENTROIDS_8, idx - 1)) * 0.25
+    
+    base + (res == 1 ? half_step : -half_step)
+
+// @function Hamming screen: count features with >1 level difference
+// @param packed_cur Current packed vector
+// @param packed_hist Historical packed vector
+// @returns int Number of features with significant difference
+export f_hamming_screen(int packed_cur, int packed_hist) =>
+    int diff_count = 0
+    // Hardcoded bit extraction: feat × 4 bits each (no array allocation)
+    if math.abs(int(packed_cur / 1) % 8       - int(packed_hist / 1) % 8)       > 1
+        diff_count += 1
+    if math.abs(int(packed_cur / 16) % 8      - int(packed_hist / 16) % 8)      > 1
+        diff_count += 1
+    if math.abs(int(packed_cur / 256) % 8     - int(packed_hist / 256) % 8)     > 1
+        diff_count += 1
+    if math.abs(int(packed_cur / 4096) % 8    - int(packed_hist / 4096) % 8)    > 1
+        diff_count += 1
+    if math.abs(int(packed_cur / 65536) % 8   - int(packed_hist / 65536) % 8)   > 1
+        diff_count += 1
+    if math.abs(int(packed_cur / 1048576) % 8 - int(packed_hist / 1048576) % 8) > 1
+        diff_count += 1
+    diff_count
+
+// @function Hamming screen for 7-feature packed vectors
+// @param packed_cur Current packed vector
+// @param packed_hist Historical packed vector
+// @returns int Number of features with significant difference
+export f_hamming_screen_7(int packed_cur, int packed_hist) =>
+    int diff_count = 0
+    // Hardcoded bit extraction: feat × 4 bits each (no array allocation)
+    if math.abs(int(packed_cur / 1) % 8         - int(packed_hist / 1) % 8)         > 1
+        diff_count += 1
+    if math.abs(int(packed_cur / 16) % 8        - int(packed_hist / 16) % 8)        > 1
+        diff_count += 1
+    if math.abs(int(packed_cur / 256) % 8       - int(packed_hist / 256) % 8)       > 1
+        diff_count += 1
+    if math.abs(int(packed_cur / 4096) % 8      - int(packed_hist / 4096) % 8)      > 1
+        diff_count += 1
+    if math.abs(int(packed_cur / 65536) % 8     - int(packed_hist / 65536) % 8)     > 1
+        diff_count += 1
+    if math.abs(int(packed_cur / 1048576) % 8   - int(packed_hist / 1048576) % 8)   > 1
+        diff_count += 1
+    if math.abs(int(packed_cur / 16777216) % 8  - int(packed_hist / 16777216) % 8)  > 1
+        diff_count += 1
+    diff_count
+
+// @function Normalize a non-negative burst score using log1p + robust IQR z-score
+// @param burst_raw Raw burst score
+// @param burst_history History array of raw burst scores
+// @param norm_len Normalization window length
+// @returns Normalized burst score
+export f_normalize_burst(float burst_raw, array<float> burst_history, int norm_len) =>
+    float log_raw = math.log(1.0 + math.max(0.0, burst_raw))
+    float burst_med = 0.0
+    float burst_iqr = 1.0
+
+    if array.size(burst_history) >= norm_len
+        array<float> burst_window = array.new<float>(0)
+        int start_idx = array.size(burst_history) - norm_len
+        for i = start_idx to array.size(burst_history) - 1
+            array.push(burst_window, math.log(1.0 + math.max(0.0, array.get(burst_history, i))))
+
+        array.sort(burst_window, order.ascending)
+        int win_size = array.size(burst_window)
+        int mid_idx = math.floor((win_size - 1) * 0.5)
+        int q25_idx = math.floor((win_size - 1) * 0.25)
+        int q75_idx = math.floor((win_size - 1) * 0.75)
+        burst_med := array.get(burst_window, mid_idx)
+        float q25 = array.get(burst_window, q25_idx)
+        float q75 = array.get(burst_window, q75_idx)
+        burst_iqr := math.max((q75 - q25) * 0.7413, 0.001)
+
+    (log_raw - burst_med) / burst_iqr
+
+// @function Find K nearest neighbors using Hamming screening + Euclidean distance for 7 features
+// @param f1_cur-f7_cur Current feature values
+// @param f1_history-f7_history Feature history arrays
+// @param k Number of neighbors to retrieve
+// @param max_history Maximum history length to search
+// @returns array<int> Array of K nearest neighbor indices
+export f_find_k_nearest_7(float f1_cur, float f2_cur, float f3_cur, float f4_cur, float f5_cur, float f6_cur, float f7_cur,
+                          array<float> f1_history, array<float> f2_history, array<float> f3_history,
+                          array<float> f4_history, array<float> f5_history, array<float> f6_history, array<float> f7_history,
+                          int k, int max_history) =>
+    array<int> nearest_indices = array.new<int>(0)
+    array<float> nearest_distances = array.new<float>(0)
+
+    int history_size = math.min(array.size(f1_history), max_history)
+
+    for i = 0 to history_size - 1
+        float f1_hist = array.get(f1_history, i)
+        float f2_hist = array.get(f2_history, i)
+        float f3_hist = array.get(f3_history, i)
+        float f4_hist = array.get(f4_history, i)
+        float f5_hist = array.get(f5_history, i)
+        float f6_hist = array.get(f6_history, i)
+        float f7_hist = array.get(f7_history, i)
+
+        float d1 = f1_cur - f1_hist
+        float d2 = f2_cur - f2_hist
+        float d3 = f3_cur - f3_hist
+        float d4 = f4_cur - f4_hist
+        float d5 = f5_cur - f5_hist
+        float d6 = f6_cur - f6_hist
+        float d7 = f7_cur - f7_hist
+        float dist = math.sqrt(d1*d1 + d2*d2 + d3*d3 + d4*d4 + d5*d5 + d6*d6 + d7*d7)
+
+        if array.size(nearest_indices) < k
+            array.push(nearest_indices, i)
+            array.push(nearest_distances, dist)
+        else
+            float max_dist = array.max(nearest_distances)
+            if dist < max_dist
+                int max_idx = 0
+                for j = 0 to array.size(nearest_distances) - 1
+                    if array.get(nearest_distances, j) == max_dist
+                        max_idx := j
+                        break
+                array.set(nearest_indices, max_idx, i)
+                array.set(nearest_distances, max_idx, dist)
+
+    nearest_indices
+
+// @function Calculate confidence from 7-feature K-nearest distance distribution
+// @param f1_cur-f7_cur Current feature values
+// @param f1_history-f7_history Feature history arrays
+// @param k_nearest Array of K nearest neighbor indices
+// @returns float Confidence score [0, 1]
+export f_calculate_confidence_7(float f1_cur, float f2_cur, float f3_cur, float f4_cur, float f5_cur, float f6_cur, float f7_cur,
+                                array<float> f1_history, array<float> f2_history, array<float> f3_history,
+                                array<float> f4_history, array<float> f5_history, array<float> f6_history, array<float> f7_history,
+                                array<int> k_nearest) =>
+    float confidence = 0.0
+
+    if array.size(k_nearest) > 0
+        array<float> distances = array.new<float>(0)
+
+        for i = 0 to array.size(k_nearest) - 1
+            int idx = array.get(k_nearest, i)
+            float d1 = f1_cur - array.get(f1_history, idx)
+            float d2 = f2_cur - array.get(f2_history, idx)
+            float d3 = f3_cur - array.get(f3_history, idx)
+            float d4 = f4_cur - array.get(f4_history, idx)
+            float d5 = f5_cur - array.get(f5_history, idx)
+            float d6 = f6_cur - array.get(f6_history, idx)
+            float d7 = f7_cur - array.get(f7_history, idx)
+            array.push(distances, math.sqrt(d1*d1 + d2*d2 + d3*d3 + d4*d4 + d5*d5 + d6*d6 + d7*d7))
+
+        float mean_dist = array.avg(distances)
+        confidence := 1.0 / (1.0 + mean_dist)
+
+    confidence
+
+// @function Merge one tier into the final kNN set using sorted indices and decluster gating
+// @param pool_dist Candidate distances for the tier
+// @param pool_id Candidate history indices for the tier
+// @param target_ids Final output neighbor ids
+// @param target_dist Final output distances
+// @param target_weights Final output weights
+// @param knn_k Target neighbor count
+// @param decluster_gap Minimum spacing between accepted neighbor ids
+export f_merge_tier(array<float> pool_dist, array<int> pool_id, array<int> target_ids, array<float> target_dist, array<float> target_weights, int knn_k, int decluster_gap) =>
+    if array.size(pool_dist) > 0 and array.size(target_ids) < knn_k
+        array<int> sorted_indices = array.sort_indices(pool_dist, order.ascending)
+        
+        // FIX: Iterate full pool to compensate for decluster rejections
+        for n = 0 to array.size(sorted_indices) - 1
+            if array.size(target_ids) >= knn_k
+                break
+                
+            int src_idx = array.get(sorted_indices, n)
+            float dcut = array.get(pool_dist, src_idx)
+            int cid = array.get(pool_id, src_idx)
+            bool too_close = false
+            if array.size(target_ids) > 0
+                for a = 0 to array.size(target_ids) - 1
+                    if math.abs(cid - array.get(target_ids, a)) <= decluster_gap
+                        too_close := true
+                        break
+            if not too_close
+                array.push(target_ids, cid)
+                array.push(target_dist, dcut)
+                array.push(target_weights, dcut == 0.0 ? 1.0 : 1.0 / dcut)
+
+// @function Hierarchical 4-tier tournament selection for live execution
+// @returns [ids, distances, weights, dbg_iter, dbg_hskip, dbg_nskip, dbg_cands]
+export f_hierarchical_tournament_live(int s_packed, float s_f1, float s_f2, float s_f3, float s_f4, float s_f5, float s_f6, float s_f7, int s_family,
+                                      array<float> f1_history, array<float> f2_history, array<float> f3_history, array<float> f4_history, array<float> f5_history, array<float> f6_history, array<float> f7_history,
+                                      array<int> arr_packed_vec, array<int> arr_setup_id, array<int> arr_setup_family,
+                                      int current_setup_code, int oracle_horizon, int mc_horizon,
+                                      int knn_k, int hamming_thresh, int decluster_gap, int pool_max) =>
+    array<int> t1_id = array.new<int>()
+    array<float> t1_dist = array.new_float(0)
+    array<int> t2_id = array.new<int>()
+    array<float> t2_dist = array.new_float(0)
+    array<int> t3_id = array.new<int>()
+    array<float> t3_dist = array.new_float(0)
+    array<int> t4_id = array.new<int>()
+    array<float> t4_dist = array.new_float(0)
+    int dbg_iter = 0
+    int dbg_hskip = 0
+    int dbg_nskip = 0
+    int histsize = array.size(f1_history)
+    
+    // FIX: Reserve buffer for both Oracle validation AND MC projection
+    int required_buffer = math.max(oracle_horizon, mc_horizon)
+    int last_scan = math.max(0, histsize - 1 - required_buffer)
+    
+    // C1 FIX: Increase T4 pool size 6x for catch-all tier (300 instead of 50)
+    int t4_max = pool_max * 6
+    
+    // ADAPTIVE HAMMING: Tighten filter as pools fill to reduce iterations
+    int adaptive_hamming = hamming_thresh
+    
+    // C3 FIX: Reverse scan (newest→oldest) to prioritize fresh data
+    // Skip if insufficient history (last_scan must be >= 7 for reverse loop)
+    if last_scan >= 7
+        for i = last_scan to 7
+            // EARLY EXIT: All pools have 2x coverage → hard stop
+            int total_cands = array.size(t1_dist) + array.size(t2_dist) + array.size(t3_dist) + array.size(t4_dist)
+            if total_cands >= pool_max * 4
+                break
+            
+            // ADAPTIVE TIGHTENING: Once pools have minimum coverage, tighten Hamming filter
+            if total_cands >= pool_max * 2 and adaptive_hamming > 2
+                adaptive_hamming := math.max(2, hamming_thresh - 1)
+            
+            dbg_iter += 1
+            if i < array.size(arr_packed_vec)
+                int hd = f_hamming_screen_7(s_packed, array.get(arr_packed_vec, i))
+                if hd > adaptive_hamming
+                    dbg_hskip += 1
+                    continue
+            float d1 = s_f1 - nz(array.get(f1_history, i))
+            float d2 = s_f2 - nz(array.get(f2_history, i))
+            float d3 = s_f3 - nz(array.get(f3_history, i))
+            float d4 = s_f4 - nz(array.get(f4_history, i))
+            float d5 = s_f5 - nz(array.get(f5_history, i))
+            float d6 = s_f6 - nz(array.get(f6_history, i))
+            float d7 = s_f7 - nz(array.get(f7_history, i))
+            float dist = d1*d1 + d2*d2 + d3*d3 + d4*d4 + d5*d5 + d6*d6 + d7*d7
+            if na(dist)
+                dbg_nskip += 1
+                continue
+            int hist_fam = i < array.size(arr_setup_family) ? array.get(arr_setup_family, i) : 4
+            int hist_setup = i < array.size(arr_setup_id) ? array.get(arr_setup_id, i) : 0
+            // C5 FIX: family=4 (Uncertain) soft-matches any known family into T3
+            bool is_same_fam = s_family != 4 ? (hist_fam == s_family) : (hist_fam != 4)
+            bool is_same_setup = current_setup_code != 0 and hist_setup == current_setup_code
+            bool oracle_triggered = false
+            if is_same_fam and i + oracle_horizon < array.size(arr_setup_id)
+                for f = 1 to oracle_horizon
+                    if array.get(arr_setup_id, i + f) != 0
+                        oracle_triggered := true
+                        break
+            // C2 FIX: Priority queue - replace worst if pool full and current is better
+            if oracle_triggered
+                if array.size(t1_dist) < pool_max
+                    array.push(t1_dist, dist)
+                    array.push(t1_id, i)
+                else
+                    float worst_d = 0.0
+                    int worst_idx = -1
+                    for w = 0 to array.size(t1_dist) - 1
+                        if array.get(t1_dist, w) > worst_d
+                            worst_d := array.get(t1_dist, w)
+                            worst_idx := w
+                    if worst_idx >= 0 and dist < worst_d
+                        array.set(t1_dist, worst_idx, dist)
+                        array.set(t1_id, worst_idx, i)
+            else if is_same_setup and is_same_fam
+                if array.size(t2_dist) < pool_max
+                    array.push(t2_dist, dist)
+                    array.push(t2_id, i)
+                else
+                    float worst_d = 0.0
+                    int worst_idx = -1
+                    for w = 0 to array.size(t2_dist) - 1
+                        if array.get(t2_dist, w) > worst_d
+                            worst_d := array.get(t2_dist, w)
+                            worst_idx := w
+                    if worst_idx >= 0 and dist < worst_d
+                        array.set(t2_dist, worst_idx, dist)
+                        array.set(t2_id, worst_idx, i)
+            else if is_same_fam
+                if array.size(t3_dist) < pool_max
+                    array.push(t3_dist, dist)
+                    array.push(t3_id, i)
+                else
+                    float worst_d = 0.0
+                    int worst_idx = -1
+                    for w = 0 to array.size(t3_dist) - 1
+                        if array.get(t3_dist, w) > worst_d
+                            worst_d := array.get(t3_dist, w)
+                            worst_idx := w
+                    if worst_idx >= 0 and dist < worst_d
+                        array.set(t3_dist, worst_idx, dist)
+                        array.set(t3_id, worst_idx, i)
+            else
+                if array.size(t4_dist) < t4_max
+                    array.push(t4_dist, dist)
+                    array.push(t4_id, i)
+                else
+                    float worst_d = 0.0
+                    int worst_idx = -1
+                    for w = 0 to array.size(t4_dist) - 1
+                        if array.get(t4_dist, w) > worst_d
+                            worst_d := array.get(t4_dist, w)
+                            worst_idx := w
+                    if worst_idx >= 0 and dist < worst_d
+                        array.set(t4_dist, worst_idx, dist)
+                        array.set(t4_id, worst_idx, i)
+    array<int> final_ids = array.new<int>()
+    array<float> final_dist = array.new_float(0)
+    array<float> final_weights = array.new_float(0)
+    f_merge_tier(t1_dist, t1_id, final_ids, final_dist, final_weights, knn_k, decluster_gap)
+    f_merge_tier(t2_dist, t2_id, final_ids, final_dist, final_weights, knn_k, decluster_gap)
+    f_merge_tier(t3_dist, t3_id, final_ids, final_dist, final_weights, knn_k, decluster_gap)
+    f_merge_tier(t4_dist, t4_id, final_ids, final_dist, final_weights, knn_k, decluster_gap)
+    float wsum = 0.0
+    for i = 0 to array.size(final_weights) - 1
+        wsum += array.get(final_weights, i)
+    if wsum > 0
+        for i = 0 to array.size(final_weights) - 1
+            array.set(final_weights, i, array.get(final_weights, i) / wsum)
+    [final_ids, final_dist, final_weights, dbg_iter, dbg_hskip, dbg_nskip, array.size(final_ids)]
+
+// @function Sign-aware neighbor filtering to prevent canceling paths from mixed correlation phases
+// @returns Filtered arrays with same F2 sign as current setup
+// @param s_f2 Current F2 value
+// @param f1_history Feature 1 history (quantized int)
+// @param f2_history Feature 2 history (float correlation)
+// @param f3_history Feature 3 history (float)
+// @param f4_history Feature 4 history (float) 
+// @param f5_history Feature 5 history (float)
+// @param f6_history Feature 6 history (float)
+// @param f7_history Feature 7 history (float)
+// @param arr_setup_id Setup ID history
+// @param arr_setup_family Setup family history
+// @param arr_packed_vec Packed vector history
+// @param limit Maximum number of history items to consider
+export f_sign_aware_filter(float s_f2, array<int> f1_history, array<float> f2_history, array<float> f3_history, array<float> f4_history, array<float> f5_history, array<float> f6_history, array<float> f7_history, array<int> arr_setup_id, array<int> arr_setup_family, array<int> arr_packed_vec, int limit) =>
+    // Create filtered arrays
+    array<int> f1_filtered = array.new<int>()
+    array<float> f2_filtered = array.new_float()
+    array<float> f3_filtered = array.new_float()
+    array<float> f4_filtered = array.new_float()
+    array<float> f5_filtered = array.new_float()
+    array<float> f6_filtered = array.new_float()
+    array<float> f7_filtered = array.new_float()
+    array<int> setup_id_filtered = array.new<int>()
+    array<int> family_filtered = array.new<int>()
+    array<int> packed_filtered = array.new<int>()
+    
+    // Apply sign consistency filter
+    float f2_clamped = math.max(-0.99, math.min(s_f2, 0.99))
+    int max_items = math.min(limit, array.size(f1_history))
+    
+    for i = 0 to max_items - 1
+        bool sign_ok = (f2_clamped >= 0) == (array.get(f2_history, i) >= 0)
+        if sign_ok
+            array.push(f1_filtered, array.get(f1_history, i))
+            array.push(f2_filtered, array.get(f2_history, i))
+            array.push(f3_filtered, array.get(f3_history, i))
+            array.push(f4_filtered, array.get(f4_history, i))
+            array.push(f5_filtered, array.get(f5_history, i))
+            array.push(f6_filtered, array.get(f6_history, i))
+            array.push(f7_filtered, array.get(f7_history, i))
+            array.push(setup_id_filtered, array.get(arr_setup_id, i))
+            array.push(family_filtered, array.get(arr_setup_family, i))
+            array.push(packed_filtered, array.get(arr_packed_vec, i))
+    
+    [f1_filtered, f2_filtered, f3_filtered, f4_filtered, f5_filtered, f6_filtered, f7_filtered, setup_id_filtered, family_filtered, packed_filtered]
+
+// @function Hierarchical 3-tier tournament selection for backtest execution
+export f_hierarchical_tournament_backtest(int s_packed, float s_f1, float s_f2, float s_f3, float s_f4, float s_f5, float s_f6, float s_f7, int s_family, int s_setup_code,
+                                          array<float> f1_history, array<float> f2_history, array<float> f3_history, array<float> f4_history, array<float> f5_history, array<float> f6_history, array<float> f7_history,
+                                          array<int> arr_packed_vec, array<int> arr_setup_id, array<int> arr_setup_family,
+                                          int knn_limit, int knn_k, int hamming_thresh, int decluster_gap, int pool_max) =>
+    array<int> t1_id = array.new<int>()
+    array<float> t1_dist = array.new_float(0)
+    array<int> t2_id = array.new<int>()
+    array<float> t2_dist = array.new_float(0)
+    array<int> t3_id = array.new<int>()
+    array<float> t3_dist = array.new_float(0)
+    int capped_limit = math.min(knn_limit, math.min(array.size(f1_history), array.size(arr_setup_id)))
+    for i = 7 to capped_limit - 1
+        if i < array.size(arr_packed_vec)
+            int hd = f_hamming_screen_7(s_packed, array.get(arr_packed_vec, i))
+            if hd > hamming_thresh
+                continue
+        float d1 = s_f1 - nz(array.get(f1_history, i))
+        float d2 = s_f2 - nz(array.get(f2_history, i))
+        float d3 = s_f3 - nz(array.get(f3_history, i))
+        float d4 = s_f4 - nz(array.get(f4_history, i))
+        float d5 = s_f5 - nz(array.get(f5_history, i))
+        float d6 = s_f6 - nz(array.get(f6_history, i))
+        float d7 = s_f7 - nz(array.get(f7_history, i))
+        float dist = d1*d1 + d2*d2 + d3*d3 + d4*d4 + d5*d5 + d6*d6 + d7*d7
+        if na(dist)
+            continue
+        int hist_fam = i < array.size(arr_setup_family) ? array.get(arr_setup_family, i) : 4
+        int hist_setup = i < array.size(arr_setup_id) ? array.get(arr_setup_id, i) : 0
+        bool is_same_fam = hist_fam == s_family and s_family != 4
+        bool is_same_setup = s_setup_code != 0 and hist_setup == s_setup_code
+        if is_same_setup and is_same_fam
+            if array.size(t1_dist) < pool_max
+                array.push(t1_dist, dist)
+                array.push(t1_id, i)
+        else if is_same_fam
+            if array.size(t2_dist) < pool_max
+                array.push(t2_dist, dist)
+                array.push(t2_id, i)
+        else
+            if array.size(t3_dist) < pool_max
+                array.push(t3_dist, dist)
+                array.push(t3_id, i)
+    array<int> final_ids = array.new<int>()
+    array<float> final_dist = array.new_float(0)
+    array<float> final_weights = array.new_float(0)
+    f_merge_tier(t1_dist, t1_id, final_ids, final_dist, final_weights, knn_k, decluster_gap)
+    f_merge_tier(t2_dist, t2_id, final_ids, final_dist, final_weights, knn_k, decluster_gap)
+    f_merge_tier(t3_dist, t3_id, final_ids, final_dist, final_weights, knn_k, decluster_gap)
+    float wsum = 0.0
+    for i = 0 to array.size(final_weights) - 1
+        wsum += array.get(final_weights, i)
+    if wsum > 0
+        for i = 0 to array.size(final_weights) - 1
+            array.set(final_weights, i, array.get(final_weights, i) / wsum)
+    [final_ids, final_dist, final_weights, 0, 0, 0, array.size(final_ids)]
+
+
+
+// @function Sign-aware hierarchical tournament for backtest with quantized F1
+// @returns [ids, weights] for backtest MC validation
+export f_hierarchical_tournament_backtest_signaware(int s_packed, float s_f1, float s_f2, float s_f3, float s_f4, float s_f5, float s_f6, float s_f7, int s_family, int s_setup_code,
+                                                     array<int> f1_history, array<float> f2_history, array<float> f3_history, array<float> f4_history, array<float> f5_history, array<float> f6_history, array<float> f7_history,
+                                                     array<int> arr_setup_id, array<int> arr_setup_family, array<int> arr_packed_vec,
+                                                     int knn_limit, int knn_k, int hamming_thresh, int decluster_gap, int pool_max) =>
+    // Apply sign-aware filtering first
+    [f1_filtered, f2_filtered, f3_filtered, f4_filtered, f5_filtered, f6_filtered, f7_filtered, setup_id_filtered, family_filtered, packed_filtered] = f_sign_aware_filter(s_f2, f1_history, f2_history, f3_history, f4_history, f5_history, f6_history, f7_history, arr_setup_id, arr_setup_family, arr_packed_vec, knn_limit)
+    
+    // Convert quantized F1 back to float for compatibility with existing tournament logic
+    array<float> f1_filtered_float = array.new_float()
+    for i = 0 to array.size(f1_filtered) - 1
+        int quant_val = array.get(f1_filtered, i)
+        float dequant_val = quant_val * 0.25  // Simple dequantization (reverse of quantization)
+        array.push(f1_filtered_float, dequant_val)
+    
+    // Run standard tournament with filtered data
+    [ids, dists, weights, dbg_iter, dbg_hskip, dbg_nskip, final_count] = f_hierarchical_tournament_backtest(s_packed, s_f1, s_f2, s_f3, s_f4, s_f5, s_f6, s_f7, s_family, s_setup_code, f1_filtered_float, f2_filtered, f3_filtered, f4_filtered, f5_filtered, f6_filtered, f7_filtered, packed_filtered, setup_id_filtered, family_filtered, knn_limit, knn_k, hamming_thresh, decluster_gap, pool_max)
+    [ids, dists, weights, dbg_iter, dbg_hskip, dbg_nskip, final_count]
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// V19 COMPATIBILITY WRAPPERS (generic API over existing 7-feature engine)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export f_knn_scan(array<float> cur_features,
+                  array<float> h0, array<float> h1, array<float> h2, array<float> h3, array<float> h4, array<float> h5, array<float> h6,
+                  array<int> arr_packed,
+                  int packed_cur, int nf, int scan_from, int scan_to, int scan_step,
+                  int hamming_thresh, int max_candidates) =>
+    array<int> ids = array.new<int>()
+    array<float> dists = array.new_float(0)
+    int dbg_iter = 0
+    int dbg_hskip = 0
+    int dbg_nskip = 0
+    int hsize = math.min(array.size(h0), max_candidates)
+    int start_i = math.max(0, scan_from)
+    int end_i = math.max(0, scan_to)
+    int step_i = math.max(1, scan_step)
+    if start_i >= end_i
+        for i = start_i to end_i
+            if (start_i - i) % step_i == 0
+                dbg_iter += 1
+                if i < hsize and i < array.size(arr_packed)
+                    int hd = f_hamming_screen_7(packed_cur, array.get(arr_packed, i))
+                    if hd > hamming_thresh
+                        dbg_hskip += 1
+                        continue
+                    float dist = 0.0
+                    for f = 0 to math.min(nf, 7) - 1
+                        float curv = array.get(cur_features, f)
+                        float histv = f == 0 ? array.get(h0, i) : f == 1 ? array.get(h1, i) : f == 2 ? array.get(h2, i) : f == 3 ? array.get(h3, i) : f == 4 ? array.get(h4, i) : f == 5 ? array.get(h5, i) : array.get(h6, i)
+                        dist += math.pow(curv - histv, 2)
+                    array.push(ids, i)
+                    array.push(dists, math.sqrt(dist))
+    [ids, dists, dbg_iter, dbg_hskip, dbg_nskip]
+
+export f_knn_select(array<int> t1_ids, array<float> t1_dist,
+                    array<int> t2_ids, array<float> t2_dist,
+                    array<int> t3_ids, array<float> t3_dist,
+                    array<int> t4_ids, array<float> t4_dist,
+                    int k, int gap) =>
+    array<int> final_ids = array.new<int>()
+    array<float> final_dist = array.new_float(0)
+    array<float> final_weights = array.new_float(0)
+    f_merge_tier(t1_dist, t1_ids, final_ids, final_dist, final_weights, k, gap)
+    f_merge_tier(t2_dist, t2_ids, final_ids, final_dist, final_weights, k, gap)
+    f_merge_tier(t3_dist, t3_ids, final_ids, final_dist, final_weights, k, gap)
+    f_merge_tier(t4_dist, t4_ids, final_ids, final_dist, final_weights, k, gap)
+    [final_ids, final_dist, final_weights]
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 2. FEATURE NORMALIZATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// @function Normalize BasketCorr using Fisher transform then z-score
+// @param rho Raw correlation value [-1, +1]
+// @param rho_history Array of historical rho values
+// @param norm_len Normalization window length
+// @returns Normalized correlation
+export f_normalize_basket_corr(float rho, array<float> rho_history, int norm_len) =>
+    // Manual Fisher transform: atanh(x) = 0.5 * ln((1+x)/(1-x))
+    float rho_clipped = math.max(-0.999, math.min(0.999, rho))
+    float fisher = 0.5 * math.log((1.0 + rho_clipped) / (1.0 - rho_clipped))
+    
+    float fisher_mean = 0.0
+    float fisher_std = 1.0
+    
+    if array.size(rho_history) >= norm_len
+        array<float> fisher_window = array.new<float>(0)
+        int start_idx = array.size(rho_history) - norm_len
+        for i = start_idx to array.size(rho_history) - 1
+            float h_rho = array.get(rho_history, i)
+            float h_rho_clipped = math.max(-0.999, math.min(0.999, h_rho))
+            float h_fisher = 0.5 * math.log((1.0 + h_rho_clipped) / (1.0 - h_rho_clipped))
+            array.push(fisher_window, h_fisher)
+        
+        fisher_mean := array.avg(fisher_window)
+        fisher_std := math.max(array.stdev(fisher_window), 0.001)
+    
+    (fisher - fisher_mean) / fisher_std
+
+// @function Normalize TE_Osc using rolling z-score
+// @param te_osc Raw TE oscillator value
+// @param te_history Array of historical TE values
+// @param norm_len Normalization window length
+// @returns Normalized TE oscillator
+export f_normalize_te_osc(float te_osc, array<float> te_history, int norm_len) =>
+    float te_mean = 0.0
+    float te_std = 1.0
+    
+    if array.size(te_history) >= norm_len
+        array<float> te_window = array.new<float>(0)
+        int start_idx = array.size(te_history) - norm_len
+        for i = start_idx to array.size(te_history) - 1
+            array.push(te_window, array.get(te_history, i))
+        
+        te_mean := array.avg(te_window)
+        te_std := math.max(array.stdev(te_window), 0.001)
+    
+    (te_osc - te_mean) / te_std
+
+// @function Normalize PhiDiv using rolling z-score
+// @param phi_div Raw PhiDiv value (PhiLatch - PhiTotal_orth)
+// @param phi_history Array of historical PhiDiv values
+// @param norm_len Normalization window length
+// @returns Normalized PhiDiv
+export f_normalize_phi_div(float phi_div, array<float> history, int len) =>
+    if array.size(history) < len
+        0.0
+    else
+        float mean = 0.0
+        float std = 0.0
+        for i = 0 to math.min(len, array.size(history)) - 1
+            mean += array.get(history, array.size(history) - 1 - i)
+        mean := mean / math.min(len, array.size(history))
+        for i = 0 to math.min(len, array.size(history)) - 1
+            float diff = array.get(history, array.size(history) - 1 - i) - mean
+            std += diff * diff
+        std := math.sqrt(std / math.min(len, array.size(history)))
+        std > 0 ? (phi_div - mean) / std : 0.0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 3. K-NEAREST NEIGHBOR RETRIEVAL
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// @function Calculate Euclidean distance between current state and historical state
+// @param f1_cur-f6_cur Current feature values (normalized)
+// @param f1_hist-f6_hist Historical feature values (normalized)
+// @returns float Euclidean distance
+export f_euclidean_distance(float f1_cur, float f2_cur, float f3_cur, float f4_cur, float f5_cur, float f6_cur,
+                            float f1_hist, float f2_hist, float f3_hist, float f4_hist, float f5_hist, float f6_hist) =>
+    float d1 = f1_cur - f1_hist
+    float d2 = f2_cur - f2_hist
+    float d3 = f3_cur - f3_hist
+    float d4 = f4_cur - f4_hist
+    float d5 = f5_cur - f5_hist
+    float d6 = f6_cur - f6_hist
+    
+    math.sqrt(d1*d1 + d2*d2 + d3*d3 + d4*d4 + d5*d5 + d6*d6)
+
+// @function Find K nearest neighbors using Hamming screening + Euclidean distance
+// @param f1_cur-f6_cur Current feature values
+// @param f1_history-f6_history Feature history arrays
+// @param k Number of neighbors to retrieve
+// @param max_history Maximum history length to search
+// @returns array<int> Array of K nearest neighbor indices
+export f_find_k_nearest(float f1_cur, float f2_cur, float f3_cur, float f4_cur, float f5_cur, float f6_cur,
+                       array<float> f1_history, array<float> f2_history, array<float> f3_history,
+                       array<float> f4_history, array<float> f5_history, array<float> f6_history,
+                       int k, int max_history) =>
+    array<int> nearest_indices = array.new<int>(0)
+    array<float> nearest_distances = array.new<float>(0)
+    
+    int history_size = math.min(array.size(f1_history), max_history)
+    
+    // Search through history
+    for i = 0 to history_size - 1
+        float f1_hist = array.get(f1_history, i)
+        float f2_hist = array.get(f2_history, i)
+        float f3_hist = array.get(f3_history, i)
+        float f4_hist = array.get(f4_history, i)
+        float f5_hist = array.get(f5_history, i)
+        float f6_hist = array.get(f6_history, i)
+        
+        float dist = f_euclidean_distance(f1_cur, f2_cur, f3_cur, f4_cur, f5_cur, f6_cur,
+                                         f1_hist, f2_hist, f3_hist, f4_hist, f5_hist, f6_hist)
+        
+        // Insert into sorted list if within top K
+        if array.size(nearest_indices) < k
+            array.push(nearest_indices, i)
+            array.push(nearest_distances, dist)
+        else
+            // Find max distance in current top K
+            float max_dist = array.max(nearest_distances)
+            if dist < max_dist
+                // Replace furthest neighbor
+                int max_idx = 0
+                for j = 0 to array.size(nearest_distances) - 1
+                    if array.get(nearest_distances, j) == max_dist
+                        max_idx := j
+                        break
+                array.set(nearest_indices, max_idx, i)
+                array.set(nearest_distances, max_idx, dist)
+    
+    nearest_indices
+
+// @function Calculate epistemic confidence from K-nearest distance distribution
+// @param f1_cur-f6_cur Current feature values
+// @param f1_history-f6_history Feature history arrays
+// @param k_nearest Array of K nearest neighbor indices
+// @returns float Confidence score [0, 1]
+export f_calculate_confidence(float f1_cur, float f2_cur, float f3_cur, float f4_cur, float f5_cur, float f6_cur,
+                              array<float> f1_history, array<float> f2_history, array<float> f3_history,
+                              array<float> f4_history, array<float> f5_history, array<float> f6_history,
+                              array<int> k_nearest) =>
+    float confidence = 0.0
+    
+    if array.size(k_nearest) > 0
+        array<float> distances = array.new<float>(0)
+        
+        for i = 0 to array.size(k_nearest) - 1
+            int idx = array.get(k_nearest, i)
+            float dist = f_euclidean_distance(
+                f1_cur, f2_cur, f3_cur, f4_cur, f5_cur, f6_cur,
+                array.get(f1_history, idx), array.get(f2_history, idx), array.get(f3_history, idx),
+                array.get(f4_history, idx), array.get(f5_history, idx), array.get(f6_history, idx))
+            array.push(distances, dist)
+        
+        // Confidence = 1 / (1 + mean_distance)
+        float mean_dist = array.avg(distances)
+        confidence := 1.0 / (1.0 + mean_dist)
+    
+    confidence
+
+// @function Calculate median distance from k-nearest neighbors (robust confidence metric)
+// @param k_nearest Array of K nearest neighbor indices
+// @param f1_cur-f6_cur Current feature values
+// @param f1_history-f6_history Feature history arrays
+// @returns float Median distance (more robust to outliers than mean)
+export f_median_distance(array<int> k_nearest, float f1_cur, float f2_cur, float f3_cur, float f4_cur, float f5_cur, float f6_cur,
+                         array<float> f1_history, array<float> f2_history, array<float> f3_history,
+                         array<float> f4_history, array<float> f5_history, array<float> f6_history) =>
+    float median_dist = 0.0
+    int k_size = array.size(k_nearest)
+    
+    if k_size > 0
+        array<float> distances = array.new<float>(0)
+        for i = 0 to k_size - 1
+            int idx = array.get(k_nearest, i)
+            float dist = f_euclidean_distance(
+                f1_cur, f2_cur, f3_cur, f4_cur, f5_cur, f6_cur,
+                array.get(f1_history, idx), array.get(f2_history, idx), array.get(f3_history, idx),
+                array.get(f4_history, idx), array.get(f5_history, idx), array.get(f6_history, idx))
+            array.push(distances, dist)
+        
+        array.sort(distances, order.ascending)
+        int mid = k_size / 2
+        median_dist := k_size % 2 == 1 ? array.get(distances, mid) : (array.get(distances, mid - 1) + array.get(distances, mid)) / 2.0
+    
+    median_dist
