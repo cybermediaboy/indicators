@@ -4,7 +4,7 @@
 //@version=6
 import cybermediaboy/CausalityLib/14 as CausalityLib
 import cybermediaboy/MCLib/10 as MCLib
-import cybermediaboy/SetupsLib/13 as SetupsLib
+import cybermediaboy/SetupsLib/14 as SetupsLib
 import cybermediaboy/TAUtilityLib/52 as TAUtilityLib
 import cybermediaboy/kNNLib/15 as kNNLib
 import cybermediaboy/BandsLib/4 as BandsLib
@@ -2909,7 +2909,7 @@ if pred_round_delay_active and not na(armed_setup_id)
         [armed_pos, armed_last_trigger_bar, armed_mae, armed_mfe, armed_entry_ctx] = f_fire_setup_by_id(armed_setup_id, armed_tooltip, armed_size_info, last_setup_trigger_bar)
         // DEBUG REMOVED: entry_context_bitfield assignment
         if show_setup_labels
-            label.new(bar_index, close, armed_setup_id, style=armed_direction == "LONG" ? label.style_label_up : label.style_label_down, color=color.new(color.purple, 20), textcolor=color.white, size=size.small, force_overlay=true)
+            label.new(bar_index, close, armed_setup_id, style=armed_direction == "LONG" ? label.style_label_up : label.style_label_down, color=color.new(color.purple, 20), textcolor=color.white, size=size.small, tooltip=armed_tooltip, force_overlay=true)
         pos := armed_pos
         last_setup_trigger_bar := armed_last_trigger_bar
         if armed_direction == "LONG"
@@ -2975,7 +2975,7 @@ if pred_round_delay_active
         armed_size_info := "S5 WR60%"
         armed_conditions_mr := mr_osc
         armed_conditions_z0 := z0
-        label.new(bar_index, close, "💤 S5", style=label.style_label_down, color=color.new(color.gray, 70), textcolor=color.gray, size=size.tiny, force_overlay=true)
+        label.new(bar_index, close, "💤 S5", style=label.style_label_down, color=color.new(color.gray, 70), textcolor=color.gray, size=size.tiny, tooltip=armed_tooltip, force_overlay=true)
     if fire_l2 and pred_round_long and f_setup_cooldown_ok("L2", "LONG", last_pred_long_bar)
         armed_setup_id := "L2"
         armed_bar := bar_index
@@ -2984,7 +2984,7 @@ if pred_round_delay_active
         armed_size_info := "L2 WR52%"
         armed_conditions_mr := mr_osc
         armed_conditions_z0 := z0
-        label.new(bar_index, close, "💤 L2", style=label.style_label_up, color=color.new(color.gray, 70), textcolor=color.gray, size=size.tiny, force_overlay=true)
+        label.new(bar_index, close, "💤 L2", style=label.style_label_up, color=color.new(color.gray, 70), textcolor=color.gray, size=size.tiny, tooltip=armed_tooltip, force_overlay=true)
     if setup_v1 and pred_round_long and allow_long and f_setup_cooldown_ok("V1", "LONG", last_pred_long_bar)
         armed_setup_id := "V1"
         armed_bar := bar_index
@@ -2993,7 +2993,7 @@ if pred_round_delay_active
         armed_size_info := "V1 WR81%"
         armed_conditions_mr := mr_osc
         armed_conditions_z0 := z0
-        label.new(bar_index, close, "💤 V1", style=label.style_label_up, color=color.new(color.gray, 70), textcolor=color.gray, size=size.tiny, force_overlay=true)
+        label.new(bar_index, close, "💤 V1", style=label.style_label_up, color=color.new(color.gray, 70), textcolor=color.gray, size=size.tiny, tooltip=armed_tooltip, force_overlay=true)
     if setup_v2 and pred_round_short and allow_short and f_setup_cooldown_ok("V2", "SHORT", last_pred_short_bar)
         armed_setup_id := "V2"
         armed_bar := bar_index
@@ -3002,7 +3002,7 @@ if pred_round_delay_active
         armed_size_info := "V2 WR73%"
         armed_conditions_mr := mr_osc
         armed_conditions_z0 := z0
-        label.new(bar_index, close, "💤 V2", style=label.style_label_down, color=color.new(color.gray, 70), textcolor=color.gray, size=size.tiny, force_overlay=true)
+        label.new(bar_index, close, "💤 V2", style=label.style_label_down, color=color.new(color.gray, 70), textcolor=color.gray, size=size.tiny, tooltip=armed_tooltip, force_overlay=true)
     if setup_v4 and pred_round_long and allow_long and f_setup_cooldown_ok("V4", "LONG", last_pred_long_bar)
         armed_setup_id := "V4"
         armed_bar := bar_index
@@ -3011,7 +3011,7 @@ if pred_round_delay_active
         armed_size_info := "V4 WR64%"
         armed_conditions_mr := mr_osc
         armed_conditions_z0 := z0
-        label.new(bar_index, close, "💤 V4", style=label.style_label_up, color=color.new(color.gray, 70), textcolor=color.gray, size=size.tiny, force_overlay=true)
+        label.new(bar_index, close, "💤 V4", style=label.style_label_up, color=color.new(color.gray, 70), textcolor=color.gray, size=size.tiny, tooltip=armed_tooltip, force_overlay=true)
 
 // Setup #4: CLD FALL-RISE after UP (64% WR, improved from 47%)
 bool setup_cld_fall_rise_up_raw = cld_continuation and cld_move_up
@@ -3353,10 +3353,7 @@ f_calc_survival_zone_params(bool force_low_fit, bool final_squeeze, bool squeeze
 // PLOTTING
 // ═══════════════════════════════════════════════════════════════════════════
 
-// 1. Predictive MA (Kalman-smoothed)
-plot_pred_ma = plot(pred_ma, "Predictive MA", color=col_ma_base, linewidth=3, style=plot.style_line, force_overlay=true)
-
-// 2. Baseline MA & Bands (Reference)
+// 1. Baseline MA & Bands (Reference)
 p_base = plot(ma0, "Baseline MA", color=col_base, linewidth=2, style=plot.style_line, force_overlay=true, display=simple_mode ? display.data_window : display.all)
 // Baseline bands removed from plot to reduce clutter, as Survival Zones provide the main context
 

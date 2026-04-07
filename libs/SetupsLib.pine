@@ -686,8 +686,28 @@ export f_build_setup_db_v19(array<Family> fam) =>
     SetupSpec s9 = SetupSpec.new("S9", "CFV+TE+LTFlo", "SHORT", FAM_VEL, 73.0, 10.30, 0.80, -1.20, 16, "WR73 Sh10.3 Ann248", na, 1.25, "DECOUPLE", 0, SS_PRED_GT_P75, 1.0, 109, 65536)
     // S10: Momentum exhaustion with velocity decoupling
     SetupSpec s10 = SetupSpec.new("S10", "PredMA+VelDec", "SHORT", FAM_VEL, 61.5, 12.80, 0.80, -1.20, 14, "WR61.5 Sh12.8 Ann252", na, 1.30, "DECOUPLE", 0, SS_VEC_GT_P75, 1.0, 110, 131072)
+    // L1-L8: Long setups with enrichment
+    SetupSpec l1 = SetupSpec.new("L1", "TE0.8+CFVrise", "LONG", FAM_TRAN, 63.6, 11.34, 0.80, -1.20, 15, "WR63.6 Sh11.34 MAE-0.20", na, 1.17, "MR", 0, SS_MR_LT_P25, 1.0, 201, 8)
+    SetupSpec l2 = SetupSpec.new("L2", "CFVrising", "LONG", FAM_TRAN, 51.7, 10.79, 0.80, -1.20, 14, "WR51.7 Sh10.79 t*=12", na, 1.30, "INNOVATION", 0, SS_PRED_GT_P75, 1.0, 202, 16)
+    SetupSpec l3 = SetupSpec.new("L3", "CFV+VelRec", "LONG", FAM_TRAN, 66.7, 9.04, 0.80, -1.20, 16, "WR66.7 Sh9.04 MAE-0.35", na, 1.15, "RECOUPLE", 0, SS_VEC_GT_P75, 1.0, 203, 32)
     // L4: Regime shift / recoupling after a chaotic decoupling phase
     SetupSpec l4 = SetupSpec.new("L4", "Trans+TE0.8", "LONG", FAM_TRAN, 55.8, 8.45, 0.80, -1.20, 12, "WR55.8 Sh8.45 MAE-0.47", na, 1.05, "RECOUPLE", 0, SS_VEC_GT_P75, 1.0, 104, 2)
+    SetupSpec l5 = SetupSpec.new("L5", "MRStrict+0.5", "LONG", FAM_MR, 68.0, 9.09, 0.80, -1.20, 8, "WR68 Sh9.09 Ann88", na, 1.18, "MR", 0, SS_MR_GT_P75, 1.0, 205, 262144)
+    SetupSpec l6 = SetupSpec.new("L6", "LReentry+VecDiv", "LONG", FAM_TRAN, 70.0, 5.00, 0.80, -1.20, 12, "WR70 Sh5.00", na, 1.12, "RECOUPLE", 0, SS_TE_LT_P25, 1.0, 206, 524288)
+    SetupSpec l7 = SetupSpec.new("L7", "CFV+TE+LTFhi", "LONG", FAM_TRAN, 72.5, 9.80, 0.80, -1.20, 16, "WR72.5 Sh9.8 Ann235", na, 1.22, "MR", 0, SS_MR_LT_P25, 1.0, 207, 1048576)
+    SetupSpec l8 = SetupSpec.new("L8", "PredMA+VelRec", "LONG", FAM_TRAN, 60.0, 11.50, 0.80, -1.20, 14, "WR60 Sh11.5 Ann220", na, 1.28, "RECOUPLE", 0, SS_VEC_GT_P75, 1.0, 208, 2097152)
+
+    // V1-V4: Velocity/Volatility setups
+    SetupSpec v1 = SetupSpec.new("V1", "BounceFire", "LONG", FAM_UNC, 81.0, 6.10, 0.80, -1.20, 8, "WR81 Sortino18.3 t*=6", na, 1.17, "MR", 0, SS_MR_LT_P25 + SS_LTF_LT_P20, 1.0, 301, 64)
+    SetupSpec v2 = SetupSpec.new("V2", "MRSetup", "SHORT", FAM_MR, 73.0, 4.40, 0.80, -1.20, 10, "WR73 Sh4.4 t*=5", na, 1.26, "MR", 0, SS_LTF_GT_P80, 1.0, 302, 128)
+    SetupSpec v3 = SetupSpec.new("V3", "Transition", "LONG", FAM_TRAN, 75.0, 2.30, 0.80, -1.20, 12, "N=92 merge→V1 boost", na, 1.14, "MR", 0, SS_VEC_GT_P75 + SS_PRED_GT_P75, 1.0, 303, 256)
+    SetupSpec v4 = SetupSpec.new("V4", "VelRecouple", "LONG", FAM_TRAN, 64.0, 2.80, 0.80, -1.50, 14, "WR64 edge<1 tighten", na, 0.97, "RECOUPLE", 0, SS_TE_LT_P25, 1.0, 304, 512)
+
+    // Numeric setups (engine events)
+    SetupSpec s81 = SetupSpec.new("81", "CORR⊥+MR", "LONG", FAM_UNC, 81.0, 0.0, 0.80, -1.20, 12, "81% WR corr-bottom+MR", na, 1.20, "MR", 0, SS_VEC_GT_P75, 1.0, 381, 1024)
+    SetupSpec s73 = SetupSpec.new("73", "CORR↑+MR", "SHORT", FAM_VEL, 73.0, 0.0, 0.80, -1.20, 12, "73% WR corr-peak+MR", na, 1.15, "MR", 0, SS_VEC_GT_P75, 1.0, 373, 2048)
+    SetupSpec s75 = SetupSpec.new("75", "BearDiv⊥OS", "SHORT", FAM_VEL, 75.0, 0.0, 0.80, -1.20, 12, "75% WR bear-div oversold", na, 1.10, "MR", 0, SS_VEC_GT_P75, 1.0, 375, 4096)
+    SetupSpec s64 = SetupSpec.new("64", "CLD↗", "LONG", FAM_CONT, 64.0, 0.0, 0.80, -1.20, 14, "97% continuation pattern", na, 1.05, "MOMENTUM", 0, SS_NONE, 1.0, 364, 4194304)
 
     array.push(db, s1)
     array.push(db, s2)
@@ -698,7 +718,22 @@ export f_build_setup_db_v19(array<Family> fam) =>
     array.push(db, s8)
     array.push(db, s9)
     array.push(db, s10)
+    array.push(db, l1)
+    array.push(db, l2)
+    array.push(db, l3)
     array.push(db, l4)
+    array.push(db, l5)
+    array.push(db, l6)
+    array.push(db, l7)
+    array.push(db, l8)
+    array.push(db, v1)
+    array.push(db, v2)
+    array.push(db, v3)
+    array.push(db, v4)
+    array.push(db, s81)
+    array.push(db, s73)
+    array.push(db, s75)
+    array.push(db, s64)
 
     db
 
