@@ -1671,6 +1671,45 @@ bool mr_signal = mr_event
 [squeeze_bull, squeeze_bear, final_squeeze_signal, bw_pct] = BandsLib.f_detect_squeeze(z3_up, z3_dn, c0, corr_damping)
 
 // ═══════════════════════════════════════════════════════════════════════════
+// PHI-DIVERGENCE SCORE (continuous pressure accumulation detector)
+// ═══════════════════════════════════════════════════════════════════════════
+[phi_div_score, phi_onset, phi_spread, phi_accel] = TAUtilityLib.f_phi_divergence_score(PhiLatch, PhiTotal_orth, 5, 3)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MAHALANOBIS SQUEEZE CACHE (covariance matrix for 4D structural features)
+// ═══════════════════════════════════════════════════════════════════════════
+var float sqm_v1 = 1.0, var float sqm_v2 = 1.0, var float sqm_v3 = 1.0, var float sqm_v4 = 1.0
+var float sqm_c12 = 0.0, var float sqm_c13 = 0.0, var float sqm_c14 = 0.0
+var float sqm_c23 = 0.0, var float sqm_c24 = 0.0, var float sqm_c34 = 0.0
+var float sqm_innov_bw_mean = 0.0, var float sqm_innov_bw_std = 1.0
+float sqm_arm_thresh = 1.5  // Mahalanobis distance threshold for armed gate
+int sqm_cov_len = knn_norm_len  // Use same 200-bar window as kNN normalization
+
+// Recalc covariances when kNN percentiles update
+bool shouldrecalcpercentiles = bar_index % 25 == 0
+if shouldrecalcpercentiles
+    float _ibw = innov_band_upper - innov_band_lower
+    sqm_innov_bw_mean := ta.sma(_ibw, sqm_cov_len)
+    sqm_innov_bw_std  := math.max(ta.stdev(_ibw, sqm_cov_len), 1e-6)
+    
+    // Compute 4D features for covariance estimation (use previous bar's z3_bwv)
+    float _prev_z3_bwv = nz(sqz_raw.z3_bwv, 0.0)  // from previous bar's SqzState
+    [_sz1, _sz2, _sz3, _sz4] = BandsLib.f_squeeze_mahal_features(
+        bw_pct, _ibw, sqm_innov_bw_mean, sqm_innov_bw_std, phi_div_score, _prev_z3_bwv)
+    
+    // Update variances and covariances
+    sqm_v1  := math.max(ta.variance(_sz1, sqm_cov_len), 1e-6)
+    sqm_v2  := math.max(ta.variance(_sz2, sqm_cov_len), 1e-6)
+    sqm_v3  := math.max(ta.variance(_sz3, sqm_cov_len), 1e-6)
+    sqm_v4  := math.max(ta.variance(_sz4, sqm_cov_len), 1e-6)
+    sqm_c12 := BandsLib.f_covariance(_sz1, _sz2, sqm_cov_len)
+    sqm_c13 := BandsLib.f_covariance(_sz1, _sz3, sqm_cov_len)
+    sqm_c14 := BandsLib.f_covariance(_sz1, _sz4, sqm_cov_len)
+    sqm_c23 := BandsLib.f_covariance(_sz2, _sz3, sqm_cov_len)
+    sqm_c24 := BandsLib.f_covariance(_sz2, _sz4, sqm_cov_len)
+    sqm_c34 := BandsLib.f_covariance(_sz3, _sz4, sqm_cov_len)
+
+// ═══════════════════════════════════════════════════════════════════════════
 // SQUEEZE THROAT DETECTOR (TAUtilityLib: Hurst RS + composite state machine)
 // ═══════════════════════════════════════════════════════════════════════════
 // Global persistent state (Pine v6: arrays/vars must live in caller scope)
@@ -1703,6 +1742,19 @@ float burst_for_sqz = burst_osc_mode == "pathA" ? path_A : f7_burst_raw
 float burst_pct_val = math.min(1.0, math.max(0.0, (burst_for_sqz + 3.0) / 6.0))
 bool burst_pct_high = burst_pct_val > 0.80
 
+// Compute Mahalanobis distance for current bar
+float _curr_z3_bwv = nz(sqz_raw.z3_bwv, 0.0)  // from previous bar
+[sz1, sz2, sz3, sz4] = BandsLib.f_squeeze_mahal_features(
+    bw_pct, innov_band_upper - innov_band_lower,
+    sqm_innov_bw_mean, sqm_innov_bw_std,
+    phi_div_score, _curr_z3_bwv)
+
+float sqm_dist = BandsLib.f_mahalanobis_4x4(
+    sz1, sz2, sz3, sz4,
+    sqm_v1, sqm_v2, sqm_v3, sqm_v4,
+    sqm_c12, sqm_c13, sqm_c14,
+    sqm_c23, sqm_c24, sqm_c34, 0.05)
+
 // Call squeeze state machine (tuple return for var reassignment)
 TAUtilityLib.SqzState sqz_raw = na
 [sqz_raw, sqz_armed, sqz_arm_bar, sqz_cooldown_bar, sqz_low_counter] = TAUtilityLib.f_squeeze_state(
@@ -1710,7 +1762,8 @@ TAUtilityLib.SqzState sqz_raw = na
     ltf_at_extreme, burst_pct_high,
     sqz_bwv_len, sqz_bwz_len, sqz_bwv_sq, sqz_bwv_ex,
     sqz_arm_thresh, sqz_cooldown,
-    sqz_armed, sqz_arm_bar, sqz_cooldown_bar, sqz_low_counter)
+    sqz_armed, sqz_arm_bar, sqz_cooldown_bar, sqz_low_counter,
+    phi_div_score, phi_onset, sqm_dist, sqm_arm_thresh)
 
 // Extract computed state
 bool throat_active  = sqz_raw.active
@@ -4344,9 +4397,17 @@ f_render_info_table(table info_tbl) =>
     color sqz_c = throat_active ? color.orange : (sqz_armed_state ? color.yellow : color.gray)
     table.cell(info_tbl, 0, 13, "Squeeze", text_color=color.black, text_size=size.tiny, tooltip="Throat active=fire, armed=waiting for expansion")
     table.cell(info_tbl, 1, 13, (throat_active ? "🔥" : (sqz_armed_state ? "💤" : "—")) + " " + str.tostring(squeeze_score, "#.##"), text_color=sqz_c, text_size=size.tiny)
+    
+    // Phi divergence + Mahalanobis armed gates
+    color phi_c = phi_onset ? color.orange : (phi_div_score > 0.4 ? color.yellow : color.gray)
+    table.cell(info_tbl, 0, 14, "Phi Div", text_color=color.black, text_size=size.tiny, tooltip="PhiLatch-PhiOrth spread intensity [0..1]. Onset=pressure accumulation start")
+    table.cell(info_tbl, 1, 14, (phi_onset ? "⚡" : "") + str.tostring(phi_div_score, "#.##"), text_color=phi_c, text_size=size.tiny)
+    color mahal_c = sqz_raw.mahal_armed ? color.orange : color.gray
+    table.cell(info_tbl, 0, 15, "Mahal", text_color=color.black, text_size=size.tiny, tooltip="4D structural squeeze distance. >1.5 = armed (multi-feature compression)")
+    table.cell(info_tbl, 1, 15, str.tostring(sqm_dist, "#.##") + (sqz_raw.mahal_armed ? " ✓" : ""), text_color=mahal_c, text_size=size.tiny)
 
-    table.cell(info_tbl, 0, 14, "Basket Fit", text_color=color.black, text_size=size.tiny)
-    table.cell(info_tbl, 1, 14, fit_label + " " + str.tostring(basket_fit, "#.0") + "%", text_color=fit_color, text_size=size.tiny)
+    table.cell(info_tbl, 0, 16, "Basket Fit", text_color=color.black, text_size=size.tiny)
+    table.cell(info_tbl, 1, 16, fit_label + " " + str.tostring(basket_fit, "#.0") + "%", text_color=fit_color, text_size=size.tiny)
 
 f_render_knn_debug_table(table knn_dbg_tbl) =>
     int hist_size = array.size(f1_history)

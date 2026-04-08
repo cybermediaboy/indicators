@@ -271,3 +271,33 @@ export f_mahalanobis_4x4(float z1, float z2, float z3, float z4, float var1, flo
     
     // Return distance (sqrt of quadratic form)
     math.sqrt(math.max(solved ? quad_full : quad_diag, 0.0))
+
+// ─── EXPORT: f_squeeze_mahal_features ────────────────────────────────────
+// Computes normalized 4D feature vector for Mahalanobis squeeze distance.
+// All normalization references passed as pre-computed caller-side cache.
+//
+// @param bw_pct        Z3 bandwidth percentile [0..1] from f_detect_squeeze
+// @param innov_bw      innovbandupper - innovbandlower
+// @param innov_bw_mean ta.sma(innov_bw, len) — caller cache
+// @param innov_bw_std  ta.stdev(innov_bw, len) — caller cache
+// @param phi_div_score [0..1] from TAUtilityLib.f_phi_divergence_score
+// @param z3_bwv        z3_bw velocity (fractional) from SqzState
+// @returns [sz1, sz2, sz3, sz4]
+//   sz1 — structural narrowing (1 - bw_pct)
+//   sz2 — innov BW z-score (negative = narrow), inverted
+//   sz3 — phi divergence score (pressure accumulation proxy)
+//   sz4 — Z3 BW velocity inverted (contraction = positive)
+export f_squeeze_mahal_features(
+  float bw_pct,
+  float innov_bw,
+  float innov_bw_mean,
+  float innov_bw_std,
+  float phi_div_score,
+  float z3_bwv) =>
+
+    float sz1 = 1.0 - nz(bw_pct, 1.0)
+    float sz2 = innov_bw_std > 1e-6 ?
+                -(innov_bw - innov_bw_mean) / innov_bw_std : 0.0
+    float sz3 = nz(phi_div_score, 0.0)
+    float sz4 = -(nz(z3_bwv, 0.0))
+    [sz1, sz2, sz3, sz4]

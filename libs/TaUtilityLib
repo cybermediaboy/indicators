@@ -2571,6 +2571,10 @@ export type SqzState
     bool  armed          // squeeze arm state
     bool  active         // throat fire: armed + expanding + reactive_confirm
     bool  sq_expanding   // at least one band expanding this bar
+    float phi_div_score  // phi-divergence intensity [0..1]
+    bool  phi_onset      // first bar of phi divergence
+    float mahal_dist     // 4x4 Mahalanobis distance (0 if not computed)
+    bool  mahal_armed    // mahal_dist > mahal_arm_thresh
 
 // ─── EXPORT: f_hurst_rs ──────────────────────────────────────────────────────
 // Rescaled Range (R/S) Hurst exponent from a pre-filled log-return buffer.
@@ -2606,6 +2610,47 @@ export f_hurst_rs(array<float> log_ret_buf) =>
         h := math.max(0.1, math.min(h, 0.9))
     h
 
+// ─── EXPORT: f_phi_divergence_score ──────────────────────────────────────
+// Detects start of phi-lines divergence and computes continuous acceleration score.
+// Phi divergence typically coincides with volume surge and squeeze exit move onset.
+//
+// @param phi_latch     PhiLatch oscillator value (series float)
+// @param phi_orth      PhiTotalOrth oscillator value (series float)
+// @param div_len       Lookback for divergence slope (default 5)
+// @param accel_len     Smoothing for acceleration signal (default 3)
+// @returns [phi_div_score, phi_diverg_start, phi_spread, phi_accel]
+//   phi_div_score  float [0..1]  — composite divergence intensity
+//   phi_diverg_start bool        — first bar of new divergence onset
+//   phi_spread       float       — current |PhiLatch - PhiOrth|
+//   phi_accel        float       — d(phi_spread)/dt smoothed
+export f_phi_divergence_score(
+  float phi_latch,
+  float phi_orth,
+  int   div_len,
+  int   accel_len) =>
+
+    float spread      = math.abs(phi_latch - phi_orth)
+    float spread_prev = nz(spread[div_len], spread)
+    float spread_std  = ta.stdev(spread, 50)
+    float spread_mean = ta.sma(spread, 50)
+
+    // Spread z-score (positive = diverging)
+    float spread_z = spread_std > 1e-10 ? (spread - spread_mean) / spread_std : 0.0
+
+    // Acceleration: delta of spread, smoothed
+    float raw_accel  = spread - nz(spread[1], spread)
+    float phi_accel  = ta.ema(raw_accel, accel_len)
+
+    // Divergence onset: spread accelerating from low base
+    bool  was_low    = nz(spread[div_len]) < spread_mean
+    bool  now_rising = phi_accel > 0.0 and spread_z > 0.3
+    bool  phi_diverg_start = was_low and now_rising and not (nz(was_low[1]) and nz(now_rising[1]))
+
+    // Score [0..1]: clamp z-score to [0..3], normalize
+    float phi_div_score = math.min(math.max(spread_z, 0.0), 3.0) / 3.0
+
+    [phi_div_score, phi_diverg_start, spread, phi_accel]
+
 // ─── EXPORT: f_squeeze_state ─────────────────────────────────────────────────
 // Computes squeeze composite score and throat state machine.
 // All persistent state (armed, arm_bar, cooldown_bar, low_counter) is passed
@@ -2624,6 +2669,10 @@ export f_hurst_rs(array<float> log_ret_buf) =>
 // @param cooldown_bars              Bars between fires (default 8)
 // @param prev_armed / prev_arm_bar / prev_cooldown_bar / prev_low_counter
 //                                   Previous state vars from caller
+// @param phi_div_score              [0..1] from f_phi_divergence_score
+// @param phi_onset                  bool from f_phi_divergence_score
+// @param mahal_dist                 Mahalanobis distance from BandsLib.f_mahalanobis_4x4
+// @param mahal_arm_thresh           Threshold for mahal_armed gate (default 1.5)
 // @returns [SqzState, new_armed, new_arm_bar, new_cooldown_bar, new_low_counter]
 export f_squeeze_state(
   float innov_upper, float innov_lower,
@@ -2640,7 +2689,11 @@ export f_squeeze_state(
   bool  prev_armed,
   int   prev_arm_bar,
   int   prev_cooldown_bar,
-  int   prev_low_counter) =>
+  int   prev_low_counter,
+  float phi_div_score,
+  bool  phi_onset,
+  float mahal_dist,
+  float mahal_arm_thresh) =>
 
     // ── Band widths ──────────────────────────────────────────────────────────
     float innov_bw  = innov_upper - innov_lower
@@ -2670,8 +2723,10 @@ export f_squeeze_state(
 
     float score = c1 * 0.25 + c2 * 0.25 + c3 * 0.175 + c4 * 0.175 + c5 * 0.15
 
-    // ── Reactive confirms ────────────────────────────────────────────────────
-    bool reactive = ltf_at_extreme or burst_pct_high
+    // ── Reactive confirms (phi + mahal gates added) ──────────────────────────
+    bool phi_gate    = phi_div_score > 0.4 or phi_onset
+    bool mahal_gate  = mahal_dist > mahal_arm_thresh
+    bool reactive    = ltf_at_extreme or burst_pct_high or (phi_gate and mahal_gate)
 
     // ── Expansion flags ──────────────────────────────────────────────────────
     bool sq_exp = (i_bwv > bwv_ex_thresh) or (z_bwv > bwv_ex_thresh)
@@ -2683,8 +2738,9 @@ export f_squeeze_state(
     int  new_low_counter    = prev_low_counter
     bool fire               = false
 
-    // ARM
-    if not new_armed and score >= arm_thresh
+    // ARM: score OR (phi_onset + score > 0.4)
+    bool arm_cond = score >= arm_thresh or (phi_onset and score > arm_thresh * 0.7)
+    if not new_armed and arm_cond
         new_armed   := true
         new_arm_bar := bar_index
 
@@ -2705,5 +2761,6 @@ export f_squeeze_state(
     else
         new_low_counter := 0
 
-    SqzState res = SqzState.new(score, i_bwv, z_bwv, i_bwz, z_bwz, hurst_exp, new_armed, fire, sq_exp)
+    bool mahal_armed = mahal_dist > mahal_arm_thresh
+    SqzState res = SqzState.new(score, i_bwv, z_bwv, i_bwz, z_bwz, hurst_exp, new_armed, fire, sq_exp, phi_div_score, phi_onset, mahal_dist, mahal_armed)
     [res, new_armed, new_arm_bar, new_cooldown_bar, new_low_counter]
