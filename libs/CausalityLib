@@ -564,8 +564,9 @@ export f_compute_te_ensemble(array<float> pri_arr, array<float> b1, array<float>
         float te_w5 = use5 and not self5 and math.abs(te_score5) > 1e-10 ? math.abs(te_score5) / te_total_score : 0.0
         float te_dir_raw = te_w1 * te_dir1 + te_w2 * te_dir2 + te_w3 * te_dir3 + te_w4 * te_dir4 + te_w5 * te_dir5
         float te_str_raw = te_w1 * math.abs(te_score1) + te_w2 * math.abs(te_score2) + te_w3 * math.abs(te_score3) + te_w4 * math.abs(te_score4) + te_w5 * math.abs(te_score5)
-        te_osc_out := smoothing > 1 ? ta.ema(nz(te_dir_raw, 0.0), smoothing) : nz(te_dir_raw, 0.0)
-        te_str_out := smoothing > 1 ? ta.ema(nz(te_str_raw, 0.0), smoothing) : nz(te_str_raw, 0.0)
+        float te_signed_score = te_dir_raw * te_str_raw
+        te_osc_out := smoothing > 1 ? ta.ema(te_signed_score, smoothing) : te_signed_score
+        te_str_out := smoothing > 1 ? ta.ema(te_str_raw, smoothing) : te_str_raw
         te_dir_out := te_osc_out
     [te_osc_out, te_str_out, te_dir_out]
 

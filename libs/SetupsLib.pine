@@ -497,12 +497,18 @@ export f_setup_id_to_code(string setup_id) =>
         setup_code := 109
     else if setup_id == "S10"
         setup_code := 110
+    else if setup_id == "S11"
+        setup_code := 111
+    else if setup_id == "S12"
+        setup_code := 112
     else if setup_id == "L1"
         setup_code := 201
     else if setup_id == "L2"
         setup_code := 202
     else if setup_id == "L3"
         setup_code := 203
+    else if setup_id == "L4"
+        setup_code := 104
     else if setup_id == "L5"
         setup_code := 205
     else if setup_id == "L6"
@@ -511,6 +517,8 @@ export f_setup_id_to_code(string setup_id) =>
         setup_code := 207
     else if setup_id == "L8"
         setup_code := 208
+    else if setup_id == "L9"
+        setup_code := 209
     else if setup_id == "V1"
         setup_code := 301
     else if setup_id == "V2"
@@ -545,12 +553,18 @@ export f_setup_id_to_mask(string setup_id) =>
         setup_mask := 65536
     else if setup_id == "S10"
         setup_mask := 131072
+    else if setup_id == "S11"
+        setup_mask := 16777216
+    else if setup_id == "S12"
+        setup_mask := 8388608
     else if setup_id == "L1"
         setup_mask := 8
     else if setup_id == "L2"
         setup_mask := 16
     else if setup_id == "L3"
         setup_mask := 32
+    else if setup_id == "L4"
+        setup_mask := 2
     else if setup_id == "L5"
         setup_mask := 262144
     else if setup_id == "L6"
@@ -559,6 +573,8 @@ export f_setup_id_to_mask(string setup_id) =>
         setup_mask := 1048576
     else if setup_id == "L8"
         setup_mask := 2097152
+    else if setup_id == "L9"
+        setup_mask := 4194304
     else if setup_id == "V1"
         setup_mask := 64
     else if setup_id == "V2"
@@ -686,6 +702,7 @@ export f_build_setup_db_v19(array<Family> fam) =>
     SetupSpec s9 = SetupSpec.new("S9", "CFV+TE+LTFlo", "SHORT", FAM_VEL, 73.0, 10.30, 0.80, -1.20, 16, "WR73 Sh10.3 Ann248", na, 1.25, "DECOUPLE", 0, SS_PRED_GT_P75, 1.0, 109, 65536)
     // S10: Momentum exhaustion with velocity decoupling
     SetupSpec s10 = SetupSpec.new("S10", "PredMA+VelDec", "SHORT", FAM_VEL, 61.5, 12.80, 0.80, -1.20, 14, "WR61.5 Sh12.8 Ann252", na, 1.30, "DECOUPLE", 0, SS_VEC_GT_P75, 1.0, 110, 131072)
+    SetupSpec s12 = SetupSpec.new("S12", "PhiDiv+MRinfl", "SHORT", FAM_TRAN, 73.9, 8.20, 0.80, -1.20, 12, "WR73.9 avg-0.45% PhiLatch lead", na, 1.18, "INNOVATION", 0, SS_MR_GT_P75, 1.0, 112, 8388608)
     // L1-L8: Long setups with enrichment
     SetupSpec l1 = SetupSpec.new("L1", "TE0.8+CFVrise", "LONG", FAM_TRAN, 63.6, 11.34, 0.80, -1.20, 15, "WR63.6 Sh11.34 MAE-0.20", na, 1.17, "MR", 0, SS_MR_LT_P25, 1.0, 201, 8)
     SetupSpec l2 = SetupSpec.new("L2", "CFVrising", "LONG", FAM_TRAN, 51.7, 10.79, 0.80, -1.20, 14, "WR51.7 Sh10.79 t*=12", na, 1.30, "INNOVATION", 0, SS_PRED_GT_P75, 1.0, 202, 16)
@@ -696,6 +713,7 @@ export f_build_setup_db_v19(array<Family> fam) =>
     SetupSpec l6 = SetupSpec.new("L6", "LReentry+VecDiv", "LONG", FAM_TRAN, 70.0, 5.00, 0.80, -1.20, 12, "WR70 Sh5.00", na, 1.12, "RECOUPLE", 0, SS_TE_LT_P25, 1.0, 206, 524288)
     SetupSpec l7 = SetupSpec.new("L7", "CFV+TE+LTFhi", "LONG", FAM_TRAN, 72.5, 9.80, 0.80, -1.20, 16, "WR72.5 Sh9.8 Ann235", na, 1.22, "MR", 0, SS_MR_LT_P25, 1.0, 207, 1048576)
     SetupSpec l8 = SetupSpec.new("L8", "PredMA+VelRec", "LONG", FAM_TRAN, 60.0, 11.50, 0.80, -1.20, 14, "WR60 Sh11.5 Ann220", na, 1.28, "RECOUPLE", 0, SS_VEC_GT_P75, 1.0, 208, 2097152)
+    SetupSpec l9 = SetupSpec.new("L9", "PhiDiv+MRinfl", "LONG", FAM_TRAN, 75.3, 9.50, 0.80, -1.20, 15, "WR75.3 avg+0.80% PhiLatch lead", na, 1.22, "INNOVATION", 0, SS_MR_LT_P25, 1.0, 209, 4194304)
 
     // V1-V4: Velocity/Volatility setups
     SetupSpec v1 = SetupSpec.new("V1", "BounceFire", "LONG", FAM_UNC, 81.0, 6.10, 0.80, -1.20, 8, "WR81 Sortino18.3 t*=6", na, 1.17, "MR", 0, SS_MR_LT_P25 + SS_LTF_LT_P20, 1.0, 301, 64)
@@ -718,6 +736,7 @@ export f_build_setup_db_v19(array<Family> fam) =>
     array.push(db, s8)
     array.push(db, s9)
     array.push(db, s10)
+    array.push(db, s12)
     array.push(db, l1)
     array.push(db, l2)
     array.push(db, l3)
@@ -726,6 +745,7 @@ export f_build_setup_db_v19(array<Family> fam) =>
     array.push(db, l6)
     array.push(db, l7)
     array.push(db, l8)
+    array.push(db, l9)
     array.push(db, v1)
     array.push(db, v2)
     array.push(db, v3)

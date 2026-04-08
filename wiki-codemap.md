@@ -299,6 +299,125 @@ MC Simulation ─→ P10/P50/P90 Cone ─→ Setup Validation (MAE/MFE/RR)
 
 ---
 
+## Bit-Encoded Export Reference
+
+All diagnostic exports use `display.data_window` (not plotted on chart, available in Data Window and CSV export).
+
+### Column 39: `Debug Combined`
+**Formula**: `setup_debug_merged + cld_debug_bitfield * 100000.0`
+
+| Bits | Field | Values |
+|---|---|---|
+| 0-13 | Setup debug code | S1=100, S5=500, S6=600, S7=700, S8=800, S9=900, S10=1000, S11=1110, S12=1120, L1=1100, L2=1200, L3=1300, L5=1500, L6=1600, L7=1700, L8=1800, L9=1900, V1=2100, V2=2200, V3=2300, V4=2400, 81=8100, 73=7300, 75=7500, 64=6400 |
+| 14 | Setup active flag | `10000.0` when setup code > 0 |
+| 15 | Realtime flag | `20000.0` on realtime bars |
+| 17-18 | CLD continuation | `100000.0` (encoded as `100 * 100000`) |
+| 19-20 | CLD exhaustion | `200000.0` (encoded as `200 * 100000`) |
+| 21-22 | Macro exhaustion | `300000.0` (encoded as `300 * 100000`) |
+
+**Decode**: `setup_code = value % 100000`, `cld_code = floor(value / 100000)`. S10 special case: if `cat=1, num=0`, set `num=10`.
+
+### Column 40: `MC Visualization`
+MAE/MFE micro squares plotted at absolute price levels. Red = MAE, Lime = MFE. Not a bitfield.
+
+### Column 30: `Trade State`
+**Formula**: `is_realtime*1000 + bt_table_ready*100 + mc_has_results*10`
+
+### Column 31: `MC Debug`
+**Formula**: `mc_phase*1000 + mc_chunk_done*100 + bt_validated*10 + bt_confirmed`
+
+### Column 32: `Entry Context`
+**Formula**: `has_pos*1000 + (dir=="LONG"?100:dir=="SHORT"?200:0)`
+
+### Column 33: `Exit Context`
+**Formula**: `(has_pos AND NOT active)*1000 + has_pos*100`
+
+### Column 35: `Setup Context Flags` (16-bit boolean field)
+| Bit | Value | Flag |
+|---|---|---|
+| 0 | 1 | `pred_rounded` |
+| 1 | 2 | `pred_round_long` |
+| 2 | 4 | `pred_round_short` |
+| 3 | 8 | `ltf_is_decoupled` |
+| 4 | 16 | `ltf_decouple_event` |
+| 5 | 32 | `ltf_recouple_event` |
+| 6 | 64 | `phi_informative` |
+| 7 | 128 | `bounce_event` |
+| 8 | 256 | `mr_event` |
+| 9 | 512 | `transition_event` |
+| 10 | 1024 | `cld_continuation` |
+| 11 | 2048 | `cld_exhaustion` |
+| 12 | 4096 | `macro_exhaustion` |
+| 13 | 8192 | `continuation_setup` |
+| 14 | 16384 | `idiosyncratic_flow` |
+| 15 | 32768 | `is_falling_knife` |
+
+### Column 36: `Basket Fit (0-100)`
+Continuous value, not bit-encoded.
+
+### Column 38: `TE Direction`
+Continuous value (-1 to +1 range), not bit-encoded.
+
+### Column 41: `kNN Superpack (Conf|Damp|Fam|Vec)`
+**Formula**: `(confidence << 34) | (corr_damping_q << 31) | (family << 28) | packed_vec`
+= `confidence * 17179869184 + corr_damping_q * 2147483648 + family * 268435456 + packed_vec`
+
+41-bit layout: confidence(7b, bits 34-40) | corr_damping(3b, bits 31-33) | family(3b, bits 28-30) | packed_vec(28b, bits 0-27)
+
+| Component | Bits | Range | Decode |
+|---|---|---|---|
+| Confidence | 34-40 | 0-100 | `floor(value / 17179869184)` |
+| Corr damping | 31-33 | 0-7 | `floor(value % 17179869184 / 2147483648)` → quantized: 0=0.00, 1=0.14, 2=0.29, 3=0.43, 4=0.57, 5=0.71, 6=0.86, 7=1.00 |
+| Family | 28-30 | 0-4 | `floor(value % 2147483648 / 268435456)` → 0=Continuation, 1=MR, 2=Transition, 3=Velocity, 4=Uncertain |
+| Packed vec | 0-27 | 0-268M | `value % 268435456` (28-bit, 7 features × 4 bits each) |
+
+**Decoding example** (Python):
+```python
+def decode_superpack(v):
+    conf = int(v // 17179869184)
+    damp_q = int((v % 17179869184) // 2147483648)
+    family = int((v % 2147483648) // 268435456)
+    pv = int(v % 268435456)
+    corr_damping = damp_q / 7.0  # approximate: 0.00 to 1.00
+    return conf, corr_damping, family, pv
+```
+
+**Packed vector decoding** (via `f_pack_vector_7`):
+Each feature = 3-bit index (0-7) + 1-bit residual (0-1) = 4 bits.
+
+| Feature | Bits | Decode |
+|---|---|---|
+| F1 (VectorOsc) | 0-3 | `idx = pv % 8`, `res = floor(pv/8) % 2` |
+| F2 (BasketCorr) | 4-7 | `idx = floor(pv/16) % 8`, `res = floor(pv/128) % 2` |
+| F3 (InnovZ) | 8-11 | `idx = floor(pv/256) % 8`, `res = floor(pv/2048) % 2` |
+| F4 (TE_Osc) | 12-15 | `idx = floor(pv/4096) % 8`, `res = floor(pv/32768) % 2` |
+| F5 (OrthoZcvb) | 16-19 | `idx = floor(pv/65536) % 8`, `res = floor(pv/524288) % 2` |
+| F6 (PhiDiv) | 20-23 | `idx = floor(pv/1048576) % 8`, `res = floor(pv/8388608) % 2` |
+| F7 (BurstScore) | 24-27 | `idx = floor(pv/16777216) % 8`, `res = floor(pv/134217728) % 2` |
+
+**Reconstruct feature value** from index + residual via Lloyd-Max centroids:
+`centroid = [-2.152, -1.344, -0.756, -0.245, 0.245, 0.756, 1.344, 2.152][idx]`
+`adjusted = centroid + (res - 0.5) * step` where `step ≈ 0.4` (half the gap to nearest centroid)
+
+### Backtest Validator Data Availability
+
+| Required by BT Validator | Available in CSV? | Source |
+|---|---|---|
+| OHLCV | ✅ | Columns 1-5 |
+| Setup fire events | ✅ | Column 39 (Debug Combined) |
+| TP/SL/MaxHold simulation | ✅ | From OHLCV + indicator params |
+| Packed feature history | ✅ (quantized) | Column 41 (kNN Superpack), decode per bar |
+| Raw float features (f1-f7) | ⚠️ Approximate | Reconstruct from packed_vec via `f_reconstruct_feature()` |
+| Setup family classification | ✅ | Column 41 (mc_family component) |
+| kNN confidence | ✅ | Column 41 (confidence component) |
+| BT validator internal state | ❌ | `mc_oracle_dir`, `mc_pct_agree`, `actual_mae`, `actual_mfe` not exported |
+| `arr_setup_id` / `arr_setup_family` history | ⚠️ Reconstructable | From Debug Combined + mc_family per bar |
+| `arr_close` / `arr_ATR` history | ✅ | From OHLCV columns |
+
+**Verdict**: CSV dumps contain **sufficient data for approximate BT validation** via packed vector reconstruction. The quantization error (~0.2-0.4 z-score units) will cause some kNN neighbor ranking differences vs. the live indicator. For exact replication, add raw feature arrays to CSV export.
+
+---
+
 ## Conventions
 
 1. **Input groups**: All inputs use `grp_*` string constants for grouping
