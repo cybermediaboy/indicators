@@ -1667,8 +1667,61 @@ if cusum_triggered
 bool bounce_signal = bounce_event
 bool mr_signal = mr_event
 
-// --- SQUEEZE/BOTTLENECK BREAKOUT DETECTION ---
+// --- SQUEEZE/BOTTLENECK BREAKOUT DETECTION (legacy — kept for backward compat) ---
 [squeeze_bull, squeeze_bear, final_squeeze_signal, bw_pct] = BandsLib.f_detect_squeeze(z3_up, z3_dn, c0, corr_damping)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SQUEEZE THROAT DETECTOR (TAUtilityLib: Hurst RS + composite state machine)
+// ═══════════════════════════════════════════════════════════════════════════
+// Global persistent state (Pine v6: arrays/vars must live in caller scope)
+int hurst_len = 64  // Minimum R/S window (32+ for stable Hurst)
+var array<float> sqz_hurst_buf = array.new_float(0)
+var bool  sqz_armed        = false
+var int   sqz_arm_bar      = 0
+var int   sqz_cooldown_bar = 0
+var int   sqz_low_counter  = 0
+
+// Hurst inputs
+int sqz_bwv_len    = 3   // velocity lookback
+int sqz_bwz_len    = 100 // bw z-score history
+float sqz_bwv_sq   = 0.03 // squeeze velocity threshold
+float sqz_bwv_ex   = 0.02 // expansion velocity threshold
+float sqz_arm_thresh = 0.55 // score to arm
+int sqz_cooldown   = 8  // bars between fires
+
+// Push log-return buffer for Hurst
+float log_ret = math.log(close / nz(close[1], close))
+if array.size(sqz_hurst_buf) >= hurst_len
+    array.shift(sqz_hurst_buf)
+array.push(sqz_hurst_buf, log_ret)
+
+float hurst_exp = is_hard_zone ? TAUtilityLib.f_hurst_rs(sqz_hurst_buf) : 0.5
+
+// Reactive confirms
+bool ltf_at_extreme = ltf_is_decoupled or (not na(ltf_corr_ema) and math.abs(ltf_corr_ema) > 0.6)
+float burst_for_sqz = burst_osc_mode == "pathA" ? path_A : f7_burst_raw
+float burst_pct_val = math.min(1.0, math.max(0.0, (burst_for_sqz + 3.0) / 6.0))
+bool burst_pct_high = burst_pct_val > 0.80
+
+// Call squeeze state machine (tuple return for var reassignment)
+TAUtilityLib.SqzState sqz_raw = na
+[sqz_raw, sqz_armed, sqz_arm_bar, sqz_cooldown_bar, sqz_low_counter] = TAUtilityLib.f_squeeze_state(
+    z3_up, z3_dn, innov_band_upper, innov_band_lower, hurst_exp,
+    ltf_at_extreme, burst_pct_high,
+    sqz_bwv_len, sqz_bwz_len, sqz_bwv_sq, sqz_bwv_ex,
+    sqz_arm_thresh, sqz_cooldown,
+    sqz_armed, sqz_arm_bar, sqz_cooldown_bar, sqz_low_counter)
+
+// Extract computed state
+bool throat_active  = sqz_raw.active
+float squeeze_score = sqz_raw.score
+bool sqz_armed_state = sqz_raw.armed
+bool sqz_expanding  = sqz_raw.sq_expanding
+
+// Legacy compat: override BandsLib squeeze signals with throat state
+bool throat_squeeze_bull  = throat_active and pred_fv_slope_up
+bool throat_squeeze_bear  = throat_active and not pred_fv_slope_up
+bool throat_final_squeeze = throat_active
 
 // --- VECTOR & CORRELATION OSCILLATORS (needed for Synergic Density) ---
 // PVB-style vector oscillator calculation
@@ -3436,8 +3489,8 @@ barcolor(pred_fv_color_candles ? col_ma : na)
 // NOTE: f_calc_scan_correlation_scores moved to BasketLib for universal use
 // Use BasketLib.f_calc_scan_correlation_scores() instead
 
-// Survival Zone Colors & Fill Parameters
-f_calc_survival_zone_params(bool force_low_fit, bool final_squeeze, bool squeeze_bull, bool squeeze_bear,bool strong_bull, bool strong_bear, color col_base, color col_ma_base, color innov_band_col, bool cld_cont, bool cld_exh) =>
+// Survival Zone Colors & Fill Parameters — updated for squeeze throat detector
+f_calc_survival_zone_params(bool force_low_fit, bool final_squeeze, bool squeeze_bull, bool squeeze_bear, bool sqz_armed, float sqz_score, bool strong_bull, bool strong_bear, color col_base, color col_ma_base, color innov_band_col, bool cld_cont, bool cld_exh) =>
     // Transparency boosts for low-fit regime
     int fill_boost = force_low_fit ? 5 : 0
     int fill_z1 = force_low_fit ? 96 : 90
@@ -3445,16 +3498,20 @@ f_calc_survival_zone_params(bool force_low_fit, bool final_squeeze, bool squeeze
     int fill_z2_squeeze = force_low_fit ? 88 : 80
     int fill_z3 = force_low_fit ? 90 : 85
     int fill_z3_squeeze = force_low_fit ? 86 : 75
-    
-    // Zone 3 plot color
-    color z3_col = final_squeeze ? (squeeze_bull ? color.new(color.blue, 40) : color.new(color.white, 40)) : color.new(color.gray, 80)
-    
-    // Zone 2 plot color
-    color z2_col = squeeze_bull ? color.new(color.rgb(0, 100, 0), fill_z2_squeeze) : (squeeze_bear ? color.new(color.rgb(139, 0, 0), fill_z2_squeeze) : color.new(color.yellow, fill_z2))
-    
+
+    // Zone 3 plot color — throat active gets blue/white, armed gets dim blue
+    color z3_col = final_squeeze ? (squeeze_bull ? color.new(color.blue, 40) : color.new(color.white, 40)) :
+                   sqz_armed ? color.new(color.blue, 70) : color.new(color.gray, 80)
+
+    // Zone 2 plot color — throat direction overrides, armed gets muted amber
+    color z2_col = squeeze_bull ? color.new(color.rgb(0, 100, 0), fill_z2_squeeze) :
+                   (squeeze_bear ? color.new(color.rgb(139, 0, 0), fill_z2_squeeze) :
+                    (sqz_armed ? color.new(color.rgb(100, 50, 0), fill_z2_squeeze + 10) :
+                     color.new(color.yellow, fill_z2)))
+
     // Zone 1 plot color
     color z1_col = final_squeeze ? (squeeze_bull ? color.new(color.rgb(0, 100, 0), fill_z1) : color.new(color.rgb(139, 0, 0), fill_z1)) : color.new(color.gray, fill_z1)
-    
+
     // 3-way alignment detection
     bool ma_green = color.r(col_ma_base) < 128 and color.g(col_ma_base) > 128
     bool ma_red = color.r(col_ma_base) > 128 and color.g(col_ma_base) < 128
@@ -3464,21 +3521,33 @@ f_calc_survival_zone_params(bool force_low_fit, bool final_squeeze, bool squeeze
     bool cld_red = cld_exh
     bool all_green = ma_green and innov_green and cld_green
     bool all_red = ma_red and innov_red and cld_red
-    
-    // Zone 1 fill color
-    color z1_fill = all_green ? color.new(color.lime, 50 + fill_boost) : (all_red ? color.new(color.red, 50 + fill_boost) : color.new(col_base, fill_z1))
-    
-    // Zone 2 fill color
-    color z2_fill = squeeze_bull ? color.new(color.rgb(0, 100, 0), fill_z2_squeeze) : (squeeze_bear ? color.new(color.rgb(139, 0, 0), fill_z2_squeeze) : color.new(color.yellow, fill_z2))
-    
-    // Zone 3 fill colors with dynamic opacity
+
+    // Zone 1 fill color — squeeze score modulates intensity
+    int z1_sqz_alpha = int(40 + sqz_score * 30)  // 40-70 range based on score
+    color z1_fill = all_green ? color.new(color.lime, 50 + fill_boost) :
+                    (all_red ? color.new(color.red, 50 + fill_boost) :
+                     (final_squeeze ? (squeeze_bull ? color.new(color.rgb(0, 100, 0), z1_sqz_alpha) : color.new(color.rgb(139, 0, 0), z1_sqz_alpha)) :
+                      color.new(col_base, fill_z1)))
+
+    // Zone 2 fill color — throat direction + score overlay
+    color z2_fill = squeeze_bull ? color.new(color.rgb(0, 100, 0), fill_z2_squeeze) :
+                    (squeeze_bear ? color.new(color.rgb(139, 0, 0), fill_z2_squeeze) : color.new(color.yellow, fill_z2))
+
+    // Zone 3 fill colors with dynamic opacity — throat overrides
     int op_bull = strong_bull ? 70 : 85
     int op_bear = strong_bear ? 70 : 85
     int z3_bull_alpha = force_low_fit ? math.min(op_bull + 5, 100) : op_bull
     int z3_bear_alpha = force_low_fit ? math.min(op_bear + 5, 100) : op_bear
-    color z3_upper_fill = squeeze_bull ? color.new(color.rgb(0, 100, 0), fill_z3_squeeze) : (squeeze_bear ? color.new(color.rgb(139, 0, 0), fill_z3_squeeze) : color.new(color.red, z3_bear_alpha))
-    color z3_lower_fill = squeeze_bull ? color.new(color.rgb(0, 100, 0), fill_z3_squeeze) : (squeeze_bear ? color.new(color.rgb(139, 0, 0), fill_z3_squeeze) : color.new(color.lime, z3_bull_alpha))
-    
+    int z3_sqz_alpha = int(60 + sqz_score * 25)  // 60-85 range
+    color z3_upper_fill = squeeze_bull ? color.new(color.rgb(0, 100, 0), fill_z3_squeeze) :
+                          (squeeze_bear ? color.new(color.rgb(139, 0, 0), fill_z3_squeeze) :
+                           (final_squeeze ? color.new(color.blue, z3_sqz_alpha) :
+                            color.new(color.red, z3_bear_alpha)))
+    color z3_lower_fill = squeeze_bull ? color.new(color.rgb(0, 100, 0), fill_z3_squeeze) :
+                          (squeeze_bear ? color.new(color.rgb(139, 0, 0), fill_z3_squeeze) :
+                           (final_squeeze ? color.new(color.blue, z3_sqz_alpha) :
+                            color.new(color.lime, z3_bull_alpha)))
+
     // Return tuple of all calculated parameters
     [z3_col, z2_col, z1_col, z1_fill, z2_fill, z3_upper_fill, z3_lower_fill]
 
@@ -3548,8 +3617,8 @@ else if corr_rising and fv_falling
 plot(innov_band_upper, "Innovation Band Upper", color=innov_band_color, style=plot.style_line, linewidth=1, force_overlay=true)
 plot(innov_band_lower, "Innovation Band Lower", color=innov_band_color, style=plot.style_line, linewidth=1, force_overlay=true)
 
-// 4. Survival Zones - Calculate all parameters via function
-[z3_plot_col, z2_plot_col, z1_plot_col, z1_fill_col, z2_fill_col, z3_upper_fill_col, z3_lower_fill_col] = f_calc_survival_zone_params(force_low_fit_visual_regime, final_squeeze_signal, squeeze_bull, squeeze_bear,strong_bull, strong_bear, col_base, col_ma_base, innov_band_color, cld_continuation, cld_exhaustion)
+// 4. Survival Zones - Calculate all parameters via function (throat + legacy squeeze)
+[z3_plot_col, z2_plot_col, z1_plot_col, z1_fill_col, z2_fill_col, z3_upper_fill_col, z3_lower_fill_col] = f_calc_survival_zone_params(force_low_fit_visual_regime, final_squeeze_signal or throat_final_squeeze, squeeze_bull or throat_squeeze_bull, squeeze_bear or throat_squeeze_bear, sqz_armed_state, squeeze_score, strong_bull, strong_bear, col_base, col_ma_base, innov_band_color, cld_continuation, cld_exhaustion)
 
 bool show_zones = not simple_mode or show_survival_bands_simple
 p_z3_up = plot(show_zones ? z3_up : na, "Zone 3 Upper", color=color.new(color.gray, 35), force_overlay=true)
@@ -4267,10 +4336,17 @@ f_render_info_table(table info_tbl) =>
     table.cell(info_tbl, 0, 11, "Cooldown Bars", text_color=color.black, text_size=size.small)
     table.cell(info_tbl, 1, 11, str.tostring(cooldown_bars), text_color=color.aqua, text_size=size.small, tooltip="Per-setup adaptive cooldown with 10 bars between any 2 consecutive same-direction setups hard limit")
 
-    table.cell(info_tbl, 0, 12, "Basket Fit", text_color=color.black, text_size=size.tiny)
-    table.cell(info_tbl, 1, 12, fit_label + " " + str.tostring(basket_fit, "#.0") + "%", text_color=fit_color, text_size=size.tiny)
+    // Squeeze throat stats
+    string hurst_col = hurst_exp < 0.4 ? "lime" : (hurst_exp > 0.6 ? "red" : "gray")
+    color hurst_c = hurst_exp < 0.4 ? color.lime : (hurst_exp > 0.6 ? color.red : color.gray)
+    table.cell(info_tbl, 0, 12, "Hurst H", text_color=color.black, text_size=size.tiny, tooltip="H < 0.5 = anti-persistent (energy accumulating), H > 0.5 = trending")
+    table.cell(info_tbl, 1, 12, str.tostring(hurst_exp, "#.##"), text_color=hurst_c, text_size=size.tiny)
+    color sqz_c = throat_active ? color.orange : (sqz_armed_state ? color.yellow : color.gray)
+    table.cell(info_tbl, 0, 13, "Squeeze", text_color=color.black, text_size=size.tiny, tooltip="Throat active=fire, armed=waiting for expansion")
+    table.cell(info_tbl, 1, 13, (throat_active ? "🔥" : (sqz_armed_state ? "💤" : "—")) + " " + str.tostring(squeeze_score, "#.##"), text_color=sqz_c, text_size=size.tiny)
 
-    // Pool-MC Family Fill Statistics removed
+    table.cell(info_tbl, 0, 14, "Basket Fit", text_color=color.black, text_size=size.tiny)
+    table.cell(info_tbl, 1, 14, fit_label + " " + str.tostring(basket_fit, "#.0") + "%", text_color=fit_color, text_size=size.tiny)
 
 f_render_knn_debug_table(table knn_dbg_tbl) =>
     int hist_size = array.size(f1_history)

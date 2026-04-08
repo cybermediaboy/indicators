@@ -2553,3 +2553,157 @@ export f_percentile_rank_fisher(float raw, int window) =>
     float pct = ta.percentrank(raw, window)           // 0–100, O(1) built-in
     float u = math.max(0.5, math.min(99.5, pct)) / 100.0  // clamp away from 0/1
     0.5 * math.log(u / (1.0 - u))                     // logit → ≈ N(0,1)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SQUEEZE THROAT DETECTOR
+// ═══════════════════════════════════════════════════════════════════════════════
+// Two-method architecture: pure Hurst RS + composite squeeze state machine.
+// All persistent state (arrays, var bools/ints) lives in caller's scope.
+
+// ─── EXPORT UDT: SqzState ────────────────────────────────────────────────────
+export type SqzState
+    float score          // composite squeeze score [0..1]
+    float innov_bwv      // innovation band width velocity (fractional)
+    float z3_bwv         // z3 band width velocity (fractional)
+    float innov_bwz      // innovation bw z-score vs own history
+    float z3_bwz         // z3 bw z-score vs own history
+    float hurst          // H value echoed for debug
+    bool  armed          // squeeze arm state
+    bool  active         // throat fire: armed + expanding + reactive_confirm
+    bool  sq_expanding   // at least one band expanding this bar
+
+// ─── EXPORT: f_hurst_rs ──────────────────────────────────────────────────────
+// Rescaled Range (R/S) Hurst exponent from a pre-filled log-return buffer.
+// Caller owns the buffer array (global scope, push/shift each bar).
+// @param log_ret_buf Pre-filled array of log-returns
+// @returns float H ∈ [0.1, 0.9]  (0.5 = random walk, <0.5 = anti-persistent)
+export f_hurst_rs(array<float> log_ret_buf) =>
+    int n = array.size(log_ret_buf)
+    float h = 0.5
+    if n >= 32
+        float h_mean = 0.0
+        int i = 0
+        for i = 0 to n - 1
+            h_mean += array.get(log_ret_buf, i)
+        h_mean := h_mean / n
+
+        float h_cum = 0.0
+        float h_max = -1e10
+        float h_min =  1e10
+        float h_sum_sq = 0.0
+        for i = 0 to n - 1
+            float v = array.get(log_ret_buf, i)
+            float diff = v - h_mean
+            h_cum += diff
+            h_max := math.max(h_max, h_cum)
+            h_min := math.min(h_min, h_cum)
+            h_sum_sq += diff * diff
+
+        float h_range = h_max - h_min
+        float h_std   = math.sqrt(h_sum_sq / n)
+        float h_rs    = h_std > 1e-10 ? h_range / h_std : 1.0
+        h := h_rs > 0.0 ? math.log(h_rs) / math.log(float(n)) : 0.5
+        h := math.max(0.1, math.min(h, 0.9))
+    h
+
+// ─── EXPORT: f_squeeze_state ─────────────────────────────────────────────────
+// Computes squeeze composite score and throat state machine.
+// All persistent state (armed, arm_bar, cooldown_bar, low_counter) is passed
+// in and returned — caller reassigns their var bools/ints from the tuple.
+//
+// @param innov_upper / innov_lower  Current bar Innovation Band prices
+// @param z3_up / z3_dn              Current bar Z3 Survival Band prices
+// @param hurst_exp                  H from f_hurst_rs
+// @param ltf_at_extreme             bool: LTF osc at extreme (reactive confirm #1)
+// @param burst_pct_high             bool: burst_pct > 0.80 (reactive confirm #2)
+// @param bwv_len                    Lookback for velocity (default 3)
+// @param bwz_len                    History length for BW z-score (default 100)
+// @param bwv_sq_thresh              Squeeze velocity threshold (default 0.03)
+// @param bwv_ex_thresh              Expansion velocity threshold (default 0.02)
+// @param arm_thresh                 Squeeze_score to arm (default 0.55)
+// @param cooldown_bars              Bars between fires (default 8)
+// @param prev_armed / prev_arm_bar / prev_cooldown_bar / prev_low_counter
+//                                   Previous state vars from caller
+// @returns [SqzState, new_armed, new_arm_bar, new_cooldown_bar, new_low_counter]
+export f_squeeze_state(
+  float innov_upper, float innov_lower,
+  float z3_up,       float z3_dn,
+  float hurst_exp,
+  bool  ltf_at_extreme,
+  bool  burst_pct_high,
+  int   bwv_len,
+  int   bwz_len,
+  float bwv_sq_thresh,
+  float bwv_ex_thresh,
+  float arm_thresh,
+  int   cooldown_bars,
+  bool  prev_armed,
+  int   prev_arm_bar,
+  int   prev_cooldown_bar,
+  int   prev_low_counter) =>
+
+    // ── Band widths ──────────────────────────────────────────────────────────
+    float innov_bw  = innov_upper - innov_lower
+    float z3_bw     = z3_up - z3_dn
+    float innov_bw_prev = nz(innov_bw[bwv_len], innov_bw)
+    float z3_bw_prev    = nz(z3_bw[bwv_len],    z3_bw)
+
+    // ── Band Width Velocity (fractional) ────────────────────────────────────
+    float i_bwv = innov_bw_prev > 1e-10 ? (innov_bw - innov_bw_prev) / innov_bw_prev : 0.0
+    float z_bwv = z3_bw_prev   > 1e-10 ? (z3_bw   - z3_bw_prev)   / z3_bw_prev   : 0.0
+
+    // ── Band Width Z-Score (own history) ────────────────────────────────────
+    float i_bwz_mean = ta.sma(innov_bw, bwz_len)
+    float i_bwz_std  = ta.stdev(innov_bw, bwz_len)
+    float i_bwz      = i_bwz_std > 1e-10 ? (innov_bw - i_bwz_mean) / i_bwz_std : 0.0
+
+    float z_bwz_mean = ta.sma(z3_bw, bwz_len)
+    float z_bwz_std  = ta.stdev(z3_bw, bwz_len)
+    float z_bwz      = z_bwz_std > 1e-10 ? (z3_bw - z_bwz_mean) / z_bwz_std : 0.0
+
+    // ── Component scores [0..1] ─────────────────────────────────────────────
+    float c1 = math.min(math.max(0.0, -i_bwv / math.max(bwv_sq_thresh, 1e-10)), 1.0)
+    float c2 = math.min(math.max(0.0, -z_bwv / math.max(bwv_sq_thresh, 1e-10)), 1.0)
+    float c3 = math.min(math.max(0.0, (-i_bwz + 1.0) / 3.5), 1.0)
+    float c4 = math.min(math.max(0.0, (-z_bwz + 1.0) / 3.5), 1.0)
+    float c5 = math.min(math.max(0.0, (0.5 - hurst_exp + 0.15) / 0.3), 1.0)
+
+    float score = c1 * 0.25 + c2 * 0.25 + c3 * 0.175 + c4 * 0.175 + c5 * 0.15
+
+    // ── Reactive confirms ────────────────────────────────────────────────────
+    bool reactive = ltf_at_extreme or burst_pct_high
+
+    // ── Expansion flags ──────────────────────────────────────────────────────
+    bool sq_exp = (i_bwv > bwv_ex_thresh) or (z_bwv > bwv_ex_thresh)
+
+    // ── State machine ────────────────────────────────────────────────────────
+    bool new_armed          = prev_armed
+    int  new_arm_bar        = prev_arm_bar
+    int  new_cooldown_bar   = prev_cooldown_bar
+    int  new_low_counter    = prev_low_counter
+    bool fire               = false
+
+    // ARM
+    if not new_armed and score >= arm_thresh
+        new_armed   := true
+        new_arm_bar := bar_index
+
+    // FIRE: armed + expand confirmed + reactive + cooldown elapsed
+    bool expand_ok    = sq_exp and bar_index >= new_arm_bar + 2
+    bool cooldown_ok  = (bar_index - new_cooldown_bar) >= cooldown_bars
+    if new_armed and expand_ok and reactive and cooldown_ok
+        fire              := true
+        new_cooldown_bar  := bar_index
+        new_armed         := false
+
+    // RESET arm if score stays low >5 bars
+    if score < arm_thresh * 0.7
+        new_low_counter := new_low_counter + 1
+        if new_low_counter > 5
+            new_armed       := false
+            new_low_counter := 0
+    else
+        new_low_counter := 0
+
+    SqzState res = SqzState.new(score, i_bwv, z_bwv, i_bwz, z_bwz, hurst_exp, new_armed, fire, sq_exp)
+    [res, new_armed, new_arm_bar, new_cooldown_bar, new_low_counter]

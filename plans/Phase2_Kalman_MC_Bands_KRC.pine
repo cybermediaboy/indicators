@@ -1,0 +1,1998 @@
+//@version=5
+indicator("Phase 2: Kalman Regime Classifier (KRC)", shorttitle="KRC", overlay=false, max_bars_back=5000)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// LOAD TIME TRACKING
+// ══════════════════════════════════════════════════════════════════════════════
+var int load_start_ms = na
+load_start_ms := na(load_start_ms) ? timenow : load_start_ms
+var float load_secs_latched = na
+var bool load_secs_captured = false
+if barstate.islastconfirmedhistory and not load_secs_captured
+    load_secs_latched := (timenow - load_start_ms) / 1000.0
+    load_secs_captured := true
+float load_secs_live = load_secs_captured ? load_secs_latched : (na(load_start_ms) ? na : (timenow - load_start_ms) / 1000.0)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PHASE 2: KALMAN STATE MACHINE WITH MONTE CARLO FORWARD PROJECTION
+// ══════════════════════════════════════════════════════════════════════════════
+// Architecture:
+// - State vector: x_t = [μ_t, β_1t, β_2t, ..., β_Kt]
+// - Observation: y_t = μ_t + Σ(β_it * z_it) + v_t
+// - MC Engine: Forward path simulation using bootstrapped residuals
+// - Output: Empirical 1/5/10% bands + H-bar future probability cone
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+grp_bands = "═══ Band Configuration ═══"
+string mapping_algo_breakout = input.string("Precise Mapping", "Breakout Projection / Mapping Mode", options=["Algebraic Inversion", "Precise Mapping"], group=grp_bands, tooltip="Controls how the Breakout Kalman fair-value projection is translated back into price.")
+string mapping_algo_mean_reversion = input.string("Algebraic Inversion", "Mean-Reversion Projection / Mapping Mode", options=["Algebraic Inversion", "Precise Mapping"], group=grp_bands, tooltip="Controls how the Mean-Reversion Kalman fair-value projection is translated back into price.")
+grp_prob = "═══ Probability Combiners ═══"
+string combiner_mode_breakout = input.string("Stouffer", "Breakout Combiner Mode", options=["Stouffer", "Mahalanobis", "Joint Independent"], group=grp_prob, tooltip="Controls how multiple feature extremes affect Breakout band confidence and width.")
+string combiner_mode_mean_reversion = input.string("Mahalanobis", "Mean-Reversion Combiner Mode", options=["Stouffer", "Mahalanobis", "Joint Independent"], group=grp_prob, tooltip="Controls how multiple feature extremes affect Mean-Reversion band confidence and width.")
+bool show_breakout_band_set = input.bool(true, "Show Breakout Band Set", group=grp_prob, tooltip="Plots the directional volatility breakout band set. In Stouffer mode it expands the target-side band using kinetic flow and compresses the opposite side into a tighter trailing-stop style structure.")
+bool show_mean_reversion_band_set = input.bool(true, "Show Mean-Reversion Band Set", group=grp_prob, tooltip="Plots the mean-reversion band set. In Stouffer mode it compresses the trend-side band into a wall and opens the opposite side as the return-to-fair-value target.")
+
+grp_features = "═══ Input Features (Z-Scored) ═══"
+int num_features = input.int(4, "Number of Features (K)", minval=1, maxval=8, group=grp_features)
+
+// Feature 1: Radonezh-style momentum deviation
+int f1_lookback = input.int(200, "Feature 1 Lookback", minval=10, group=grp_features)
+// Feature 2: Basket composite
+int f2_lookback = input.int(200, "Feature 2 Lookback", minval=10, group=grp_features)
+// Feature 3: VIX contango
+int f3_lookback = input.int(100, "Feature 3 Lookback", minval=10, group=grp_features)
+// Feature 4: NRV (wide, slow)
+int f4_lookback = input.int(365, "Feature 4 Lookback", minval=30, group=grp_features)
+
+grp_basket = "═══ Basket Settings (Feature 2) ═══"
+string basket_ticker_1 = input.string("CME_MINI:MES1!", "Basket Ticker 1 (MES)", group=grp_basket)
+string basket_ticker_2 = input.string("TVC:DXY", "Basket Ticker 2 (DXY)", group=grp_basket)
+string basket_ticker_3 = input.string("CBOT:ZB1!", "Basket Ticker 3 (ZB)", group=grp_basket)
+string basket_ticker_4 = input.string("COMEX_MINI:MGC1!", "Basket Ticker 4 (Gold)", group=grp_basket)
+string corr_mode = input.string("Kalman Beta", "Basket Weighting Mode", options=["Equal Weight", "Kalman Beta"], group=grp_basket, tooltip="Equal Weight: All assets weighted equally. Kalman Beta: Zero-lag dynamic betas via Kalman filter (superior to rolling correlation).")
+int basket_smooth_len = input.int(5, "Basket Smoothing Length", minval=1, group=grp_basket)
+float kf_Q_alpha = input.float(0.0001, "Kalman Q (Alpha)", minval=0.00001, maxval=0.01, step=0.0001, group=grp_basket, tooltip="Process noise for BTC intrinsic drift")
+float kf_Q_beta = input.float(0.005, "Kalman Q (Beta)", minval=0.0001, maxval=0.1, step=0.001, group=grp_basket, tooltip="Process noise for correlation tracking (higher = faster regime adaptation)")
+float kf_R = input.float(0.1, "Kalman R (Observation)", minval=0.01, maxval=1.0, step=0.01, group=grp_basket, tooltip="Observation noise")
+
+grp_kalman = "═══ Kalman Filter Parameters ═══"
+float process_noise_mu = input.float(0.05, "Process Noise Q (μ)", minval=0.00001, maxval=1.0, step=0.001, group=grp_kalman, tooltip="State drift uncertainty for fair value")
+float process_noise_beta = input.float(0.01, "Process Noise Q (β)", minval=0.0001, maxval=1.0, step=0.001, group=grp_kalman, tooltip="State drift uncertainty for factor loadings")
+float observation_noise = input.float(0.5, "Observation Noise R", minval=0.1, maxval=10.0, step=0.1, group=grp_kalman, tooltip="Measurement uncertainty")
+float mr_process_noise_mu = input.float(0.005, "Mean-Reversion Process Noise Q (μ)", minval=0.00001, maxval=1.0, step=0.001, group=grp_kalman, tooltip="Dedicated fair-value drift uncertainty for the Mean-Reversion Kalman instance")
+float mr_process_noise_beta = input.float(0.005, "Mean-Reversion Process Noise Q (β)", minval=0.0001, maxval=1.0, step=0.001, group=grp_kalman, tooltip="Dedicated factor-loading drift uncertainty for the Mean-Reversion Kalman instance")
+float mr_observation_noise = input.float(4.0, "Mean-Reversion Observation Noise R", minval=0.1, maxval=10.0, step=0.1, group=grp_kalman, tooltip="Dedicated measurement uncertainty for the Mean-Reversion Kalman instance")
+float init_state_var = input.float(100.0, "Initial State Variance P0", minval=1.0, maxval=1000.0, group=grp_kalman)
+float mr_init_state_var = input.float(16.0, "Mean-Reversion Initial State Variance P0", minval=1.0, maxval=1000.0, group=grp_kalman, tooltip="Dedicated initial covariance for the Mean-Reversion Kalman instance to prevent excessively slow covariance collapse and visual band blowouts")
+
+grp_mc = "═══ Monte Carlo Engine ═══"
+bool enable_mc = input.bool(true, "Enable MC Forward Projection", group=grp_mc)
+int mc_target_runs = input.int(1000, "MC Target Runs", minval=100, maxval=2000, step=100, group=grp_mc, tooltip="Total simulation paths per real-time update (max 2000 due to Pine Script array limit)")
+int mc_runs_per_chunk = input.int(10, "MC Runs Per Chunk", minval=1, maxval=50, group=grp_mc, tooltip="Paths simulated per tick (varip incremental)")
+int mc_horizon = input.int(10, "Projection Horizon (bars)", minval=1, maxval=50, group=grp_mc, tooltip="How many bars into the future to project")
+int mc_residual_pool = input.int(500, "Residual Pool Size", minval=100, maxval=2000, group=grp_mc, tooltip="Historical residuals to bootstrap from")
+
+grp_exch = "═══ Perpetual Delta (Radonezh) ═══"
+bool use_auto_tickers = input.bool(true, "Auto-Select Tickers based on Asset", group=grp_exch)
+string exch_symbol_1_manual = input.string("BINANCE:BTCUSDT.P", "Exchange 1 (Perp)", group=grp_exch)
+string exch_symbol_2_manual = input.string("BYBIT:BTCUSDT.P", "Exchange 2 (Perp)", group=grp_exch)
+string exch_symbol_3_manual = input.string("OKX:BTCUSDT.P", "Exchange 3 (Perp)", group=grp_exch)
+string exch_symbol_4_manual = input.string("BITGET:BTCUSDT.P", "Exchange 4 (Perp)", group=grp_exch)
+
+grp_rad = "═══ Radonezh Settings ═══"
+int rad_dema_period_price = input.int(14, "DEMA Period (Price)", minval=2, group=grp_rad)
+int rad_dema_period_volume = input.int(10, "DEMA Period (Volume)", minval=2, group=grp_rad)
+int rad_momentum_period = input.int(3, "Momentum Period", minval=1, group=grp_rad)
+int rad_price_smooth = input.int(9, "Price Smoothing", group=grp_rad)
+int rad_len_admf = input.int(9, "ADMF RMA Length", minval=1, group=grp_rad)
+int rad_ema_base_length_admf = input.int(9, "ADMF EMA Base Length", minval=1, group=grp_rad)
+float rad_ema_min_mult_admf = input.float(0.25, "ADMF EMA Min Mult", group=grp_rad)
+float rad_ema_max_mult_admf = input.float(0.5, "ADMF EMA Max Mult", group=grp_rad)
+float rad_curve_power_admf = input.float(2.0, "ADMF Curve Power", minval=0.1, group=grp_rad)
+
+grp_vix = "═══ VIX Contango Settings ═══"
+int vix_length = input.int(100, "VIX Length (MOV0)", minval=10, group=grp_vix)
+int vix_ema_len = input.int(10, "VIX EMA Period (MOV1)", minval=2, group=grp_vix)
+string vix_ct_tf = input.timeframe("", title="VIX Contango TF", group=grp_vix)
+bool use_dvol_proxy = input.bool(true, "Enable DVOL Weekend Proxy", group=grp_vix)
+string dvol_ticker_manual = input.string("DERIBIT:BTC_DVOL", "DVOL Proxy Ticker", group=grp_vix)
+
+grp_nrv = "═══ NRV Settings (Spot Exchanges) ═══"
+bool use_auto_asset = input.bool(true, "Auto-Detect Asset from Symbol Name", group=grp_nrv)
+string manual_coin = input.string("BTC", "Asset", options=["BTC","ETH"], group=grp_nrv)
+float baseRepriceEff  = input.float(0.40, "Base repricing eff", minval=0.05, maxval=1.0, step=0.05, group=grp_nrv)
+float baseDeltaLambda = input.float(0.50, "Base delta λ", minval=0.0, maxval=1.0, step=0.05, group=grp_nrv)
+float baseMaxDrift    = input.float(0.004, "Base max drift", minval=0.0005, maxval=0.02, step=0.0005, group=grp_nrv)
+float adaptAlpha      = input.float(0.35, "Learning rate α", minval=0.05, maxval=0.8, step=0.05, group=grp_nrv)
+int adaptMemory       = input.int(5, "Error smooth (days)", minval=1, maxval=20, group=grp_nrv)
+bool useActivityScalar = input.bool(true, "Scale efficiency by active addresses", group=grp_nrv)
+bool useMVRVguard     = input.bool(true, "MVRV divergence guard", group=grp_nrv)
+float mvrvGuardPct    = input.float(0.15, "MVRV guard threshold", minval=0.02, maxval=0.5, step=0.01, group=grp_nrv)
+int mvrvLookback      = input.int(365, "MVRV σ lookback", minval=30, maxval=1000, group=grp_nrv)
+float sig_n2  = input.float(-2.0, "σ: deep value",  group=grp_nrv)
+float sig_n1  = input.float(-1.0, "σ: discount",    group=grp_nrv)
+float sig_p1  = input.float( 1.0, "σ: warm",        group=grp_nrv)
+float sig_p2  = input.float( 2.0, "σ: hot",         group=grp_nrv)
+float sig_p3  = input.float( 3.0, "σ: extreme",     group=grp_nrv)
+bool use_manual_ltf = input.bool(false, "Override Auto-LTF", group=grp_nrv, inline="ltf")
+string manual_ltf     = input.timeframe("3", "Manual LTF", group=grp_nrv, inline="ltf")
+string asset_name_upper = str.upper(syminfo.tickerid + " " + syminfo.ticker)
+bool asset_has_eth = str.contains(asset_name_upper, "ETH")
+bool asset_has_btc = str.contains(asset_name_upper, "BTC") or str.contains(asset_name_upper, "XBT")
+string coin = use_auto_asset ? (asset_has_eth and not asset_has_btc ? "ETH" : asset_has_btc and not asset_has_eth ? "BTC" : manual_coin) : manual_coin
+string auto_exch_symbol_1 = coin == "BTC" ? "BINANCE:BTCUSDT.P" : "BINANCE:ETHUSDT.P"
+string auto_exch_symbol_2 = coin == "BTC" ? "BYBIT:BTCUSDT.P" : "BYBIT:ETHUSDT.P"
+string auto_exch_symbol_3 = coin == "BTC" ? "OKX:BTCUSDT.P" : "OKX:ETHUSDT.P"
+string auto_exch_symbol_4 = coin == "BTC" ? "BITGET:BTCUSDT.P" : "BITGET:ETHUSDT.P"
+string exch_symbol_1 = use_auto_tickers ? auto_exch_symbol_1 : exch_symbol_1_manual
+string exch_symbol_2 = use_auto_tickers ? auto_exch_symbol_2 : exch_symbol_2_manual
+string exch_symbol_3 = use_auto_tickers ? auto_exch_symbol_3 : exch_symbol_3_manual
+string exch_symbol_4 = use_auto_tickers ? auto_exch_symbol_4 : exch_symbol_4_manual
+string auto_dvol_ticker = coin == "BTC" ? "DERIBIT:BTC_DVOL" : "DERIBIT:ETH_DVOL"
+string dvol_ticker = use_auto_tickers ? auto_dvol_ticker : dvol_ticker_manual
+float eff_baseRepriceEff = coin == "BTC" ? baseRepriceEff : math.max(baseRepriceEff, 0.45)
+float eff_sig_n2 = coin == "BTC" ? sig_n2 : math.min(sig_n2, -2.5)
+float eff_sig_p3 = coin == "BTC" ? sig_p3 : math.max(sig_p3, 3.5)
+float eff_process_noise_mu = coin == "BTC" ? process_noise_mu : math.max(process_noise_mu, 0.075)
+float eff_process_noise_beta = coin == "BTC" ? process_noise_beta : math.max(process_noise_beta, 0.015)
+
+bool show_analytic_bands = input.bool(true, "Show Analytic Bands (Gaussian)", group=grp_bands)
+bool show_mc_bands = input.bool(true, "Show MC Empirical Bands", group=grp_bands)
+bool show_future_cone = input.bool(true, "Show Future Probability Cone", group=grp_bands)
+bool show_center_line = input.bool(true, "Show Kalman Center Line", group=grp_bands)
+
+float basket_sigma = input.float(2.0, "Basket Band Width (σ)", minval=0.5, maxval=5.0, step=0.1, group=grp_bands)
+float vix_sigma = input.float(2.0, "VIX Band Width (σ)", minval=0.5, maxval=5.0, step=0.1, group=grp_bands)
+float vix_dampening = input.float(0.4, "VIX Dampening Factor", minval=0.1, maxval=1.0, step=0.05, group=grp_bands, tooltip="Scales the VIX oscillator offset on the price anchor")
+bool stabilize_precise_mapping_sd = input.bool(true, "Stabilize Precise Mapping SD", group=grp_bands, tooltip="Blends the Precise Mapping distance-based scale with the macro price standard deviation and applies a soft cap. This reduces one-bar band blowouts in Precise Mapping mode while preserving the original mapping logic. Turn off to restore the raw distance-driven Precise Mapping scale.")
+
+string phase1_band_family = input.string("None", "Phase 1 Individual Band Family", options=["None", "Radonezh", "Basket", "VIX"], group=grp_bands)
+bool show_nrv_bands = input.bool(false, "Show Phase 1: NRV Bands", group=grp_bands)
+
+float p_upper_1 = input.float(0.01, "Upper Reversal Prob 1", minval=0.001, maxval=0.5, step=0.01, group=grp_bands)
+float p_upper_2 = input.float(0.05, "Upper Reversal Prob 2", minval=0.001, maxval=0.5, step=0.01, group=grp_bands)
+float p_upper_3 = input.float(0.10, "Upper Reversal Prob 3", minval=0.001, maxval=0.5, step=0.01, group=grp_bands)
+
+float p_lower_1 = input.float(0.01, "Lower Reversal Prob 1", minval=0.001, maxval=0.5, step=0.01, group=grp_bands)
+float p_lower_2 = input.float(0.05, "Lower Reversal Prob 2", minval=0.001, maxval=0.5, step=0.01, group=grp_bands)
+float p_lower_3 = input.float(0.10, "Lower Reversal Prob 3", minval=0.001, maxval=0.5, step=0.01, group=grp_bands)
+
+grp_vis = "═══ Visualization ═══"
+bool show_band_lines = input.bool(false, "Show Band Lines", group=grp_vis)
+bool show_state_table = input.bool(true, "Show State Table", group=grp_vis)
+bool show_beta_weights = input.bool(true, "Show β Weights", group=grp_vis)
+bool show_covariance_regimes = input.bool(true, "Show Covariance Regime Markers", group=grp_vis)
+var string grp_imm = "IMM Regime Detector"
+float immTstickNoise = input.float(0.985, "Noise Self-Transition", minval=0.9, maxval=0.999, step=0.005, group=grp_imm)
+float immTstickBO = input.float(0.985, "Breakout Self-Transition", minval=0.9, maxval=0.999, step=0.005, group=grp_imm)
+float immTstickMR = input.float(0.985, "Mean-Reversion Self-Transition", minval=0.9, maxval=0.999, step=0.005, group=grp_imm)
+float immNoiseVarMult = input.float(4.0, "Noise Variance Multiplier", minval=1.0, maxval=50.0, step=0.5, group=grp_imm)
+float immFloor = input.float(0.001, "Posterior Floor", minval=0.0, maxval=0.1, step=0.001, group=grp_imm)
+float immCertainty = input.float(0.85, "Certainty Threshold", minval=0.70, maxval=0.99, step=0.01, group=grp_imm)
+var string grp_hmm = "HMM Regime Detector"
+float hmmStickExp = input.float(0.985, "Expansion Self-Transition", minval=0.9, maxval=0.999, step=0.005, group=grp_hmm, tooltip="Probability that Expansion stays Expansion on the next bar.")
+float hmmStickCon = input.float(0.985, "Contraction Self-Transition", minval=0.9, maxval=0.999, step=0.005, group=grp_hmm, tooltip="Probability that Contraction stays Contraction on the next bar.")
+float hmmCertainty = input.float(0.85, "Certainty Threshold", minval=0.70, maxval=0.99, step=0.01, group=grp_hmm, tooltip="Minimum posterior to consider a regime 'active'.")
+float kalmanBias = input.float(0.15, "Kalman Variance Bias", minval=0.0, maxval=1.0, step=0.05, group=grp_hmm, tooltip="Slight bias to likelihoods based on whether Kalman S_band is expanding or collapsing.")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// HELPER FUNCTIONS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Robust z-score using rolling window (NA-safe)
+f_zscore(float src, int len) =>
+    float mean = ta.sma(nz(src, 0.0), len)
+    float std = ta.stdev(nz(src, 0.0), len)
+    (not na(mean) and not na(std) and std > 1e-10) ? (nz(src, 0.0) - mean) / std : 0.0
+
+// Supersmoother (from Stage 1)
+f_supersmoother(float src, int len) =>
+    float a = math.exp(-1.414 * 3.14159 / len)
+    float b = 2.0 * a * math.cos(1.414 * 180.0 / len * 3.14159 / 180.0)
+    float c2 = b
+    float c3 = -a * a
+    float c1 = 1.0 - c2 - c3
+    var float filt = 0.0
+    filt := c1 * (src + nz(src[1])) / 2.0 + c2 * nz(filt[1]) + c3 * nz(filt[2])
+    filt
+
+// Matrix operations (simplified for 1D state vector)
+f_matrix_mult_scalar(float val, float scalar) =>
+    val * scalar
+
+// Clamp function
+f_clamp(float val, float min_val, float max_val) =>
+    math.max(min_val, math.min(val, max_val))
+
+// IMM helper functions
+f_gauss_likelihood(float v, float S) =>
+    float result = 1e-30
+    if not na(v) and not na(S) and S > 0
+        result := (1.0 / math.sqrt(2.0 * math.pi * S)) * math.exp(-0.5 * v * v / S)
+    result
+
+f_imm_likelihood(float obs_zp, float obs_zs, float obs_zm, float c_zp, float c_zs, float c_zm) =>
+    float d0 = obs_zp - c_zp
+    float d1 = obs_zs - c_zs
+    float d2 = obs_zm - c_zm
+    float dist2 = d0 * d0 + d1 * d1 + d2 * d2
+    math.exp(-0.5 * dist2)
+
+// Regularized 4x4 Mahalanobis distance using Pine-safe Gaussian elimination
+f_mahalanobis_4x4(float z1, float z2, float z3, float z4, float var1, float var2, float var3, float var4, float cov12, float cov13, float cov14, float cov23, float cov24, float cov34, float ridge) =>
+    float s11 = math.max(var1, 1e-6) + ridge
+    float s22 = math.max(var2, 1e-6) + ridge
+    float s33 = math.max(var3, 1e-6) + ridge
+    float s44 = math.max(var4, 1e-6) + ridge
+    float s12 = cov12
+    float s13 = cov13
+    float s14 = cov14
+    float s23 = cov23
+    float s24 = cov24
+    float s34 = cov34
+    float x1 = 0.0
+    float x2 = 0.0
+    float x3 = 0.0
+    float x4 = 0.0
+    bool solved = false
+    if math.abs(s11) > 1e-10
+        float f21 = s12 / s11
+        float f31 = s13 / s11
+        float f41 = s14 / s11
+        float s22_1 = s22 - f21 * s12
+        float s23_1 = s23 - f21 * s13
+        float s24_1 = s24 - f21 * s14
+        float b2_1 = z2 - f21 * z1
+        float s33_1 = s33 - f31 * s13
+        float s34_1 = s34 - f31 * s14
+        float b3_1 = z3 - f31 * z1
+        float s44_1 = s44 - f41 * s14
+        float b4_1 = z4 - f41 * z1
+        if math.abs(s22_1) > 1e-10
+            float f32 = s23_1 / s22_1
+            float f42 = s24_1 / s22_1
+            float s33_2 = s33_1 - f32 * s23_1
+            float s34_2 = s34_1 - f32 * s24_1
+            float b3_2 = b3_1 - f32 * b2_1
+            float s44_2 = s44_1 - f42 * s24_1
+            float b4_2 = b4_1 - f42 * b2_1
+            if math.abs(s33_2) > 1e-10
+                float f43 = s34_2 / s33_2
+                float s44_3 = s44_2 - f43 * s34_2
+                float b4_3 = b4_2 - f43 * b3_2
+                if math.abs(s44_3) > 1e-10
+                    x4 := b4_3 / s44_3
+                    x3 := (b3_2 - s34_2 * x4) / s33_2
+                    x2 := (b2_1 - s24_1 * x4 - s23_1 * x3) / s22_1
+                    x1 := (z1 - s12 * x2 - s13 * x3 - s14 * x4) / s11
+                    solved := true
+    float quad_diag = z1 * z1 / s11 + z2 * z2 / s22 + z3 * z3 / s33 + z4 * z4 / s44
+    float quad_full = z1 * x1 + z2 * x2 + z3 * x3 + z4 * x4
+    math.sqrt(math.max(solved ? quad_full : quad_diag, 0.0))
+
+// Rolling covariance helper (Pine-safe replacement for unavailable ta.covariance)
+f_covariance(float x, float y, int len) =>
+    ta.sma(x * y, len) - ta.sma(x, len) * ta.sma(y, len)
+
+// Reusable Kalman Filter for Dynamic Beta Estimation
+// Returns: [alpha, beta1, beta2, beta3, beta4]
+// Observation: y_t = alpha + beta1*r1 + beta2*r2 + beta3*r3 + beta4*r4
+f_kalman_basket_betas(array<float> kf_x, array<float> kf_P, float y_obs, float r1, float r2, float r3, float r4, float q_alpha, float q_beta, float r_noise) =>
+    // Prediction Step - Create fresh arrays to prevent state bleed
+    array<float> kf_x_pred = array.new<float>(5, 0.0)
+    array<float> kf_P_pred = array.new<float>(5, 0.0)
+    
+    // Manually copy state values
+    for i = 0 to 4
+        array.set(kf_x_pred, i, array.get(kf_x, i))
+    
+    // Update covariance with process noise
+    array.set(kf_P_pred, 0, array.get(kf_P, 0) + q_alpha)
+    array.set(kf_P_pred, 1, array.get(kf_P, 1) + q_beta)
+    array.set(kf_P_pred, 2, array.get(kf_P, 2) + q_beta)
+    array.set(kf_P_pred, 3, array.get(kf_P, 3) + q_beta)
+    array.set(kf_P_pred, 4, array.get(kf_P, 4) + q_beta)
+    
+    // Observation Prediction (y_pred = alpha + beta1*r1 + beta2*r2 + beta3*r3 + beta4*r4)
+    float y_pred = array.get(kf_x_pred, 0) + 
+                   (array.get(kf_x_pred, 1) * r1) + 
+                   (array.get(kf_x_pred, 2) * r2) + 
+                   (array.get(kf_x_pred, 3) * r3) + 
+                   (array.get(kf_x_pred, 4) * r4)
+    
+    // Innovation
+    float innovation = y_obs - y_pred
+    
+    // Innovation Variance (S = H*P*H' + R)
+    float S = array.get(kf_P_pred, 0) + r_noise +
+              (r1 * r1 * array.get(kf_P_pred, 1)) +
+              (r2 * r2 * array.get(kf_P_pred, 2)) +
+              (r3 * r3 * array.get(kf_P_pred, 3)) +
+              (r4 * r4 * array.get(kf_P_pred, 4))
+    
+    S := math.max(S, 1e-10)  // Prevent division by zero
+    
+    // Kalman Gain & Update Step - create NEW output arrays
+    array<float> kf_x_out = array.new<float>(5, 0.0)
+    array<float> kf_P_out = array.new<float>(5, 0.0)
+    
+    // Update alpha (state 0)
+    float K0 = array.get(kf_P_pred, 0) / S
+    array.set(kf_x_out, 0, array.get(kf_x_pred, 0) + K0 * innovation)
+    array.set(kf_P_out, 0, (1.0 - K0) * array.get(kf_P_pred, 0))
+    
+    // Update betas (states 1-4)
+    var float[] h_vec = array.new<float>(4)
+    array.set(h_vec, 0, r1)
+    array.set(h_vec, 1, r2)
+    array.set(h_vec, 2, r3)
+    array.set(h_vec, 3, r4)
+    
+    for i = 1 to 4
+        float h_val = array.get(h_vec, i - 1)
+        float K_i = (array.get(kf_P_pred, i) * h_val) / S
+        array.set(kf_x_out, i, array.get(kf_x_pred, i) + K_i * innovation)
+        array.set(kf_P_out, i, (1.0 - K_i * h_val) * array.get(kf_P_pred, i))
+    
+    [kf_x_out, kf_P_out]
+
+// Standard normal CDF inverse (approximation for Φ^-1)
+f_norm_inv(float p) =>
+    // Simplified approximation for p in [0.01, 0.99]
+    if p <= 0.01
+        -2.326  // 1%
+    else if p <= 0.05
+        -1.645  // 5%
+    else if p <= 0.10
+        -1.282  // 10%
+    else if p >= 0.99
+        2.326
+    else if p >= 0.95
+        1.645
+    else if p >= 0.90
+        1.282
+    else
+        0.0  // Median
+
+// Safe log return (returns 0.0 if either input is NA or non-positive)
+f_logret(float x, float x1) =>
+    not na(x) and not na(x1) and x > 0 and x1 > 0 ? math.log(x / x1) : 0.0
+
+// Radonezh: Buy/Sell volume decomposition
+f_bin_calc(float h, float l, float c, float v) =>
+    float rng = nz(h) - nz(l)
+    float b_vol = rng > 0 ? nz(v) * (nz(c) - nz(l)) / rng : nz(v) / 2.0
+    float s_vol = rng > 0 ? nz(v) * (nz(h) - nz(c)) / rng : nz(v) / 2.0
+    [nz(v), b_vol - s_vol]
+
+// Dynamic EMA (adaptive length)
+f_dyn_ema(float src, float len) =>
+    var float dyn_ema = na
+    float alpha = 2.0 / math.max(len + 1, 2)
+    dyn_ema := na(dyn_ema[1]) ? src : alpha * src + (1 - alpha) * nz(dyn_ema[1])
+    dyn_ema
+
+// Compress function (tanh-like soft clipping)
+f_compress(float x) =>
+    x / (1.0 + math.abs(x))
+
+// Robust z-score with floor
+f_zscore_robust(float src, int len) =>
+    float result = 0.0
+    float mu = ta.sma(src, len)
+    float sd = ta.stdev(src, len)
+    float scale = math.max(math.abs(nz(mu, 0.0)), math.abs(nz(src, 0.0)))
+    float sigma_floor = math.max(scale * 0.001, 1e-6)
+    float sigma = math.max(nz(sd, sigma_floor), sigma_floor)
+    if not na(src) and not na(mu) and sigma > 0
+        float z = (src - mu) / sigma
+        result := math.max(math.min(z, 6.0), -6.0)
+    nz(result, 0.0)
+
+// Basket divergence z-score
+f_calc_divergence(float basket_close, int smooth_length, int z_length) =>
+    float result = 0.0
+    if not na(basket_close) and basket_close > 0
+        float ratio = close / basket_close
+        float log_ratio = math.log(ratio)
+        float log_ratio_prev = math.log(nz(ratio[1], ratio))
+        float delta = log_ratio - log_ratio_prev
+        float smoothed = f_supersmoother(delta, smooth_length)
+        result := f_zscore_robust(smoothed, z_length)
+    result
+
+// NRV: Process LTF data for True Up/Down Volume
+f_proc_ltf(array<float> c_arr, array<float> o_arr, array<float> v_arr) =>
+    float uV = 0.0, float dV = 0.0
+    if not na(c_arr) and array.size(c_arr) > 0
+        for i = 0 to array.size(c_arr) - 1
+            float c = array.get(c_arr, i)
+            float o = array.get(o_arr, i)
+            float v = array.get(v_arr, i)
+            float vU = v * (c + o) / 2
+            if c > o
+                uV += vU
+            else if c < o
+                dV += vU
+            else
+                uV += vU / 2
+                dV += vU / 2
+    [uV, dV]
+
+// Sleep/Wake activity tracker
+int SLEEP_BARS = 3
+int WAKE_BARS = 2
+int BASKET_WARMUP_BARS = 14
+float PRICE_EPS = 1e-5
+
+f_track_activity(float h, float l, float c, float prev_c) =>
+    (math.abs(h - l) > PRICE_EPS) or (math.abs(c - nz(prev_c, c)) > PRICE_EPS)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DATA FETCHING (Phase 1 Institutional Architecture)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Auto-LTF Resolution Logic
+string auto_ltf = switch timeframe.period
+    "15"  => "3"
+    "30"  => "5"
+    "60"  => "15"
+    "120" => "30"
+    "240" => "60"
+    "D"   => "240"
+    "W"   => "D"
+    "M"   => "W"
+    => "1"
+
+string ltfRes = use_manual_ltf ? manual_ltf : auto_ltf
+int eff_nrv_len = mvrvLookback
+
+// Perpetuals (4) for Radonezh
+[p1_h, p1_l, p1_c, p1_v] = request.security(exch_symbol_1, timeframe.period, [high, low, close, volume], ignore_invalid_symbol=true)
+[p2_h, p2_l, p2_c, p2_v] = request.security(exch_symbol_2, timeframe.period, [high, low, close, volume], ignore_invalid_symbol=true)
+[p3_h, p3_l, p3_c, p3_v] = request.security(exch_symbol_3, timeframe.period, [high, low, close, volume], ignore_invalid_symbol=true)
+[p4_h, p4_l, p4_c, p4_v] = request.security(exch_symbol_4, timeframe.period, [high, low, close, volume], ignore_invalid_symbol=true)
+
+// Basket (4) with H/L for sleep/wake
+[_bc1, _bh1, _bl1] = request.security(basket_ticker_1, timeframe.period, [close, high, low], ignore_invalid_symbol=true)
+[_bc2, _bh2, _bl2] = request.security(basket_ticker_2, timeframe.period, [close, high, low], ignore_invalid_symbol=true)
+[_bc3, _bh3, _bl3] = request.security(basket_ticker_3, timeframe.period, [close, high, low], ignore_invalid_symbol=true)
+[_bc4, _bh4, _bl4] = request.security(basket_ticker_4, timeframe.period, [close, high, low], ignore_invalid_symbol=true)
+
+// VIX Contango Fetch
+float vx1_ct = request.security("CBOE:VX1!", vix_ct_tf, close, gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+float vx2_ct = request.security("CBOE:VX2!", vix_ct_tf, close, gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+float btc_dvol = use_dvol_proxy ? request.security(dvol_ticker, vix_ct_tf, close, ignore_invalid_symbol=true) : na
+
+// NRV Daily Anchors
+[cm_rcap, itb_mvrv, gn_sup, itb_sup, gn_active] = request.security("COINMETRICS:" + coin + "_MARKETCAPREAL", "D", [close, request.security("INTOTHEBLOCK:" + coin + "_MVRV", "D", close), request.security("GLASSNODE:" + coin + "_SUPPLY", "D", close), request.security("INTOTHEBLOCK:" + coin + "_CIRCULATINGSUPPLY", "D", close), request.security("GLASSNODE:" + coin + "_ACTIVEADDRESSES", "D", close)], ignore_invalid_symbol=true, lookahead=barmerge.lookahead_on)
+[ccapD, gn_activeAvg] = request.security("CRYPTOCAP:" + coin, "D", [close, request.security("GLASSNODE:" + coin + "_ACTIVEADDRESSES", "D", ta.sma(close, 30))], ignore_invalid_symbol=true, lookahead=barmerge.lookahead_on)
+float mcapLive = request.security("CRYPTOCAP:" + coin, timeframe.period, close, ignore_invalid_symbol=true)
+
+// NRV Spot LTF (10 exchanges)
+string e1s  = coin == "BTC" ? "BINANCE:BTCUSDT"  : "BINANCE:ETHUSDT"
+string e2s  = coin == "BTC" ? "COINBASE:BTCUSD"   : "COINBASE:ETHUSD"
+string e3s  = coin == "BTC" ? "BYBIT:BTCUSDT"     : "BYBIT:ETHUSDT"
+string e4s  = coin == "BTC" ? "OKX:BTCUSDT"       : "OKX:ETHUSDT"
+string e5s  = coin == "BTC" ? "KRAKEN:BTCUSD"     : "KRAKEN:ETHUSD"
+string e6s  = coin == "BTC" ? "BITFINEX:BTCUSD"   : "BITFINEX:ETHUSD"
+string e7s  = coin == "BTC" ? "HTX:BTCUSDT"       : "HTX:ETHUSDT"
+string e8s  = coin == "BTC" ? "KUCOIN:BTCUSDT"    : "KUCOIN:ETHUSDT"
+string e9s  = coin == "BTC" ? "GATEIO:BTCUSDT"    : "GATEIO:ETHUSDT"
+string e10s = coin == "BTC" ? "BITSTAMP:BTCUSD"   : "BITSTAMP:ETHUSD"
+
+[e1_c, e1_o, e1_v] = request.security_lower_tf(e1s, ltfRes, [close, open, volume], ignore_invalid_symbol=true)
+[e2_c, e2_o, e2_v] = request.security_lower_tf(e2s, ltfRes, [close, open, volume], ignore_invalid_symbol=true)
+[e3_c, e3_o, e3_v] = request.security_lower_tf(e3s, ltfRes, [close, open, volume], ignore_invalid_symbol=true)
+[e4_c, e4_o, e4_v] = request.security_lower_tf(e4s, ltfRes, [close, open, volume], ignore_invalid_symbol=true)
+[e5_c, e5_o, e5_v] = request.security_lower_tf(e5s, ltfRes, [close, open, volume], ignore_invalid_symbol=true)
+[e6_c, e6_o, e6_v] = request.security_lower_tf(e6s, ltfRes, [close, open, volume], ignore_invalid_symbol=true)
+[e7_c, e7_o, e7_v] = request.security_lower_tf(e7s, ltfRes, [close, open, volume], ignore_invalid_symbol=true)
+[e8_c, e8_o, e8_v] = request.security_lower_tf(e8s, ltfRes, [close, open, volume], ignore_invalid_symbol=true)
+[e9_c, e9_o, e9_v] = request.security_lower_tf(e9s, ltfRes, [close, open, volume], ignore_invalid_symbol=true)
+[e10_c, e10_o, e10_v] = request.security_lower_tf(e10s, ltfRes, [close, open, volume], ignore_invalid_symbol=true)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SLEEP/WAKE TRACKING FOR BASKETS
+// ══════════════════════════════════════════════════════════════════════════════
+
+bool b1_active = f_track_activity(_bh1, _bl1, _bc1, _bc1[1])
+bool b2_active = f_track_activity(_bh2, _bl2, _bc2, _bc2[1])
+bool b3_active = f_track_activity(_bh3, _bl3, _bc3, _bc3[1])
+bool b4_active = f_track_activity(_bh4, _bl4, _bc4, _bc4[1])
+
+var arr_b_silent = array.new_int(4, 0)
+var arr_b_awake = array.new_int(4, 0)
+var arr_b_asleep = array.new_bool(4, true)
+var arr_b_asleep_prev = array.new_bool(4, true)
+var arr_b_warmup = array.new_int(4, 0)
+
+for i = 0 to 3
+    int idx = i
+    array.set(arr_b_asleep_prev, idx, array.get(arr_b_asleep, idx))
+    bool alive_i = idx == 0 ? b1_active : idx == 1 ? b2_active : idx == 2 ? b3_active : b4_active
+    array.set(arr_b_silent, idx, alive_i ? 0 : array.get(arr_b_silent, idx) + 1)
+    array.set(arr_b_awake, idx, alive_i ? array.get(arr_b_awake, idx) + 1 : 0)
+
+    if array.get(arr_b_asleep, idx)
+        if array.get(arr_b_awake, idx) >= WAKE_BARS
+            array.set(arr_b_asleep, idx, false)
+    else
+        if array.get(arr_b_silent, idx) >= SLEEP_BARS
+            array.set(arr_b_asleep, idx, true)
+
+    bool wake_i = (not array.get(arr_b_asleep, idx)) and array.get(arr_b_asleep_prev, idx)
+    if wake_i
+        array.set(arr_b_warmup, idx, BASKET_WARMUP_BARS)
+    else
+        int wu_i = array.get(arr_b_warmup, idx)
+        if wu_i > 0
+            array.set(arr_b_warmup, idx, wu_i - 1)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PHASE 1 ENGINE: RADONEZH (PERPETUAL DELTA)
+// ══════════════════════════════════════════════════════════════════════════════
+
+[v1, d1] = f_bin_calc(p1_h, p1_l, p1_c, p1_v)
+[v2, d2] = f_bin_calc(p2_h, p2_l, p2_c, p2_v)
+[v3, d3] = f_bin_calc(p3_h, p3_l, p3_c, p3_v)
+[v4, d4] = f_bin_calc(p4_h, p4_l, p4_c, p4_v)
+
+float rad_agg_vol = v1 + v2 + v3 + v4
+float rad_agg_delta = d1 + d2 + d3 + d4
+
+float rad_price_change = close - nz(close[rad_momentum_period], close)
+float rad_price_ref = nz(close[rad_momentum_period], close) != 0 ? nz(close[rad_momentum_period], close) : close
+float rad_price_momentum = rad_price_change / rad_price_ref
+
+float rad_TR = math.max(high - low, math.max(math.abs(high - nz(close[1], close)), math.abs(low - nz(close[1], close))))
+float rad_AD_ratio = ta.change(close) / math.max(nz(rad_TR), 1e-8)
+float rad_ADMF = ta.rma(rad_agg_vol * rad_AD_ratio, rad_len_admf)
+
+float rad_volATRraw_admf = ta.ema(rad_agg_vol, rad_ema_base_length_admf)
+float rad_volATR_avg_admf = ta.sma(rad_agg_vol, 1000)
+float rad_volATR_admf = (rad_volATRraw_admf - rad_volATR_avg_admf) / math.max(rad_volATR_avg_admf, 1e-10)
+
+var float rad_volMin_admf = -0.701
+var float rad_volMax_admf = 1.901
+float temp_volMin = ta.percentile_nearest_rank(rad_volATR_admf, int(math.max(2, math.min(bar_index, 1000))), 2)
+float temp_volMax = ta.percentile_nearest_rank(rad_volATR_admf, int(math.max(2, math.min(bar_index, 1000))), 98)
+
+if na(rad_volMin_admf) or bar_index % 100 == 0
+    rad_volMin_admf := temp_volMin
+    rad_volMax_admf := temp_volMax
+
+float rad_volNorm_admf = math.min(math.max((rad_volATR_admf - rad_volMin_admf) / math.max(rad_volMax_admf - rad_volMin_admf, 1e-10), 0), 1)
+float rad_middle_boost_admf = 1 - math.pow(math.abs(2 * rad_volNorm_admf - 1), rad_curve_power_admf)
+float rad_ema_factor_admf = rad_ema_min_mult_admf + (rad_ema_max_mult_admf - rad_ema_min_mult_admf) * rad_middle_boost_admf
+float rad_ema_length_admf = math.round(rad_ema_base_length_admf * rad_ema_factor_admf)
+
+float rad_ADMF_EMA = f_dyn_ema(rad_ADMF, rad_ema_length_admf)
+float rad_smooth_cvd_mom = fixnan(rad_ADMF_EMA)
+float rad_smooth_price_mom = fixnan(ta.ema(rad_price_momentum, rad_price_smooth))
+
+float priceChange = rad_smooth_price_mom - nz(rad_smooth_price_mom[1])
+float cvdChange = rad_smooth_cvd_mom - nz(rad_smooth_cvd_mom[1])
+bool isDivergent = math.sign(priceChange) * math.sign(cvdChange) < 0
+var float divergenceRatio = 0.0
+divergenceRatio := isDivergent ? math.min(divergenceRatio + 0.2, 1.0) : math.max(divergenceRatio - 0.1, 0.0)
+
+float rad_adaptivePriceLength = rad_dema_period_price * (1.0 - divergenceRatio * 0.5)
+float rad_adaptiveCvdLength = rad_dema_period_volume * (1.0 - divergenceRatio * 0.5)
+
+float rad_price_ema1 = f_dyn_ema(close, rad_adaptivePriceLength)
+float rad_price_ema2 = f_dyn_ema(rad_price_ema1, rad_adaptivePriceLength)
+float rad_dema_price = 2 * rad_price_ema1 - rad_price_ema2
+
+float rad_mom_ema1 = f_dyn_ema(rad_smooth_price_mom, rad_adaptivePriceLength)
+float rad_mom_ema2 = f_dyn_ema(rad_mom_ema1, rad_adaptivePriceLength)
+float rad_dema_price_mom = 2 * rad_mom_ema1 - rad_mom_ema2
+
+float rad_cvd_ema1 = f_dyn_ema(rad_smooth_cvd_mom, rad_adaptiveCvdLength)
+float rad_cvd_ema2 = f_dyn_ema(rad_cvd_ema1, rad_adaptiveCvdLength)
+float rad_dema_cvd_mom = 2 * rad_cvd_ema1 - rad_cvd_ema2
+
+float rad_avg_dema_momentum = (rad_dema_price_mom + rad_dema_cvd_mom) / 2.0
+
+// Radonezh Z-Score Output (Feature 1)
+float rad_mom_mu = ta.sma(rad_avg_dema_momentum, f1_lookback)
+float rad_mom_sd = math.max(ta.stdev(rad_avg_dema_momentum, f1_lookback), 1e-10)
+float z_rad_mom = not na(rad_mom_mu) ? (rad_avg_dema_momentum - rad_mom_mu) / rad_mom_sd : 0.0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PHASE 1 ENGINE: BASKET (OEP Architecture)
+// ══════════════════════════════════════════════════════════════════════════════
+
+float _safe_c1 = not na(_bc1) and _bc1 > 0 ? _bc1 : na
+float _safe_c2 = not na(_bc2) and _bc2 > 0 ? _bc2 : na
+float _safe_c3 = not na(_bc3) and _bc3 > 0 ? _bc3 : na
+float _safe_c4 = not na(_bc4) and _bc4 > 0 ? _bc4 : na
+
+float prim_ret = f_logret(close, close[1])
+
+float r1 = f_logret(_safe_c1, _safe_c1[1])
+float r2 = f_logret(_safe_c2, _safe_c2[1])
+float r3 = f_logret(_safe_c3, _safe_c3[1])
+float r4 = f_logret(_safe_c4, _safe_c4[1])
+
+// Global warmup
+bool data_is_ready = bar_index >= math.max(f4_lookback, math.max(f1_lookback, f2_lookback))
+
+// Kalman Basket Beta Estimation
+var array<float> kf_basket_x = array.new<float>(5, 0.0)
+var array<float> kf_basket_P = array.new<float>(5, 1.0)
+
+bool basket_inputs_ready = data_is_ready and not na(prim_ret) and not na(_safe_c1) and not na(_safe_c2) and not na(_safe_c3) and not na(_safe_c4)
+if basket_inputs_ready
+    [temp_x, temp_P] = f_kalman_basket_betas(kf_basket_x, kf_basket_P, prim_ret, r1, r2, r3, r4, kf_Q_alpha, kf_Q_beta, kf_R)
+    for i = 0 to 4
+        array.set(kf_basket_x, i, array.get(temp_x, i))
+        array.set(kf_basket_P, i, array.get(temp_P, i))
+
+float kf_beta1 = array.get(kf_basket_x, 1)
+float kf_beta2 = array.get(kf_basket_x, 2)
+float kf_beta3 = array.get(kf_basket_x, 3)
+float kf_beta4 = array.get(kf_basket_x, 4)
+
+float final_w1 = corr_mode == "Equal Weight" ? 1.0 : kf_beta1
+float final_w2 = corr_mode == "Equal Weight" ? 1.0 : kf_beta2
+float final_w3 = corr_mode == "Equal Weight" ? 1.0 : kf_beta3
+float final_w4 = corr_mode == "Equal Weight" ? 1.0 : kf_beta4
+
+// Calculate pure geometric basket return
+float basket_ret_sum = (r1 * final_w1) + (r2 * final_w2) + (r3 * final_w3) + (r4 * final_w4)
+float w_sum = math.abs(final_w1) + math.abs(final_w2) + math.abs(final_w3) + math.abs(final_w4)
+float basket_ret = w_sum > 1e-6 ? basket_ret_sum / w_sum : 0.0
+
+// Divergence Z-Score (OEP)
+float div1 = f_supersmoother(prim_ret - r1, basket_smooth_len)
+float div2 = f_supersmoother(prim_ret - r2, basket_smooth_len)
+float div3 = f_supersmoother(prim_ret - r3, basket_smooth_len)
+float div4 = f_supersmoother(prim_ret - r4, basket_smooth_len)
+
+float z_b1 = (div1 - ta.sma(div1, f2_lookback)) / math.max(ta.stdev(div1, f2_lookback), 1e-10)
+float z_b2 = (div2 - ta.sma(div2, f2_lookback)) / math.max(ta.stdev(div2, f2_lookback), 1e-10)
+float z_b3 = (div3 - ta.sma(div3, f2_lookback)) / math.max(ta.stdev(div3, f2_lookback), 1e-10)
+float z_b4 = (div4 - ta.sma(div4, f2_lookback)) / math.max(ta.stdev(div4, f2_lookback), 1e-10)
+
+float z_num = (z_b1 * final_w1) + (z_b2 * final_w2) + (z_b3 * final_w3) + (z_b4 * final_w4)
+float z_den = (final_w1 * final_w1) + (final_w2 * final_w2) + (final_w3 * final_w3) + (final_w4 * final_w4)
+float final_composite_z = z_den > 0 ? z_num / math.sqrt(z_den) : 0.0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PHASE 1 ENGINE: VIX CONTANGO (MACD-Based)
+// ══════════════════════════════════════════════════════════════════════════════
+
+float contango_raw = na(vx1_ct) or na(vx2_ct) or vx2_ct == 0 ? na : vx1_ct / vx2_ct
+
+bool vix_is_awake = not na(contango_raw)
+var float contango_hold = na
+if vix_is_awake
+    contango_hold := contango_raw
+
+float smoothed_dvol = f_supersmoother(btc_dvol, 5)
+
+var float dvol_awake_mean = na
+var float vix_awake_mean = na
+
+if vix_is_awake and not na(smoothed_dvol)
+    dvol_awake_mean := na(dvol_awake_mean) ? smoothed_dvol : dvol_awake_mean * 0.999 + smoothed_dvol * 0.001
+    vix_awake_mean := na(vix_awake_mean) ? contango_hold : vix_awake_mean * 0.999 + contango_hold * 0.001
+
+float dvol_scalar = (nz(dvol_awake_mean, 50.0) > 0) ? nz(vix_awake_mean, 1.0) / dvol_awake_mean : 0.02
+float empirical_dvol_proxy = not na(smoothed_dvol) ? nz(vix_awake_mean, 1.0) * (nz(dvol_awake_mean, 50.0) / smoothed_dvol) : nz(contango_hold)
+
+var float vix_weight = 1.0
+if vix_is_awake
+    vix_weight := math.min(1.0, vix_weight + 0.15)
+else
+    vix_weight := math.max(0.0, vix_weight - 0.05)
+
+float contango_blended = use_dvol_proxy ? ((contango_hold * vix_weight) + (empirical_dvol_proxy * (1.0 - vix_weight))) : nz(contango_hold)
+
+float vix_fast = f_supersmoother(contango_blended, vix_ema_len)
+float vix_slow = f_supersmoother(contango_blended, vix_length)
+float vix_macd = vix_fast - vix_slow
+
+// VIX Z-Score Output (Feature 3) using MAD
+float vix_macd_mean = ta.sma(vix_macd, f3_lookback)
+float vix_macd_mad = ta.rma(math.abs(vix_macd - vix_macd_mean), f3_lookback) * 1.2533
+
+var float awake_mad = na
+if contango_hold != nz(contango_hold[1])
+    awake_mad := na(awake_mad) ? vix_macd_mad : awake_mad * 0.99 + vix_macd_mad * 0.01
+
+float safe_vix_mad = math.max(vix_macd_mad, nz(awake_mad, 1e-6) * 0.5)
+float z_vix = safe_vix_mad > 0 ? (vix_macd - vix_macd_mean) / safe_vix_mad : 0.0
+
+// Compress and smooth VIX Z-Score for visual bands
+float vix_norm_raw = 3.0 * f_compress(z_vix / 3.0)
+float vix_norm = f_supersmoother(vix_norm_raw, 5)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PHASE 1 ENGINE: NRV (Network Realized Value) + On-Chain)
+// ══════════════════════════════════════════════════════════════════════════════
+
+float supD  = not na(itb_sup) ? itb_sup : gn_sup
+float fallRC = (itb_mvrv > 0) ? ccapD / itb_mvrv : na
+float rcapD  = not na(cm_rcap) ? cm_rcap : fallRC
+
+float rpDaily    = (rcapD > 0 and supD > 0) ? rcapD / supD : na
+float mvrvDaily  = nz(itb_mvrv, ccapD > 0 and rcapD > 0 ? ccapD / rcapD : na)
+float activityScalar = (useActivityScalar and gn_activeAvg > 0 and gn_active > 0) ? math.max(0.5, math.min(2.0, gn_active / gn_activeAvg)) : 1.0
+
+[e1_u, e1_d]   = f_proc_ltf(e1_c, e1_o, e1_v)
+[e2_u, e2_d]   = f_proc_ltf(e2_c, e2_o, e2_v)
+[e3_u, e3_d]   = f_proc_ltf(e3_c, e3_o, e3_v)
+[e4_u, e4_d]   = f_proc_ltf(e4_c, e4_o, e4_v)
+[e5_u, e5_d]   = f_proc_ltf(e5_c, e5_o, e5_v)
+[e6_u, e6_d]   = f_proc_ltf(e6_c, e6_o, e6_v)
+[e7_u, e7_d]   = f_proc_ltf(e7_c, e7_o, e7_v)
+[e8_u, e8_d]   = f_proc_ltf(e8_c, e8_o, e8_v)
+[e9_u, e9_d]   = f_proc_ltf(e9_c, e9_o, e9_v)
+[e10_u, e10_d] = f_proc_ltf(e10_c, e10_o, e10_v)
+
+float tUp = nz(e1_u) + nz(e2_u) + nz(e3_u) + nz(e4_u) + nz(e5_u) + nz(e6_u) + nz(e7_u) + nz(e8_u) + nz(e9_u) + nz(e10_u)
+float tDn = nz(e1_d) + nz(e2_d) + nz(e3_d) + nz(e4_d) + nz(e5_d) + nz(e6_d) + nz(e7_d) + nz(e8_d) + nz(e9_d) + nz(e10_d)
+
+float tVol = tUp + tDn
+float dlt  = tUp - tDn
+float dR   = tVol > 0 ? dlt / tVol : 0.0
+
+bool newDay = ta.change(time("D")) != 0
+
+var float adjEff    = eff_baseRepriceEff
+var float adjLambda = baseDeltaLambda
+var float adjDrift  = baseMaxDrift
+var float rpEndDay  = na
+var float prevRPD   = na
+var float smErr     = 0.0
+var float dayDSum   = 0.0
+var float dayBCnt   = 0.0
+
+if newDay
+    float actRP = nz(rpDaily)
+    if not na(rpEndDay) and actRP > 0
+        float eps = (actRP - rpEndDay) / actRP
+        smErr := smErr + (2.0 / (adaptMemory + 1)) * (eps - smErr)
+        adjEff := adjEff * (1.0 + adaptAlpha * smErr) * (0.7 + 0.3 * activityScalar)
+        adjEff := math.max(0.10, math.min(0.85, adjEff))
+        float avgD = dayBCnt > 0 ? dayDSum / dayBCnt : 0.0
+        float agree = math.sign(avgD) * math.sign(eps)
+        adjLambda := adjLambda + adaptAlpha * 0.5 * agree * math.abs(smErr)
+        adjLambda := math.max(0.05, math.min(0.95, adjLambda))
+        float dlyChg = math.abs(actRP - nz(prevRPD, actRP)) / actRP
+        if dlyChg > 0
+            adjDrift := adjDrift + adaptAlpha * (dlyChg / 24.0 - adjDrift) * 0.3
+            adjDrift := math.max(0.0005, math.min(0.015, adjDrift))
+    prevRPD := actRP
+    dayDSum := 0.0
+    dayBCnt := 0.0
+
+dayDSum += dR
+dayBCnt += 1
+
+float supVal  = nz(supD) * nz(rpDaily)
+float turnov  = supVal > 0 ? math.min(nz(tVol) * adjEff / supVal, adjDrift) : 0.0
+
+var float rpEst = na
+
+if newDay or na(rpEst)
+    rpEst := nz(rpDaily, close)
+else
+    float pDir = hlc3 > rpEst ? 1.0 : -1.0
+    float amp  = math.max(0.15, 1.0 + dR * pDir * adjLambda)
+    float step = turnov * amp * (hlc3 - rpEst)
+    if useMVRVguard and not na(mvrvDaily) and rpEst > 0 and mcapLive > 0
+        float mvrvNow = mcapLive / (rpEst * nz(supD))
+        float mvrvDiv = math.abs(mvrvNow - mvrvDaily) / mvrvDaily
+        if mvrvDiv > mvrvGuardPct
+            float brake = math.max(0.1, 1.0 - (mvrvDiv - mvrvGuardPct) * 3.0)
+            step := step * brake
+    rpEst := rpEst + step
+
+rpEndDay := rpEst
+
+float rcapEst  = rpEst * nz(supD)
+float mvrvLive = (rcapEst > 0 and mcapLive > 0) ? mcapLive / rcapEst : na
+
+var float mvrvEMA = na
+var float mvrvVar = na
+float mvrvAlpha = 2.0 / (eff_nrv_len + 1)
+mvrvEMA := na(mvrvEMA) ? nz(mvrvLive) : mvrvEMA + mvrvAlpha * (nz(mvrvLive) - mvrvEMA)
+float mDev = nz(mvrvLive) - mvrvEMA
+mvrvVar := na(mvrvVar) ? mDev * mDev : mvrvVar + mvrvAlpha * (mDev * mDev - mvrvVar)
+float mvrvSigma = math.sqrt(math.max(0, nz(mvrvVar)))
+
+float bMean = rpEst * mvrvEMA
+float b3    = rpEst * (mvrvEMA + eff_sig_p3 * mvrvSigma)
+
+// Additional NRV bands for visual plotting
+float upper_nrv = rpEst * math.max(0.1, mvrvEMA + sig_p1 * mvrvSigma)
+float lower_nrv = rpEst * math.max(0.1, mvrvEMA + sig_n1 * mvrvSigma)
+float b1 = upper_nrv
+float bDisc = lower_nrv
+
+// ══════════════════════════════════════════════════════════════════════════════
+// THE BRIDGE: ASSEMBLING THE KALMAN FEATURE VECTOR (DIMENSIONALITY FIX)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Load the true z-scores from the Phase 1 engines
+float f1_z = nz(z_rad_mom, 0.0)
+float f2_z = nz(final_composite_z, 0.0)
+float f3_z = nz(z_vix, 0.0)
+
+// Derive a z-score for NRV based on distance from Mean to Extreme
+float nrv_dist = close - nz(bMean, close)
+float nrv_scale = nz(b3, close + 1) - nz(bMean, close)
+float f4_z = nrv_scale > 0 ? (nrv_dist / (nrv_scale / 3.0)) : 0.0
+
+// Convert normalized Z-scores into Dollar-value price deviations.
+// This allows the Kalman filter to assign stable, normalized Beta weights (near 1.0).
+int eff_macro_len = 200
+float price_macro_sd = math.max(ta.stdev(close, eff_macro_len), 1e-10)
+
+// Calculate mapping scalars based on user selection
+float rad_macro_osc_sd = math.max(ta.stdev(rad_avg_dema_momentum, eff_macro_len), 1e-10)
+float basket_macro_osc_sd = math.max(ta.stdev(final_composite_z, eff_macro_len), 1e-10)
+float vix_macro_osc_sd = math.max(ta.stdev(vix_macd, eff_macro_len), 1e-10)
+
+float rad_scale = mapping_algo_breakout == "Precise Mapping" ? (price_macro_sd / rad_macro_osc_sd) : price_macro_sd
+float basket_scale = mapping_algo_breakout == "Precise Mapping" ? (price_macro_sd / basket_macro_osc_sd) : price_macro_sd
+float vix_scale = mapping_algo_breakout == "Precise Mapping" ? (price_macro_sd / vix_macro_osc_sd) : price_macro_sd
+float rad_scale_mean_reversion = mapping_algo_mean_reversion == "Precise Mapping" ? (price_macro_sd / rad_macro_osc_sd) : price_macro_sd
+float basket_scale_mean_reversion = mapping_algo_mean_reversion == "Precise Mapping" ? (price_macro_sd / basket_macro_osc_sd) : price_macro_sd
+float vix_scale_mean_reversion = mapping_algo_mean_reversion == "Precise Mapping" ? (price_macro_sd / vix_macro_osc_sd) : price_macro_sd
+
+// 1. Radonezh: Distance from smoothed price anchor
+float rad_price_dist = mapping_algo_breakout == "Precise Mapping" ? ((rad_avg_dema_momentum - rad_mom_mu) * rad_scale) : ((f1_z / 3.0) * price_macro_sd)
+float rad_price_dist_mean_reversion = mapping_algo_mean_reversion == "Precise Mapping" ? ((rad_avg_dema_momentum - rad_mom_mu) * rad_scale_mean_reversion) : ((f1_z / 3.0) * price_macro_sd)
+
+// 2. Basket: Distance from Reg Eq Price
+float basket_price_dist = mapping_algo_breakout == "Precise Mapping" ? (final_composite_z * basket_scale) : (f2_z * price_macro_sd)
+float basket_price_dist_mean_reversion = mapping_algo_mean_reversion == "Precise Mapping" ? (final_composite_z * basket_scale_mean_reversion) : (f2_z * price_macro_sd)
+
+// 3. VIX: Distance from linear regression anchor
+float vix_price_dist = mapping_algo_breakout == "Precise Mapping" ? ((vix_macd - vix_macd_mean) * vix_scale) : (f3_z * price_macro_sd)
+float vix_price_dist_mean_reversion = mapping_algo_mean_reversion == "Precise Mapping" ? ((vix_macd - vix_macd_mean) * vix_scale_mean_reversion) : (f3_z * price_macro_sd)
+
+// 4. NRV: Exact dollar distance from the Mean (always precise)
+float nrv_price_dist = nrv_dist
+float nrv_price_dist_mean_reversion = nrv_dist
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PHASE 1 EXACT MAPPING (For visual toggles)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Radonezh Exact Mapping
+float mapped_rad_basis = rad_dema_price
+float upper_rad = mapped_rad_basis + rad_price_dist
+float lower_rad = mapped_rad_basis - rad_price_dist
+
+// Basket Exact Mapping
+int oep_proj_offset = math.round(f2_lookback * 0.10)
+var float basket_idx = 1.0
+basket_idx := math.max(basket_idx * (1.0 + math.max(math.min(nz(basket_ret, 0.0), 0.10), -0.10)), 1e-10)
+float raw_ratio_ret = prim_ret - basket_ret
+var float synthetic_log_ratio = na
+if na(synthetic_log_ratio)
+    synthetic_log_ratio := math.log(close / basket_idx)
+else
+    synthetic_log_ratio += raw_ratio_ret
+float robust_reg_baseline = ta.linreg(synthetic_log_ratio, f2_lookback, oep_proj_offset)
+float mapped_basket_basis = basket_idx * math.exp(robust_reg_baseline)
+float upper_basket = mapped_basket_basis + basket_sigma * price_macro_sd
+float lower_basket = mapped_basket_basis - basket_sigma * price_macro_sd
+
+// VIX Exact Mapping
+int vix_proj_offset = math.round(f3_lookback * 0.10)
+float vix_price_anchor = ta.linreg(close, f3_lookback, vix_proj_offset)
+float mapped_vix_basis = vix_price_anchor + (vix_norm * vix_dampening) * price_macro_sd
+float upper_vix = mapped_vix_basis + vix_sigma * price_macro_sd
+float lower_vix = mapped_vix_basis - vix_sigma * price_macro_sd
+
+// NRV already has bMean, b3, bDisc, etc.
+
+// Populate the Kalman feature vector with NORMALIZED Z-SCORES (not dollar distances)
+// This prevents variance explosion in the S calculation (z_i * z_i * P_beta)
+var array<float> z_vec = array.new<float>(8, 0.0)
+array.set(z_vec, 0, f1_z)  // Radonezh Z-score
+array.set(z_vec, 1, f2_z)  // Basket composite Z-score
+array.set(z_vec, 2, f3_z)  // VIX Z-score
+array.set(z_vec, 3, f4_z)  // NRV Z-score
+
+// ══════════════════════════════════════════════════════════════════════════════
+// KALMAN STATE MACHINE
+// ══════════════════════════════════════════════════════════════════════════════
+
+// State vector: x = [μ, β_1, β_2, ..., β_K]
+// Dimension: K+1
+int state_dim = num_features + 1
+
+// State variables (var for persistence)
+var array<float> x_state = array.new<float>(9, 0.0)  // Max K=8 → dim=9
+var array<float> P_diag = array.new<float>(9, init_state_var)  // Simplified: diagonal covariance only
+var bool kf_initialized = false
+var array<float> x_state_mean_reversion = array.new<float>(9, 0.0)
+var array<float> P_diag_mean_reversion = array.new<float>(9, mr_init_state_var)
+var bool kf_initialized_mean_reversion = false
+
+// Feature-validity guard (not just bar age, but actual finite values)
+bool features_ready = data_is_ready and not na(nz(array.get(z_vec, 0))) and not na(nz(array.get(z_vec, 1))) and not na(nz(array.get(z_vec, 2))) and not na(nz(array.get(z_vec, 3)))
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PRELIMINARY COMPOSITE ANCHOR (For Observation Equation)
+// ══════════════════════════════════════════════════════════════════════════════
+// Calculate composite anchor using PREVIOUS beta weights for the observation equation
+// This will be recalculated after Kalman update with new betas
+
+float beta_1_prev = array.get(x_state, 1)
+float beta_2_prev = array.get(x_state, 2)
+float beta_3_prev = array.get(x_state, 3)
+float beta_4_prev = array.get(x_state, 4)
+
+float abs_sum_beta_prev = math.abs(beta_1_prev) + math.abs(beta_2_prev) + math.abs(beta_3_prev) + math.abs(beta_4_prev)
+float w_rad_prev = abs_sum_beta_prev > 0 ? math.abs(beta_1_prev) / abs_sum_beta_prev : 0.25
+float w_bsk_prev = abs_sum_beta_prev > 0 ? math.abs(beta_2_prev) / abs_sum_beta_prev : 0.25
+float w_vix_prev = abs_sum_beta_prev > 0 ? math.abs(beta_3_prev) / abs_sum_beta_prev : 0.25
+float w_nrv_prev = abs_sum_beta_prev > 0 ? math.abs(beta_4_prev) / abs_sum_beta_prev : 0.25
+
+float rad_anchor = mapping_algo_breakout == "Precise Mapping" ? nz(mapped_rad_basis, close) : close - (f1_z * price_macro_sd)
+float bsk_anchor = mapping_algo_breakout == "Precise Mapping" ? nz(mapped_basket_basis, close) : close - (f2_z * price_macro_sd)
+float vix_anchor = mapping_algo_breakout == "Precise Mapping" ? nz(vix_price_anchor, close) : close - (f3_z * price_macro_sd)
+float nrv_anchor = mapping_algo_breakout == "Precise Mapping" ? nz(bMean, close) : close - (f4_z * price_macro_sd)
+float rad_anchor_mean_reversion = mapping_algo_mean_reversion == "Precise Mapping" ? nz(mapped_rad_basis, close) : close - (f1_z * price_macro_sd)
+float bsk_anchor_mean_reversion = mapping_algo_mean_reversion == "Precise Mapping" ? nz(mapped_basket_basis, close) : close - (f2_z * price_macro_sd)
+float vix_anchor_mean_reversion = mapping_algo_mean_reversion == "Precise Mapping" ? nz(vix_price_anchor, close) : close - (f3_z * price_macro_sd)
+float nrv_anchor_mean_reversion = mapping_algo_mean_reversion == "Precise Mapping" ? nz(bMean, close) : close - (f4_z * price_macro_sd)
+
+float generic_sd = math.max(ta.stdev(close, 200), 1e-10)
+float macro_sd_base = nz(price_macro_sd, generic_sd)
+float rad_sd_raw = math.max(math.abs(rad_price_dist), generic_sd * 0.1)
+float bsk_sd_raw = math.max(math.abs(basket_price_dist), generic_sd * 0.1)
+float vix_sd_raw = math.max(math.abs(vix_price_dist), generic_sd * 0.1)
+float nrv_sd_raw = math.max(math.abs(nrv_price_dist), generic_sd * 0.1)
+float rad_sd_raw_mean_reversion = math.max(math.abs(rad_price_dist_mean_reversion), generic_sd * 0.1)
+float bsk_sd_raw_mean_reversion = math.max(math.abs(basket_price_dist_mean_reversion), generic_sd * 0.1)
+float vix_sd_raw_mean_reversion = math.max(math.abs(vix_price_dist_mean_reversion), generic_sd * 0.1)
+float nrv_sd_raw_mean_reversion = math.max(math.abs(nrv_price_dist_mean_reversion), generic_sd * 0.1)
+float rad_sd_stable = math.min(rad_sd_raw * 0.65 + macro_sd_base * 0.35, macro_sd_base * 2.5)
+float bsk_sd_stable = math.min(bsk_sd_raw * 0.65 + macro_sd_base * 0.35, macro_sd_base * 2.5)
+float vix_sd_stable = math.min(vix_sd_raw * 0.65 + macro_sd_base * 0.35, macro_sd_base * 2.5)
+float nrv_sd_stable = math.min(nrv_sd_raw * 0.65 + macro_sd_base * 0.35, macro_sd_base * 2.5)
+float rad_sd_stable_mean_reversion = math.min(rad_sd_raw_mean_reversion * 0.65 + macro_sd_base * 0.35, macro_sd_base * 2.5)
+float bsk_sd_stable_mean_reversion = math.min(bsk_sd_raw_mean_reversion * 0.65 + macro_sd_base * 0.35, macro_sd_base * 2.5)
+float vix_sd_stable_mean_reversion = math.min(vix_sd_raw_mean_reversion * 0.65 + macro_sd_base * 0.35, macro_sd_base * 2.5)
+float nrv_sd_stable_mean_reversion = math.min(nrv_sd_raw_mean_reversion * 0.65 + macro_sd_base * 0.35, macro_sd_base * 2.5)
+float rad_sd = mapping_algo_breakout == "Precise Mapping" ? (stabilize_precise_mapping_sd ? rad_sd_stable : rad_sd_raw) : macro_sd_base
+float bsk_sd = mapping_algo_breakout == "Precise Mapping" ? (stabilize_precise_mapping_sd ? bsk_sd_stable : bsk_sd_raw) : macro_sd_base
+float vix_sd = mapping_algo_breakout == "Precise Mapping" ? (stabilize_precise_mapping_sd ? vix_sd_stable : vix_sd_raw) : macro_sd_base
+float nrv_sd = mapping_algo_breakout == "Precise Mapping" ? (stabilize_precise_mapping_sd ? nrv_sd_stable : nrv_sd_raw) : macro_sd_base
+float rad_sd_mean_reversion = mapping_algo_mean_reversion == "Precise Mapping" ? (stabilize_precise_mapping_sd ? rad_sd_stable_mean_reversion : rad_sd_raw_mean_reversion) : macro_sd_base
+float bsk_sd_mean_reversion = mapping_algo_mean_reversion == "Precise Mapping" ? (stabilize_precise_mapping_sd ? bsk_sd_stable_mean_reversion : bsk_sd_raw_mean_reversion) : macro_sd_base
+float vix_sd_mean_reversion = mapping_algo_mean_reversion == "Precise Mapping" ? (stabilize_precise_mapping_sd ? vix_sd_stable_mean_reversion : vix_sd_raw_mean_reversion) : macro_sd_base
+float nrv_sd_mean_reversion = mapping_algo_mean_reversion == "Precise Mapping" ? (stabilize_precise_mapping_sd ? nrv_sd_stable_mean_reversion : nrv_sd_raw_mean_reversion) : macro_sd_base
+
+float composite_anchor = (rad_anchor * w_rad_prev) + (bsk_anchor * w_bsk_prev) + (vix_anchor * w_vix_prev) + (nrv_anchor * w_nrv_prev)
+float composite_sd = (rad_sd * w_rad_prev) + (bsk_sd * w_bsk_prev) + (vix_sd * w_vix_prev) + (nrv_sd * w_nrv_prev)
+
+float beta_1_prev_mean_reversion = array.get(x_state_mean_reversion, 1)
+float beta_2_prev_mean_reversion = array.get(x_state_mean_reversion, 2)
+float beta_3_prev_mean_reversion = array.get(x_state_mean_reversion, 3)
+float beta_4_prev_mean_reversion = array.get(x_state_mean_reversion, 4)
+
+float abs_sum_beta_prev_mean_reversion = math.abs(beta_1_prev_mean_reversion) + math.abs(beta_2_prev_mean_reversion) + math.abs(beta_3_prev_mean_reversion) + math.abs(beta_4_prev_mean_reversion)
+float w_rad_prev_mean_reversion = abs_sum_beta_prev_mean_reversion > 0 ? math.abs(beta_1_prev_mean_reversion) / abs_sum_beta_prev_mean_reversion : 0.25
+float w_bsk_prev_mean_reversion = abs_sum_beta_prev_mean_reversion > 0 ? math.abs(beta_2_prev_mean_reversion) / abs_sum_beta_prev_mean_reversion : 0.25
+float w_vix_prev_mean_reversion = abs_sum_beta_prev_mean_reversion > 0 ? math.abs(beta_3_prev_mean_reversion) / abs_sum_beta_prev_mean_reversion : 0.25
+float w_nrv_prev_mean_reversion = abs_sum_beta_prev_mean_reversion > 0 ? math.abs(beta_4_prev_mean_reversion) / abs_sum_beta_prev_mean_reversion : 0.25
+
+float composite_anchor_mean_reversion_pre = (rad_anchor_mean_reversion * w_rad_prev_mean_reversion) + (bsk_anchor_mean_reversion * w_bsk_prev_mean_reversion) + (vix_anchor_mean_reversion * w_vix_prev_mean_reversion) + (nrv_anchor_mean_reversion * w_nrv_prev_mean_reversion)
+float composite_sd_mean_reversion_pre = (rad_sd_mean_reversion * w_rad_prev_mean_reversion) + (bsk_sd_mean_reversion * w_bsk_prev_mean_reversion) + (vix_sd_mean_reversion * w_vix_prev_mean_reversion) + (nrv_sd_mean_reversion * w_nrv_prev_mean_reversion)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DYNAMIC VARIANCE SCALING
+// ══════════════════════════════════════════════════════════════════════════════
+// Kalman filter now runs entirely in Z-space, so covariance/noise must remain in Z-units
+float dyn_var = 1.0
+
+// Initialize state ONLY when features are truly ready
+if features_ready and not kf_initialized
+    float init_y_obs_z = composite_sd > 1e-10 ? (close - composite_anchor) / composite_sd : 0.0
+    array.set(x_state, 0, init_y_obs_z)  // μ_0 = current observation in Z-space
+    for i = 1 to state_dim - 1
+        array.set(x_state, i, 0.0)  // β_i = 0 initially
+        array.set(P_diag, i, init_state_var)
+    array.set(P_diag, 0, init_state_var)
+    kf_initialized := true
+
+if features_ready and not kf_initialized_mean_reversion
+    float init_y_obs_z_mr = composite_sd_mean_reversion_pre > 1e-10 ? (close - composite_anchor_mean_reversion_pre) / composite_sd_mean_reversion_pre : 0.0
+    array.set(x_state_mean_reversion, 0, init_y_obs_z_mr)
+    for i = 1 to state_dim - 1
+        array.set(x_state_mean_reversion, i, 0.0)
+        array.set(P_diag_mean_reversion, i, mr_init_state_var)
+    array.set(P_diag_mean_reversion, 0, mr_init_state_var)
+    kf_initialized_mean_reversion := true
+
+// Auto-reset: recover from poisoned state (if NA crept in somehow)
+if kf_initialized
+    bool state_bad = false
+    for i = 0 to state_dim - 1
+        state_bad := state_bad or na(array.get(x_state, i)) or na(array.get(P_diag, i))
+    if state_bad
+        float reset_y_obs_z = composite_sd > 1e-10 ? (close - composite_anchor) / composite_sd : 0.0
+        array.set(x_state, 0, reset_y_obs_z)
+        for i = 1 to state_dim - 1
+            array.set(x_state, i, 0.0)
+        for i = 0 to state_dim - 1
+            array.set(P_diag, i, init_state_var)
+
+if kf_initialized_mean_reversion
+    bool state_bad_mr = false
+    for i = 0 to state_dim - 1
+        state_bad_mr := state_bad_mr or na(array.get(x_state_mean_reversion, i)) or na(array.get(P_diag_mean_reversion, i))
+    if state_bad_mr
+        float reset_y_obs_z_mr = composite_sd_mean_reversion_pre > 1e-10 ? (close - composite_anchor_mean_reversion_pre) / composite_sd_mean_reversion_pre : 0.0
+        array.set(x_state_mean_reversion, 0, reset_y_obs_z_mr)
+        for i = 1 to state_dim - 1
+            array.set(x_state_mean_reversion, i, 0.0)
+        for i = 0 to state_dim - 1
+            array.set(P_diag_mean_reversion, i, mr_init_state_var)
+
+// Declare variables in outer scope for accessibility
+var array<float> x_pred = array.new<float>(9, 0.0)
+var array<float> P_pred = array.new<float>(9, 0.0)
+var array<float> K_gain = array.new<float>(9, 0.0)
+var array<float> x_pred_mean_reversion = array.new<float>(9, 0.0)
+var array<float> P_pred_mean_reversion = array.new<float>(9, 0.0)
+var array<float> K_gain_mean_reversion = array.new<float>(9, 0.0)
+float innovation = 0.0
+float S = 1.0
+float S_band = 1.0
+float innovation_mean_reversion = 0.0
+float S_mean_reversion = 1.0
+float S_band_mean_reversion = 1.0
+float y_obs_z_dbg = composite_sd > 1e-10 ? (close - composite_anchor) / composite_sd : 0.0
+float pre_stouffer_z = 0.0
+float pre_stouffer_w_sq = 0.0
+float pre_joint_abs_mean = 0.0
+int pre_cov_len = math.max(math.max(f1_lookback, f2_lookback), math.max(f3_lookback, f4_lookback))
+float pre_beta_abs_1 = math.abs(array.get(x_state, 1))
+float pre_beta_abs_2 = math.abs(array.get(x_state, 2))
+float pre_beta_abs_3 = math.abs(array.get(x_state, 3))
+float pre_beta_abs_4 = math.abs(array.get(x_state, 4))
+float pre_cov_var_1 = math.max(ta.variance(f1_z, pre_cov_len), 1e-6)
+float pre_cov_var_2 = math.max(ta.variance(f2_z, pre_cov_len), 1e-6)
+float pre_cov_var_3 = math.max(ta.variance(f3_z, pre_cov_len), 1e-6)
+float pre_cov_var_4 = math.max(ta.variance(f4_z, pre_cov_len), 1e-6)
+float pre_cov_12 = f_covariance(f1_z, f2_z, pre_cov_len)
+float pre_cov_13 = f_covariance(f1_z, f3_z, pre_cov_len)
+float pre_cov_14 = f_covariance(f1_z, f4_z, pre_cov_len)
+float pre_cov_23 = f_covariance(f2_z, f3_z, pre_cov_len)
+float pre_cov_24 = f_covariance(f2_z, f4_z, pre_cov_len)
+float pre_cov_34 = f_covariance(f3_z, f4_z, pre_cov_len)
+for i = 0 to num_features - 1
+    float pre_z_i = nz(array.get(z_vec, i), 0.0)
+    float pre_beta_w = i == 0 ? pre_beta_abs_1 : i == 1 ? pre_beta_abs_2 : i == 2 ? pre_beta_abs_3 : pre_beta_abs_4
+    float pre_w_i = math.max(pre_beta_w, 1e-6)
+    pre_stouffer_z += pre_w_i * pre_z_i
+    pre_stouffer_w_sq += pre_w_i * pre_w_i
+    pre_joint_abs_mean += math.abs(pre_z_i)
+pre_stouffer_z := pre_stouffer_z / math.sqrt(math.max(pre_stouffer_w_sq, 1e-10))
+pre_joint_abs_mean := pre_joint_abs_mean / math.max(num_features, 1)
+float pre_mahalanobis_dist = f_mahalanobis_4x4(f1_z, f2_z, f3_z, f4_z, pre_cov_var_1, pre_cov_var_2, pre_cov_var_3, pre_cov_var_4, pre_cov_12, pre_cov_13, pre_cov_14, pre_cov_23, pre_cov_24, pre_cov_34, 0.05)
+float pre_upper_stress = math.max(0.0, pre_stouffer_z)
+float pre_lower_stress = math.max(0.0, -pre_stouffer_z)
+float kalman_combiner_extreme = combiner_mode_breakout == "Stouffer" ? math.abs(pre_stouffer_z) : combiner_mode_breakout == "Mahalanobis" ? pre_mahalanobis_dist : pre_joint_abs_mean
+float kalman_combiner_extreme_mean_reversion = combiner_mode_mean_reversion == "Stouffer" ? math.abs(pre_stouffer_z) : combiner_mode_mean_reversion == "Mahalanobis" ? pre_mahalanobis_dist : pre_joint_abs_mean
+float kalman_confidence_stress = math.max(0.0, math.min(kalman_combiner_extreme - 1.0, 2.5))
+float kalman_confidence_stress_mean_reversion = math.max(0.0, math.min(kalman_combiner_extreme_mean_reversion - 1.0, 2.5))
+float kalman_r_mult = 1.0 + kalman_confidence_stress * 0.30
+float kalman_q_mult = 1.0 + kalman_confidence_stress * 0.10
+float kalman_r_mult_mean_reversion = 1.0 + kalman_confidence_stress_mean_reversion * 0.30
+float kalman_q_mult_mean_reversion = 1.0 + kalman_confidence_stress_mean_reversion * 0.10
+
+// Wrap ENTIRE Kalman update in initialization + features guard
+if kf_initialized and features_ready
+    // Kalman Prediction Step
+    // x_pred = F * x_prev (F = I for random walk)
+    // P_pred = F * P * F' + Q
+    for i = 0 to state_dim - 1
+        array.set(x_pred, i, array.get(x_state, i))
+        float q_noise = (i == 0 ? eff_process_noise_mu : eff_process_noise_beta) * kalman_q_mult
+        array.set(P_pred, i, array.get(P_diag, i) + q_noise)
+
+    // Observation: Run Kalman filter entirely in Z-score space
+    // Observe the price's Z-score deviation from composite anchor
+    float y_obs_z = (close - composite_anchor) / composite_sd
+    y_obs_z_dbg := y_obs_z
+    float y_pred_z = array.get(x_pred, 0)  // Start with μ_z
+    for i = 0 to num_features - 1
+        float beta_i = array.get(x_pred, i + 1)
+        float z_i = nz(array.get(z_vec, i), 0.0)
+        y_pred_z += beta_i * z_i
+
+    // Innovation in Z-score space
+    innovation := y_obs_z - y_pred_z
+
+    // Innovation variance S = H * P * H' + R
+    // H = [1, z_1, z_2, ..., z_K]
+    float observation_noise_eff = observation_noise * kalman_r_mult
+    S := array.get(P_pred, 0) + observation_noise_eff
+    S_band := array.get(P_pred, 0) + observation_noise
+    for i = 0 to num_features - 1
+        float z_i = nz(array.get(z_vec, i), 0.0)
+        float P_beta = array.get(P_pred, i + 1)
+        S += z_i * z_i * P_beta
+        S_band += z_i * z_i * P_beta
+
+    // Prevent division by zero
+    S := math.max(S, 1e-10)
+    S_band := math.max(S_band, 1e-10)
+
+    // Kalman Gain K = P * H' / S
+    array.set(K_gain, 0, array.get(P_pred, 0) / S)
+    for i = 0 to num_features - 1
+        float z_i = nz(array.get(z_vec, i), 0.0)
+        float P_beta = array.get(P_pred, i + 1)
+        array.set(K_gain, i + 1, (P_beta * z_i) / S)
+
+    // Update Step (CORRECT formula: P_beta uses K_i * z_i, not just K_i)
+    // mu: P = (1 - K_0) * P_pred
+    float k0 = array.get(K_gain, 0)
+    array.set(x_state, 0, array.get(x_pred, 0) + k0 * innovation)
+    array.set(P_diag, 0, math.max((1.0 - k0) * array.get(P_pred, 0), 1e-8))
+
+    // betas: P = (1 - K_i * z_i) * P_pred
+    for i = 0 to num_features - 1
+        float z_i = nz(array.get(z_vec, i), 0.0)
+        float k_i = array.get(K_gain, i + 1)
+        array.set(x_state, i + 1, array.get(x_pred, i + 1) + k_i * innovation)
+        array.set(P_diag, i + 1, math.max((1.0 - k_i * z_i) * array.get(P_pred, i + 1), 1e-8))
+
+if kf_initialized_mean_reversion and features_ready
+    for i = 0 to state_dim - 1
+        array.set(x_pred_mean_reversion, i, array.get(x_state_mean_reversion, i))
+        float q_noise_mr = (i == 0 ? mr_process_noise_mu : mr_process_noise_beta) * kalman_q_mult_mean_reversion
+        array.set(P_pred_mean_reversion, i, array.get(P_diag_mean_reversion, i) + q_noise_mr)
+
+    float y_obs_z_mr = composite_sd_mean_reversion_pre > 1e-10 ? (close - composite_anchor_mean_reversion_pre) / composite_sd_mean_reversion_pre : 0.0
+    float y_pred_z_mr = array.get(x_pred_mean_reversion, 0)
+    for i = 0 to num_features - 1
+        float beta_i_mr = array.get(x_pred_mean_reversion, i + 1)
+        float z_i_mr = nz(array.get(z_vec, i), 0.0)
+        y_pred_z_mr += beta_i_mr * z_i_mr
+
+    innovation_mean_reversion := y_obs_z_mr - y_pred_z_mr
+
+    float observation_noise_eff_mr = mr_observation_noise * kalman_r_mult_mean_reversion
+    S_mean_reversion := array.get(P_pred_mean_reversion, 0) + observation_noise_eff_mr
+    S_band_mean_reversion := array.get(P_pred_mean_reversion, 0) + mr_observation_noise
+    for i = 0 to num_features - 1
+        float z_i_mr = nz(array.get(z_vec, i), 0.0)
+        float P_beta_mr = array.get(P_pred_mean_reversion, i + 1)
+        S_mean_reversion += z_i_mr * z_i_mr * P_beta_mr
+        S_band_mean_reversion += z_i_mr * z_i_mr * math.min(P_beta_mr, 1.0)
+
+    S_mean_reversion := math.max(S_mean_reversion, 1e-10)
+    S_band_mean_reversion := math.max(S_band_mean_reversion, 1e-10)
+
+    array.set(K_gain_mean_reversion, 0, array.get(P_pred_mean_reversion, 0) / S_mean_reversion)
+    for i = 0 to num_features - 1
+        float z_i_mr = nz(array.get(z_vec, i), 0.0)
+        float P_beta_mr = array.get(P_pred_mean_reversion, i + 1)
+        array.set(K_gain_mean_reversion, i + 1, (P_beta_mr * z_i_mr) / S_mean_reversion)
+
+    float k0_mr = array.get(K_gain_mean_reversion, 0)
+    array.set(x_state_mean_reversion, 0, array.get(x_pred_mean_reversion, 0) + k0_mr * innovation_mean_reversion)
+    array.set(P_diag_mean_reversion, 0, math.max((1.0 - k0_mr) * array.get(P_pred_mean_reversion, 0), 1e-8))
+
+    for i = 0 to num_features - 1
+        float z_i_mr = nz(array.get(z_vec, i), 0.0)
+        float k_i_mr = array.get(K_gain_mean_reversion, i + 1)
+        array.set(x_state_mean_reversion, i + 1, array.get(x_pred_mean_reversion, i + 1) + k_i_mr * innovation_mean_reversion)
+        array.set(P_diag_mean_reversion, i + 1, math.max((1.0 - k_i_mr * z_i_mr) * array.get(P_pred_mean_reversion, i + 1), 1e-8))
+
+// Extract filtered estimates
+float mu_z_filtered = array.get(x_state, 0)
+float beta_1_raw = array.get(x_state, 1)
+float beta_2_raw = array.get(x_state, 2)
+float beta_3_raw = array.get(x_state, 3)
+float beta_4_raw = array.get(x_state, 4)
+float mu_z_filtered_mean_reversion = array.get(x_state_mean_reversion, 0)
+float beta_1_raw_mean_reversion = array.get(x_state_mean_reversion, 1)
+float beta_2_raw_mean_reversion = array.get(x_state_mean_reversion, 2)
+float beta_3_raw_mean_reversion = array.get(x_state_mean_reversion, 3)
+float beta_4_raw_mean_reversion = array.get(x_state_mean_reversion, 4)
+
+// Innovation variance for band calculation (Z-space)
+// Use baseline S_band so adaptive Kalman confidence does not directly explode plotted bands.
+float sigma_z_innovation = math.sqrt(math.max(S_band, 0.0001))
+float sigma_z_innovation_mean_reversion = math.sqrt(math.max(S_band_mean_reversion, 0.0001))
+
+// ══════════════════════════════════════════════════════════════════════════════
+// KALMAN BASELINE SYNTHESIS (Heterogeneous Anchor Fusion)
+// ══════════════════════════════════════════════════════════════════════════════
+// Recalculate composite anchor with UPDATED beta weights from Kalman filter
+
+// 1. Normalize UPDATED Beta weights to sum to 1.0
+float abs_sum_beta = math.abs(beta_1_raw) + math.abs(beta_2_raw) + math.abs(beta_3_raw) + math.abs(beta_4_raw)
+float w_rad = abs_sum_beta > 0 ? math.abs(beta_1_raw) / abs_sum_beta : 0.25
+float w_bsk = abs_sum_beta > 0 ? math.abs(beta_2_raw) / abs_sum_beta : 0.25
+float w_vix = abs_sum_beta > 0 ? math.abs(beta_3_raw) / abs_sum_beta : 0.25
+float w_nrv = abs_sum_beta > 0 ? math.abs(beta_4_raw) / abs_sum_beta : 0.25
+float abs_sum_beta_mean_reversion = math.abs(beta_1_raw_mean_reversion) + math.abs(beta_2_raw_mean_reversion) + math.abs(beta_3_raw_mean_reversion) + math.abs(beta_4_raw_mean_reversion)
+float w_rad_mean_reversion = abs_sum_beta_mean_reversion > 0 ? math.abs(beta_1_raw_mean_reversion) / abs_sum_beta_mean_reversion : 0.25
+float w_bsk_mean_reversion = abs_sum_beta_mean_reversion > 0 ? math.abs(beta_2_raw_mean_reversion) / abs_sum_beta_mean_reversion : 0.25
+float w_vix_mean_reversion = abs_sum_beta_mean_reversion > 0 ? math.abs(beta_3_raw_mean_reversion) / abs_sum_beta_mean_reversion : 0.25
+float w_nrv_mean_reversion = abs_sum_beta_mean_reversion > 0 ? math.abs(beta_4_raw_mean_reversion) / abs_sum_beta_mean_reversion : 0.25
+
+// 2. Recalculate Composite Anchor with updated weights
+composite_anchor := (rad_anchor * w_rad) + (bsk_anchor * w_bsk) + (vix_anchor * w_vix) + (nrv_anchor * w_nrv)
+composite_sd := (rad_sd * w_rad) + (bsk_sd * w_bsk) + (vix_sd * w_vix) + (nrv_sd * w_nrv)
+float composite_anchor_mean_reversion = (rad_anchor_mean_reversion * w_rad_mean_reversion) + (bsk_anchor_mean_reversion * w_bsk_mean_reversion) + (vix_anchor_mean_reversion * w_vix_mean_reversion) + (nrv_anchor_mean_reversion * w_nrv_mean_reversion)
+float composite_sd_mean_reversion = (rad_sd_mean_reversion * w_rad_mean_reversion) + (bsk_sd_mean_reversion * w_bsk_mean_reversion) + (vix_sd_mean_reversion * w_vix_mean_reversion) + (nrv_sd_mean_reversion * w_nrv_mean_reversion)
+
+// 3. Project Kalman Z-Space Output to Price Space
+float mu_filtered_price = composite_anchor + (mu_z_filtered * composite_sd)
+float sigma_price = sigma_z_innovation * composite_sd
+float mu_filtered_price_mean_reversion = composite_anchor_mean_reversion + (mu_z_filtered_mean_reversion * composite_sd_mean_reversion)
+float sigma_price_mean_reversion = sigma_z_innovation_mean_reversion * composite_sd_mean_reversion
+
+// Legacy compatibility: keep mu_filtered and beta variables for downstream references
+float mu_filtered = mu_filtered_price
+float sigma_innovation = sigma_price
+float beta_1 = beta_1_raw
+float beta_2 = beta_2_raw
+float beta_3 = beta_3_raw
+float beta_4 = beta_4_raw
+float mu_filtered_mean_reversion = mu_filtered_price_mean_reversion
+float sigma_innovation_mean_reversion = sigma_price_mean_reversion
+float stouffer_z_band = 0.0
+float stouffer_z_band_mean_reversion = 0.0
+float joint_abs_mean = 0.0
+float joint_abs_mean_mean_reversion = 0.0
+float stouffer_w_sq_band = 0.0
+float stouffer_w_sq_band_mean_reversion = 0.0
+float beta_abs_1 = math.abs(beta_1_raw)
+float beta_abs_2 = math.abs(beta_2_raw)
+float beta_abs_3 = math.abs(beta_3_raw)
+float beta_abs_4 = math.abs(beta_4_raw)
+int cov_len = math.max(math.max(f1_lookback, f2_lookback), math.max(f3_lookback, f4_lookback))
+float cov_var_1 = math.max(ta.variance(f1_z, cov_len), 1e-6)
+float cov_var_2 = math.max(ta.variance(f2_z, cov_len), 1e-6)
+float cov_var_3 = math.max(ta.variance(f3_z, cov_len), 1e-6)
+float cov_var_4 = math.max(ta.variance(f4_z, cov_len), 1e-6)
+float cov_12 = f_covariance(f1_z, f2_z, cov_len)
+float cov_13 = f_covariance(f1_z, f3_z, cov_len)
+float cov_14 = f_covariance(f1_z, f4_z, cov_len)
+float cov_23 = f_covariance(f2_z, f3_z, cov_len)
+float cov_24 = f_covariance(f2_z, f4_z, cov_len)
+float cov_34 = f_covariance(f3_z, f4_z, cov_len)
+float mahalanobis_dist_band = f_mahalanobis_4x4(f1_z, f2_z, f3_z, f4_z, cov_var_1, cov_var_2, cov_var_3, cov_var_4, cov_12, cov_13, cov_14, cov_23, cov_24, cov_34, 0.05)
+for i = 0 to num_features - 1
+    float z_i = nz(array.get(z_vec, i), 0.0)
+    float beta_w = i == 0 ? math.abs(beta_1_raw) : i == 1 ? math.abs(beta_2_raw) : i == 2 ? math.abs(beta_3_raw) : math.abs(beta_4_raw)
+    float beta_w_mr = i == 0 ? math.abs(beta_1_raw_mean_reversion) : i == 1 ? math.abs(beta_2_raw_mean_reversion) : i == 2 ? math.abs(beta_3_raw_mean_reversion) : math.abs(beta_4_raw_mean_reversion)
+    float w_i = math.max(beta_w, 1e-6)
+    float w_i_mr = math.max(beta_w_mr, 1e-6)
+    stouffer_z_band += w_i * z_i
+    stouffer_w_sq_band += w_i * w_i
+    joint_abs_mean += math.abs(z_i)
+    stouffer_z_band_mean_reversion += w_i_mr * z_i
+    stouffer_w_sq_band_mean_reversion += w_i_mr * w_i_mr
+    joint_abs_mean_mean_reversion += math.abs(z_i)
+stouffer_z_band := stouffer_z_band / math.sqrt(math.max(stouffer_w_sq_band, 1e-10))
+joint_abs_mean := joint_abs_mean / math.max(num_features, 1)
+stouffer_z_band_mean_reversion := stouffer_z_band_mean_reversion / math.sqrt(math.max(stouffer_w_sq_band_mean_reversion, 1e-10))
+joint_abs_mean_mean_reversion := joint_abs_mean_mean_reversion / math.max(num_features, 1)
+float upper_stress = math.max(0.0, stouffer_z_band)
+float lower_stress = math.max(0.0, -stouffer_z_band)
+float upper_stress_mean_reversion = math.max(0.0, stouffer_z_band_mean_reversion)
+float lower_stress_mean_reversion = math.max(0.0, -stouffer_z_band_mean_reversion)
+float combiner_extreme = combiner_mode_breakout == "Stouffer" ? math.abs(stouffer_z_band) : combiner_mode_breakout == "Mahalanobis" ? mahalanobis_dist_band : joint_abs_mean
+float combiner_sigma_mult = 1.0 + math.max(0.0, math.min(combiner_extreme - 1.0, 2.0)) * 0.175
+float sigma_price_combined = sigma_price * combiner_sigma_mult
+float combiner_extreme_mean_reversion = combiner_mode_mean_reversion == "Stouffer" ? math.abs(stouffer_z_band_mean_reversion) : combiner_mode_mean_reversion == "Mahalanobis" ? mahalanobis_dist_band : joint_abs_mean_mean_reversion
+float combiner_sigma_mult_mean_reversion = 1.0 + math.max(0.0, math.min(combiner_extreme_mean_reversion - 1.0, 2.0)) * 0.175
+float sigma_price_combined_mean_reversion = sigma_price_mean_reversion * combiner_sigma_mult_mean_reversion
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ASYMMETRIC BANDS (Empirical Semi-Variance)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Track positive and negative innovations separately to capture market skewness
+float pos_innov = innovation > 0 ? innovation : 0.0
+float neg_innov = innovation < 0 ? math.abs(innovation) : 0.0
+float pos_innov_mean_reversion = innovation_mean_reversion > 0 ? innovation_mean_reversion : 0.0
+float neg_innov_mean_reversion = innovation_mean_reversion < 0 ? math.abs(innovation_mean_reversion) : 0.0
+
+// Smooth the squared errors to get dynamic variance
+// (Using 100 periods to match macro lookbacks)
+float var_up = ta.ema(pos_innov * pos_innov, 100)
+float var_dn = ta.ema(neg_innov * neg_innov, 100)
+float var_up_mean_reversion = ta.ema(pos_innov_mean_reversion * pos_innov_mean_reversion, 100)
+float var_dn_mean_reversion = ta.ema(neg_innov_mean_reversion * neg_innov_mean_reversion, 100)
+
+float sigma_up = math.sqrt(math.max(var_up, 0.0001))
+float sigma_dn = math.sqrt(math.max(var_dn, 0.0001))
+float sigma_up_mean_reversion = math.sqrt(math.max(var_up_mean_reversion, 0.0001))
+float sigma_dn_mean_reversion = math.sqrt(math.max(var_dn_mean_reversion, 0.0001))
+float sigma_skew_mean = math.max((sigma_up + sigma_dn) * 0.5, 0.0001)
+float sigma_skew_mean_mean_reversion = math.max((sigma_up_mean_reversion + sigma_dn_mean_reversion) * 0.5, 0.0001)
+float sigma_up_mult = math.max(0.5, math.min(sigma_up / sigma_skew_mean, 1.5))
+float sigma_dn_mult = math.max(0.5, math.min(sigma_dn / sigma_skew_mean, 1.5))
+float sigma_up_mult_mean_reversion = math.max(0.5, math.min(sigma_up_mean_reversion / sigma_skew_mean_mean_reversion, 1.5))
+float sigma_dn_mult_mean_reversion = math.max(0.5, math.min(sigma_dn_mean_reversion / sigma_skew_mean_mean_reversion, 1.5))
+float kinetic_flow = (math.abs(nz(f1_z)) + math.abs(nz(f3_z))) / 2.0
+float structural_gravity = (math.abs(nz(f2_z)) + math.abs(nz(f4_z))) / 2.0
+float dyn_expansion = math.min(0.25 + kinetic_flow * 0.15, 1.2)
+float dyn_compression = math.min(0.15 + structural_gravity * 0.25, 0.8)
+float breakout_upper_mult = 1.0
+float breakout_lower_mult = 1.0
+float mean_reversion_upper_mult = 1.0
+float mean_reversion_lower_mult = 1.0
+if combiner_mode_breakout == "Stouffer"
+    breakout_upper_mult := 1.0 + math.min(upper_stress, 2.5) * dyn_expansion - math.min(lower_stress, 2.5) * dyn_compression
+    breakout_lower_mult := 1.0 + math.min(lower_stress, 2.5) * dyn_expansion - math.min(upper_stress, 2.5) * dyn_compression
+else if combiner_mode_breakout == "Mahalanobis"
+    float breakout_structural_stress = math.max(0.0, math.min(mahalanobis_dist_band - 1.0, 3.0))
+    breakout_upper_mult := 1.0 + breakout_structural_stress * 0.22
+    breakout_lower_mult := 1.0 + breakout_structural_stress * 0.22
+else
+    float breakout_independent_stress = math.max(0.0, math.min(joint_abs_mean - 1.0, 3.0))
+    breakout_upper_mult := 1.0 + breakout_independent_stress * 0.18
+    breakout_lower_mult := 1.0 + breakout_independent_stress * 0.18
+if combiner_mode_mean_reversion == "Stouffer"
+    mean_reversion_upper_mult := 1.0 - math.min(upper_stress_mean_reversion, 2.5) * dyn_compression + math.min(lower_stress_mean_reversion, 2.5) * dyn_expansion
+    mean_reversion_lower_mult := 1.0 - math.min(lower_stress_mean_reversion, 2.5) * dyn_compression + math.min(upper_stress_mean_reversion, 2.5) * dyn_expansion
+else if combiner_mode_mean_reversion == "Mahalanobis"
+    float mean_reversion_structural_stress = math.max(0.0, math.min(mahalanobis_dist_band - 1.0, 3.0))
+    mean_reversion_upper_mult := 1.0 - mean_reversion_structural_stress * 0.22
+    mean_reversion_lower_mult := 1.0 - mean_reversion_structural_stress * 0.22
+else
+    float mean_reversion_independent_stress = math.max(0.0, math.min(joint_abs_mean_mean_reversion - 1.0, 3.0))
+    mean_reversion_upper_mult := 1.0 - mean_reversion_independent_stress * 0.16
+    mean_reversion_lower_mult := 1.0 - mean_reversion_independent_stress * 0.16
+breakout_upper_mult := math.max(0.15, breakout_upper_mult)
+breakout_lower_mult := math.max(0.15, breakout_lower_mult)
+mean_reversion_upper_mult := math.max(0.15, mean_reversion_upper_mult)
+mean_reversion_lower_mult := math.max(0.15, mean_reversion_lower_mult)
+float sigma_up_price = sigma_price_combined * sigma_up_mult
+float sigma_dn_price = sigma_price_combined * sigma_dn_mult
+float sigma_up_price_mean_reversion_base = sigma_price_combined_mean_reversion * sigma_up_mult_mean_reversion
+float sigma_dn_price_mean_reversion_base = sigma_price_combined_mean_reversion * sigma_dn_mult_mean_reversion
+float sigma_up_price_breakout = sigma_up_price * breakout_upper_mult
+float sigma_dn_price_breakout = sigma_dn_price * breakout_lower_mult
+float sigma_up_price_mean_reversion = sigma_up_price_mean_reversion_base * mean_reversion_upper_mult
+float sigma_dn_price_mean_reversion = sigma_dn_price_mean_reversion_base * mean_reversion_lower_mult
+
+// Rational approximation for Inverse Normal CDF (Acklam's approximation)
+f_norm_inv_full(float p) =>
+    float a1 = -3.969683028665376e+01
+    float a2 =  2.209460984245205e+02
+    float a3 = -2.759285104469687e+02
+    float a4 =  1.383577518672690e+02
+    float a5 = -3.066479806614716e+01
+    float a6 =  2.506628277459239e+00
+    
+    float b1 = -5.447609879822406e+01
+    float b2 =  1.615858368580409e+02
+    float b3 = -1.556989798598866e+02
+    float b4 =  6.680131188771972e+01
+    float b5 = -1.328068155288572e+01
+    
+    float c1 = -7.784894002430293e-03
+    float c2 = -3.223964580411365e-01
+    float c3 = -2.400758277161838e+00
+    float c4 = -2.549732539343734e+00
+    float c5 =  4.374664141464968e+00
+    float c6 =  2.938163982698783e+00
+    
+    float d1 =  7.784695709041462e-03
+    float d2 =  3.224671290700398e-01
+    float d3 =  2.445134137142996e+00
+    float d4 =  3.754408661907416e+00
+    
+    float p_low = 0.02425
+    float p_high = 1.0 - p_low
+    
+    float q = 0.0
+    float r = 0.0
+    float z = 0.0
+    
+    if p < p_low
+        q := math.sqrt(-2.0 * math.log(p))
+        z := (((((c1 * q + c2) * q + c3) * q + c4) * q + c5) * q + c6) / ((((d1 * q + d2) * q + d3) * q + d4) * q + 1.0)
+    else if p <= p_high
+        q := p - 0.5
+        r := q * q
+        z := (((((a1 * r + a2) * r + a3) * r + a4) * r + a5) * r + a6) * q / (((((b1 * r + b2) * r + b3) * r + b4) * r + b5) * r + 1.0)
+    else
+        q := math.sqrt(-2.0 * math.log(1.0 - p))
+        z := -(((((c1 * q + c2) * q + c3) * q + c4) * q + c5) * q + c6) / ((((d1 * q + d2) * q + d3) * q + d4) * q + 1.0)
+    z
+
+// Convert probabilities to k-multipliers (asymmetric)
+float k_up1 = f_norm_inv_full(1.0 - p_upper_1)
+float k_up2 = f_norm_inv_full(1.0 - p_upper_2)
+float k_up3 = f_norm_inv_full(1.0 - p_upper_3)
+
+float k_dn1 = f_norm_inv_full(p_lower_1) // Returns negative value naturally
+float k_dn2 = f_norm_inv_full(p_lower_2)
+float k_dn3 = f_norm_inv_full(p_lower_3)
+
+// 7. Calculate Final Analytic Bands (using synthesized baseline)
+float upper_1_analytic = mu_filtered_price + k_up1 * sigma_up_price_breakout
+float upper_5_analytic = mu_filtered_price + k_up2 * sigma_up_price_breakout
+float upper_10_analytic = mu_filtered_price + k_up3 * sigma_up_price_breakout
+
+float lower_1_analytic = mu_filtered_price + k_dn1 * sigma_dn_price_breakout
+float lower_5_analytic = mu_filtered_price + k_dn2 * sigma_dn_price_breakout
+float lower_10_analytic = mu_filtered_price + k_dn3 * sigma_dn_price_breakout
+float upper_1_mean_reversion = mu_filtered_price_mean_reversion + k_up1 * sigma_up_price_mean_reversion
+float upper_5_mean_reversion = mu_filtered_price_mean_reversion + k_up2 * sigma_up_price_mean_reversion
+float upper_10_mean_reversion = mu_filtered_price_mean_reversion + k_up3 * sigma_up_price_mean_reversion
+float lower_1_mean_reversion = mu_filtered_price_mean_reversion + k_dn1 * sigma_dn_price_mean_reversion
+float lower_5_mean_reversion = mu_filtered_price_mean_reversion + k_dn2 * sigma_dn_price_mean_reversion
+float lower_10_mean_reversion = mu_filtered_price_mean_reversion + k_dn3 * sigma_dn_price_mean_reversion
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MONTE CARLO FORWARD PROJECTION ENGINE (varip incremental)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Residual pool for bootstrapping (circular buffer)
+var array<float> residual_pool = array.new<float>(2000, 0.0)
+var int residual_idx = 0
+
+// Store current residual
+if not na(innovation)
+    array.set(residual_pool, residual_idx % mc_residual_pool, innovation)
+    residual_idx += 1
+
+// MC state (varip for real-time incremental updates)
+varip int mc_runs_done = 0
+varip bool mc_ready = false
+
+// Future path storage: Flattened 1D array [horizon * 7 + percentile_idx]
+// Percentiles: 1%, 5%, 10%, 50%, 90%, 95%, 99% (7 total)
+// Max 50 bars ahead * 7 percentiles = 350 elements
+var array<float> future_paths_flat = array.new<float>(350, na)
+
+// Simulation buffer: Flattened 1D array [path_idx * horizon + bar_offset]
+// Max 2000 paths * 50 bars = 100,000 elements (Pine Script limit)
+varip array<float> sim_buffer_flat = array.new<float>(100000, na)
+
+// MC Engine: Run chunk of simulations
+if enable_mc and barstate.isrealtime and mc_runs_done < mc_target_runs
+    // Run mc_runs_per_chunk simulations this tick
+    for run = 0 to math.min(mc_runs_per_chunk - 1, mc_target_runs - mc_runs_done - 1)
+        int path_idx = mc_runs_done + run
+        
+        // Initialize path at current state
+        float sim_mu = mu_filtered
+        var array<float> sim_betas = array.new<float>(8, 0.0)
+        for i = 0 to num_features - 1
+            array.set(sim_betas, i, array.get(x_state, i + 1))
+        
+        // Simulate forward H bars
+        for h = 0 to mc_horizon - 1
+            // Sample process noise (bootstrap from residuals)
+            int pool_size = math.min(residual_idx, mc_residual_pool)
+            int rand_idx = pool_size > 1 ? int(math.floor(math.random() * pool_size)) : 0
+            float w_sample = array.get(residual_pool, rand_idx)
+            
+            // Update state (random walk)
+            sim_mu += w_sample * 0.1  // Damped drift
+            
+            // Sample observation noise
+            int rand_idx2 = pool_size > 1 ? int(math.floor(math.random() * pool_size)) : 0
+            float v_sample = array.get(residual_pool, rand_idx2)
+            
+            // Assume z-vector constant (simplification) or random walk
+            float y_sim = sim_mu + v_sample
+            for i = 0 to num_features - 1
+                float beta_i = array.get(sim_betas, i)
+                float z_i = array.get(z_vec, i)  // Hold constant
+                y_sim += beta_i * z_i
+            
+            // Store simulated price in flattened buffer
+            int flat_idx = path_idx * mc_horizon + h
+            array.set(sim_buffer_flat, flat_idx, y_sim)
+    
+    mc_runs_done += mc_runs_per_chunk
+
+// When target reached, compute percentiles
+if enable_mc and mc_runs_done >= mc_target_runs and not mc_ready
+    mc_ready := true
+    
+    // For each horizon h, extract percentiles across all paths
+    for h = 0 to mc_horizon - 1
+        var array<float> h_prices = array.new<float>(mc_target_runs, 0.0)
+        
+        // Collect all simulated prices at horizon h from flattened buffer
+        for path_idx = 0 to mc_target_runs - 1
+            int flat_idx = path_idx * mc_horizon + h
+            float price_h = array.get(sim_buffer_flat, flat_idx)
+            array.set(h_prices, path_idx, price_h)
+        
+        // Sort and extract percentiles
+        array.sort(h_prices, order.ascending)
+        
+        int idx_l1 = int(mc_target_runs * p_lower_1)
+        int idx_l2 = int(mc_target_runs * p_lower_2)
+        int idx_l3 = int(mc_target_runs * p_lower_3)
+        
+        int idx_50 = int(mc_target_runs * 0.50)
+        
+        int idx_u3 = int(mc_target_runs * (1.0 - p_upper_3))
+        int idx_u2 = int(mc_target_runs * (1.0 - p_upper_2))
+        int idx_u1 = int(mc_target_runs * (1.0 - p_upper_1))
+        
+        // Ensure index safety
+        idx_l1 := math.max(0, math.min(mc_target_runs - 1, idx_l1))
+        idx_l2 := math.max(0, math.min(mc_target_runs - 1, idx_l2))
+        idx_l3 := math.max(0, math.min(mc_target_runs - 1, idx_l3))
+        idx_50 := math.max(0, math.min(mc_target_runs - 1, idx_50))
+        idx_u3 := math.max(0, math.min(mc_target_runs - 1, idx_u3))
+        idx_u2 := math.max(0, math.min(mc_target_runs - 1, idx_u2))
+        idx_u1 := math.max(0, math.min(mc_target_runs - 1, idx_u1))
+        
+        // Store percentiles in flattened array [h * 7 + percentile_idx]
+        array.set(future_paths_flat, h * 7 + 0, array.get(h_prices, idx_l1))   // Lower 1
+        array.set(future_paths_flat, h * 7 + 1, array.get(h_prices, idx_l2))   // Lower 2
+        array.set(future_paths_flat, h * 7 + 2, array.get(h_prices, idx_l3))   // Lower 3
+        array.set(future_paths_flat, h * 7 + 3, array.get(h_prices, idx_50))   // Median
+        array.set(future_paths_flat, h * 7 + 4, array.get(h_prices, idx_u3))   // Upper 3
+        array.set(future_paths_flat, h * 7 + 5, array.get(h_prices, idx_u2))   // Upper 2
+        array.set(future_paths_flat, h * 7 + 6, array.get(h_prices, idx_u1))   // Upper 1
+
+// Reset MC on new bar
+if barstate.isnew and enable_mc
+    mc_runs_done := 0
+    mc_ready := false
+
+// Extract MC empirical bands for current bar (h=0)
+float upper_1_mc = na
+float upper_5_mc = na
+float upper_10_mc = na
+float lower_1_mc = na
+float lower_5_mc = na
+float lower_10_mc = na
+
+if mc_ready and mc_horizon > 0
+    // Extract h=0 percentiles from flattened array
+    lower_1_mc := array.get(future_paths_flat, 0 * 7 + 0)
+    lower_5_mc := array.get(future_paths_flat, 0 * 7 + 1)
+    lower_10_mc := array.get(future_paths_flat, 0 * 7 + 2)
+    upper_10_mc := array.get(future_paths_flat, 0 * 7 + 4)
+    upper_5_mc := array.get(future_paths_flat, 0 * 7 + 5)
+    upper_1_mc := array.get(future_paths_flat, 0 * 7 + 6)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PLOTTING
+// ══════════════════════════════════════════════════════════════════════════════
+
+// 1. Phase 1 Individual Band Systems (Toggled)
+// Ensure topological sorting using f_sort4 logic (or simplified exact mapping)
+// We use the exact mapped basis and bounds calculated in the Bridge section
+float u1 = upper_rad
+float u2 = upper_basket
+float u3 = upper_vix
+float u4 = b1 // NRV Warm
+float l1 = lower_rad
+float l2 = lower_basket
+float l3 = lower_vix
+float l4 = bDisc // NRV Discount
+bool show_rad_bands = phase1_band_family == "Radonezh"
+bool show_basket_bands = phase1_band_family == "Basket"
+bool show_vix_bands = phase1_band_family == "VIX"
+float phase1_upper = show_rad_bands ? u1 : show_basket_bands ? u2 : show_vix_bands ? u3 : na
+float phase1_center = show_rad_bands ? mapped_rad_basis : show_basket_bands ? mapped_basket_basis : show_vix_bands ? mapped_vix_basis : na
+float phase1_lower = show_rad_bands ? l1 : show_basket_bands ? l2 : show_vix_bands ? l3 : na
+
+// Individual Phase 1 Lines (Selector-Driven)
+plot(phase1_upper, "Phase 1 Upper", color=color.new(color.silver, 30), linewidth=1, force_overlay=true)
+plot(phase1_center, "Phase 1 Center", color=color.new(color.gray, 55), linewidth=2, force_overlay=true)
+plot(phase1_lower, "Phase 1 Lower", color=color.new(color.silver, 30), linewidth=1, force_overlay=true)
+
+// Individual Lines (NRV)
+pDeep = plot(show_nrv_bands ? rpEst * math.max(0.1, mvrvEMA + eff_sig_n2 * mvrvSigma) : na, "NRV Deep", color=color.new(#7B2FBE, 0), linewidth=1, force_overlay=true)
+pDisc = plot(show_nrv_bands ? l4 : na, "NRV Disc", color=color.new(#2962FF, 0), linewidth=1, force_overlay=true)
+pMean = plot(show_nrv_bands ? bMean : na, "NRV Mean", color=color.new(#FFFFFF, 0), linewidth=2, style=plot.style_circles, force_overlay=true)
+p1 = plot(show_nrv_bands ? u4 : na, "NRV Warm", color=color.new(#26A69A, 0), linewidth=1, force_overlay=true)
+p2 = plot(show_nrv_bands ? rpEst * (mvrvEMA + sig_p2 * mvrvSigma) : na, "NRV Hot", color=color.new(#FF9800, 0), linewidth=1, force_overlay=true)
+p3 = plot(show_nrv_bands ? b3 : na, "NRV Extreme", color=color.new(#FF1744, 0), linewidth=1, force_overlay=true)
+
+fill(pDeep, pDisc, color=show_nrv_bands ? color.new(#7B2FBE, 95) : na, title="NRV Deep-Disc")
+fill(pDisc, pMean, color=show_nrv_bands ? color.new(#2962FF, 95) : na, title="NRV Disc-Mean")
+fill(pMean, p1, color=show_nrv_bands ? color.new(#26A69A, 95) : na, title="NRV Mean-Warm")
+fill(p1, p2, color=show_nrv_bands ? color.new(#FF9800, 95) : na, title="NRV Warm-Hot")
+fill(p2, p3, color=show_nrv_bands ? color.new(#FF1744, 95) : na, title="NRV Hot-Extreme")
+
+// 2. Kalman Synthesizer (Center line)
+plot(show_center_line ? composite_anchor : na, "Kalman Composite Anchor - Blended Fair Value Baseline", color=color.new(color.gray, 25), linewidth=2, force_overlay=true)
+plot(show_center_line ? mu_filtered : na, "Kalman Center - Filtered Tradeable Fair Value", color=color.new(color.blue, 0), linewidth=2, force_overlay=true)
+plot(show_center_line and show_mean_reversion_band_set ? mu_filtered_mean_reversion : na, "Kalman Center - Mean-Reversion Instance", color=color.new(color.fuchsia, 10), linewidth=2, force_overlay=true)
+
+// 3. Analytic Bands (Asymmetric)
+bool show_breakout_analytic = show_analytic_bands and show_breakout_band_set
+bool show_mean_reversion_analytic = show_analytic_bands and show_mean_reversion_band_set
+p_up1 = plot(show_breakout_analytic ? upper_1_analytic : na, "Upper 1% (Breakout)", color=show_band_lines ? color.new(color.red, 60) : color.new(color.red, 100), linewidth=1, force_overlay=true)
+p_up5 = plot(show_breakout_analytic ? upper_5_analytic : na, "Upper 5% (Breakout)", color=show_band_lines ? color.new(color.orange, 55) : color.new(color.orange, 100), linewidth=1, force_overlay=true)
+p_up10 = plot(show_breakout_analytic ? upper_10_analytic : na, "Upper 10% (Breakout)", color=show_band_lines ? color.new(color.yellow, 50) : color.new(color.yellow, 100), linewidth=1, force_overlay=true)
+p_dn1 = plot(show_breakout_analytic ? lower_1_analytic : na, "Lower 1% (Breakout)", color=show_band_lines ? color.new(color.red, 60) : color.new(color.red, 100), linewidth=1, force_overlay=true)
+p_dn5 = plot(show_breakout_analytic ? lower_5_analytic : na, "Lower 5% (Breakout)", color=show_band_lines ? color.new(color.orange, 55) : color.new(color.orange, 100), linewidth=1, force_overlay=true)
+p_dn10 = plot(show_breakout_analytic ? lower_10_analytic : na, "Lower 10% (Breakout)", color=show_band_lines ? color.new(color.yellow, 50) : color.new(color.yellow, 100), linewidth=1, force_overlay=true)
+p_mr_up1 = plot(show_mean_reversion_analytic ? upper_1_mean_reversion : na, "Upper 1% (Mean-Reversion)", color=show_band_lines ? color.new(color.fuchsia, 65) : color.new(color.fuchsia, 100), linewidth=1, force_overlay=true)
+p_mr_up5 = plot(show_mean_reversion_analytic ? upper_5_mean_reversion : na, "Upper 5% (Mean-Reversion)", color=show_band_lines ? color.new(color.purple, 60) : color.new(color.purple, 100), linewidth=1, force_overlay=true)
+p_mr_up10 = plot(show_mean_reversion_analytic ? upper_10_mean_reversion : na, "Upper 10% (Mean-Reversion)", color=show_band_lines ? color.new(color.blue, 60) : color.new(color.blue, 100), linewidth=1, force_overlay=true)
+p_mr_dn1 = plot(show_mean_reversion_analytic ? lower_1_mean_reversion : na, "Lower 1% (Mean-Reversion)", color=show_band_lines ? color.new(color.fuchsia, 65) : color.new(color.fuchsia, 100), linewidth=1, force_overlay=true)
+p_mr_dn5 = plot(show_mean_reversion_analytic ? lower_5_mean_reversion : na, "Lower 5% (Mean-Reversion)", color=show_band_lines ? color.new(color.purple, 60) : color.new(color.purple, 100), linewidth=1, force_overlay=true)
+p_mr_dn10 = plot(show_mean_reversion_analytic ? lower_10_mean_reversion : na, "Lower 10% (Mean-Reversion)", color=show_band_lines ? color.new(color.blue, 60) : color.new(color.blue, 100), linewidth=1, force_overlay=true)
+
+// Fills
+fill(p_up1, p_up5, color=show_breakout_analytic ? color.new(color.red, 88) : na, title="Upper 1-5% Fill (Breakout)")
+fill(p_up5, p_up10, color=show_breakout_analytic ? color.new(color.orange, 88) : na, title="Upper 5-10% Fill (Breakout)")
+fill(p_dn1, p_dn5, color=show_breakout_analytic ? color.new(color.red, 88) : na, title="Lower 1-5% Fill (Breakout)")
+fill(p_dn5, p_dn10, color=show_breakout_analytic ? color.new(color.orange, 88) : na, title="Lower 5-10% Fill (Breakout)")
+fill(p_mr_up1, p_mr_up5, color=show_mean_reversion_analytic ? color.new(color.fuchsia, 90) : na, title="Upper 1-5% Fill (Mean-Reversion)")
+fill(p_mr_up5, p_mr_up10, color=show_mean_reversion_analytic ? color.new(color.purple, 90) : na, title="Upper 5-10% Fill (Mean-Reversion)")
+fill(p_mr_dn1, p_mr_dn5, color=show_mean_reversion_analytic ? color.new(color.fuchsia, 90) : na, title="Lower 1-5% Fill (Mean-Reversion)")
+fill(p_mr_dn5, p_mr_dn10, color=show_mean_reversion_analytic ? color.new(color.purple, 90) : na, title="Lower 5-10% Fill (Mean-Reversion)")
+// MC empirical bands
+plot(show_mc_bands ? upper_5_mc : na, "Upper 5% (MC)", color=color.new(color.red, 0), linewidth=2, style=plot.style_circles, force_overlay=true)
+plot(show_mc_bands ? lower_5_mc : na, "Lower 5% (MC)", color=color.new(color.red, 0), linewidth=2, style=plot.style_circles, force_overlay=true)
+
+// Oscillator pane plots
+float stouffer_z = stouffer_z_band
+float mahalanobis_dist = mahalanobis_dist_band
+
+float immPosteriorNoise = 0.0
+float immPosteriorBO    = 0.0
+float immPosteriorMR    = 0.0
+int   immRegime         = 0
+float immProbBODown     = 0.0
+float immProbMRUp       = 0.0
+float hmmPosteriorExp   = 0.0
+float hmmPosteriorCon   = 0.0
+int   hmmRegime         = 0
+float hmmProbExpDown    = 0.0
+float hmmProbConUp      = 0.0
+
+float t00 = immTstickNoise
+float t01 = (1.0 - immTstickNoise) / 2.0
+float t02 = (1.0 - immTstickNoise) / 2.0
+float t10 = (1.0 - immTstickBO) / 2.0
+float t11 = immTstickBO
+float t12 = (1.0 - immTstickBO) / 2.0
+float t20 = (1.0 - immTstickMR) / 2.0
+float t21 = (1.0 - immTstickMR) / 2.0
+float t22 = immTstickMR
+
+var float priorNoise = 0.80
+var float priorBO    = 0.10
+var float priorMR    = 0.10
+int hmm_roc_len = 3
+int covariance_regime_len = coin == "ETH" and timeframe.period == "60" ? 40 : 30
+float candle_ret = close - nz(close[1], close)
+float bullBar = candle_ret > 0 ? 1.0 : 0.0
+float bearBar = candle_ret < 0 ? 1.0 : 0.0
+float rocP = ta.change(close, hmm_roc_len)
+float rocS = ta.change(stouffer_z, hmm_roc_len)
+float rocM = ta.change(mahalanobis_dist, hmm_roc_len)
+float logSband = math.log(math.max(S_band, 1e-10))
+float rocLogS = ta.change(logSband, hmm_roc_len)
+float zP = f_zscore(rocP, covariance_regime_len)
+float zS = f_zscore(rocS, covariance_regime_len)
+float zM = f_zscore(rocM, covariance_regime_len)
+float zLogS = f_zscore(rocLogS, covariance_regime_len)
+float zLevelM = f_zscore(mahalanobis_dist, covariance_regime_len)
+float zLevelS = f_zscore(stouffer_z, covariance_regime_len)
+float zLevelLogS = f_zscore(logSband, covariance_regime_len)
+float kalmanVarianceRatio = S_band / math.max(S_band_mean_reversion, 1e-10)
+float kalmanExpForce = math.max(0.0, kalmanVarianceRatio - 1.0)
+float kalmanConGravity = math.max(0.0, 1.0 - kalmanVarianceRatio)
+float zInnovBO = innovation / math.sqrt(math.max(S_band, 1e-10))
+float zInnovMR = innovation_mean_reversion / math.sqrt(math.max(S_band_mean_reversion, 1e-10))
+bool directionAgreement = math.sign(zInnovBO) == math.sign(zInnovMR)
+float jointKineticForce = directionAgreement ? math.abs(zInnovBO * zInnovMR) : 0.0
+float contractionAbsorption = math.max(0.0, 2.0 - math.abs(zInnovBO) - math.abs(zInnovMR))
+float bullExpansionLift = bullBar * (0.30 * math.max(zP, 0.0) + 0.25 * math.max(zS, 0.0) + 0.55 * math.max(zM, 0.0))
+float bearContractionDrag = bearBar * (0.30 * math.max(-zP, 0.0) + 0.25 * math.max(-zS, 0.0) + 0.55 * math.max(-zM, 0.0))
+float bearFightStress = bearBar * (0.25 * math.max(-zP, 0.0) + 0.20 * math.max(-zS, 0.0) + 0.40 * math.max(zM, 0.0) + 0.25 * math.max(zLevelM, 0.0))
+float bullFightStress = bullBar * (0.25 * math.max(zP, 0.0) + 0.20 * math.max(zS, 0.0) + 0.40 * math.max(-zM, 0.0) + 0.25 * math.max(-zLevelM, 0.0))
+float expansionPersistence = 0.45 * math.max(zLevelM, 0.0) + 0.20 * math.max(zLevelS, 0.0) + 0.35 * math.max(zLevelLogS, 0.0)
+float contractionPersistence = 0.45 * math.max(-zLevelM, 0.0) + 0.20 * math.max(-zLevelS, 0.0) + 0.35 * math.max(-zLevelLogS, 0.0)
+float bullLiftFade = bullBar * (0.35 * math.max(zP, 0.0) + 0.25 * math.max(zS, 0.0) + 0.40 * math.max(-zM, 0.0) + 0.30 * math.max(-zLogS, 0.0) + 0.25 * math.max(-zLevelLogS, 0.0))
+float w_expansionPersistence = 0.80
+float w_bearFightStress = 0.05
+float w_bullLiftFade = 0.90
+float w_contractionPersistence = 0.35
+float w_bearContractionDrag = timeframe.in_seconds() <= 600 ? 0.20 : coin == "ETH" ? 0.80 : 0.35
+float agreementSpread = (math.abs(zP - zS) + math.abs(zP - zM) + math.abs(zS - zM)) / 3.0
+float structuralCalm = (math.max(0.0, 1.0 - math.abs(zP)) + math.max(0.0, 1.0 - math.abs(zS)) + math.max(0.0, 1.0 - math.abs(zM))) / 3.0
+float noiseScore = 0.55 * structuralCalm + 0.45 * agreementSpread
+float baseObsExp = bullExpansionLift + w_expansionPersistence * expansionPersistence + w_bearFightStress * bearFightStress - w_bullLiftFade * bullLiftFade - w_bearContractionDrag * bearContractionDrag - w_contractionPersistence * contractionPersistence
+float baseObsCon = bearContractionDrag + 0.40 * contractionPersistence + 0.30 * bullFightStress + 0.25 * bullLiftFade - 0.55 * bullExpansionLift
+
+if features_ready and not na(S_band) and S_band > 0 and not na(S_band_mean_reversion) and S_band_mean_reversion > 0
+    float predNoise = priorNoise * t00 + priorBO * t10 + priorMR * t20
+    float predBO = priorNoise * t01 + priorBO * t11 + priorMR * t21
+    float predMR = priorNoise * t02 + priorBO * t12 + priorMR * t22
+    float sigma_imm_bo = (sigma_up_price_breakout + sigma_dn_price_breakout) / 2.0
+    float sigma_imm_mr = (sigma_up_price_mean_reversion + sigma_dn_price_mean_reversion) / 2.0
+    float S_imm_bo = math.max(sigma_imm_bo * sigma_imm_bo, 1e-10)
+    float S_imm_mr = math.max(sigma_imm_mr * sigma_imm_mr, 1e-10)
+    float S_imm_noise = S_imm_bo * immNoiseVarMult
+    float innov_price_bo = innovation * composite_sd
+    float innov_price_mr = innovation_mean_reversion * composite_sd_mean_reversion_pre
+    float immBreakoutStruct = baseObsExp * (1.0 + 0.60 * kalmanExpForce) + 0.20 * jointKineticForce + 0.15 * bearFightStress - 0.20 * kalmanConGravity
+    float immMeanReversionStruct = baseObsCon * (1.0 + 0.60 * kalmanConGravity) + 0.20 * contractionAbsorption + 0.15 * bullFightStress - 0.20 * kalmanExpForce
+    float immNoiseStruct = noiseScore + 0.20 * math.abs(zLevelLogS) + 0.15 * math.abs(kalmanVarianceRatio - 1.0) * agreementSpread
+    float L0 = f_gauss_likelihood(innov_price_bo, S_imm_noise) * math.exp(f_clamp(0.45 * immNoiseStruct, -4.0, 4.0))
+    float L1 = f_gauss_likelihood(innov_price_bo, S_imm_bo) * math.exp(f_clamp(0.55 * immBreakoutStruct, -4.0, 4.0))
+    float L2 = f_gauss_likelihood(innov_price_mr, S_imm_mr) * math.exp(f_clamp(0.55 * immMeanReversionStruct, -4.0, 4.0))
+    float raw0 = predNoise * L0
+    float raw1 = predBO * L1
+    float raw2 = predMR * L2
+    float total = raw0 + raw1 + raw2
+    if total > 1e-300
+        immPosteriorNoise := raw0 / total
+        immPosteriorBO := raw1 / total
+        immPosteriorMR := raw2 / total
+    else
+        immPosteriorNoise := predNoise
+        immPosteriorBO := predBO
+        immPosteriorMR := predMR
+    immPosteriorNoise := math.max(immPosteriorNoise, immFloor)
+    immPosteriorBO := math.max(immPosteriorBO, immFloor)
+    immPosteriorMR := math.max(immPosteriorMR, immFloor)
+    float psum = immPosteriorNoise + immPosteriorBO + immPosteriorMR
+    immPosteriorNoise := immPosteriorNoise / psum
+    immPosteriorBO := immPosteriorBO / psum
+    immPosteriorMR := immPosteriorMR / psum
+    priorNoise := immPosteriorNoise
+    priorBO := immPosteriorBO
+    priorMR := immPosteriorMR
+    immRegime := immPosteriorBO >= immPosteriorNoise and immPosteriorBO >= immPosteriorMR ? 1 : immPosteriorMR >= immPosteriorNoise ? 2 : 0
+    immProbBODown := innovation < 0 ? immPosteriorBO : 0.0
+    immProbMRUp := innovation_mean_reversion < 0 ? immPosteriorMR : 0.0
+else
+    immPosteriorNoise := priorNoise
+    immPosteriorBO := priorBO
+    immPosteriorMR := priorMR
+    immRegime := 0
+    immProbBODown := 0.0
+    immProbMRUp := 0.0
+
+float unifiedObsExp = (baseObsExp * (1.0 + kalmanExpForce)) + (0.25 * jointKineticForce) - (0.10 * contractionAbsorption)
+float unifiedObsCon = (baseObsCon * (1.0 + kalmanConGravity)) + (0.25 * contractionAbsorption) - (0.10 * jointKineticForce)
+float L_Exp = math.exp(f_clamp(unifiedObsExp * (1.0 + kalmanBias), -10.0, 10.0))
+float L_Con = math.exp(f_clamp(unifiedObsCon * (1.0 + kalmanBias), -10.0, 10.0))
+var float priorExp = 0.5
+var float priorCon = 0.5
+float hmmSwitchToCon = f_clamp(bullLiftFade + bearContractionDrag + kalmanConGravity, 0.0, 2.5)
+float hmmSwitchToExp = f_clamp(bullExpansionLift + bearFightStress + kalmanExpForce, 0.0, 2.5)
+float hmmStickExpEff = math.max(0.90, math.min(hmmStickExp - 0.04 * hmmSwitchToCon + 0.01 * expansionPersistence, 0.985))
+float hmmStickConEff = math.max(0.90, math.min(hmmStickCon - 0.04 * hmmSwitchToExp + 0.01 * contractionPersistence, 0.985))
+float predExp = priorExp * hmmStickExpEff + priorCon * (1.0 - hmmStickConEff)
+float predCon = priorExp * (1.0 - hmmStickExpEff) + priorCon * hmmStickConEff
+float rawExp = predExp * L_Exp
+float rawCon = predCon * L_Con
+float sumRaw = rawExp + rawCon
+float postExp = priorExp
+float postCon = priorCon
+if sumRaw > 1e-15
+    postExp := math.max(rawExp / sumRaw, 1e-6)
+    postCon := math.max(rawCon / sumRaw, 1e-6)
+    float pSum = postExp + postCon
+    postExp /= pSum
+    postCon /= pSum
+priorExp := postExp
+priorCon := postCon
+var int contraction_regime_streak = 0
+var int expansion_buffer_bars = 0
+bool imm_confirms_expansion = immPosteriorBO > 0.60
+bool imm_confirms_contraction = immPosteriorMR > 0.60
+float effective_expansion_certainty = imm_confirms_expansion ? 0.70 : hmmCertainty
+float contraction_anti_stick = contraction_regime_streak > 50 ? math.min(0.10, (contraction_regime_streak - 50) / 50.0 * 0.10) : 0.0
+float effective_contraction_certainty = (imm_confirms_contraction ? 0.70 : hmmCertainty) + contraction_anti_stick
+hmmPosteriorExp := postExp
+hmmPosteriorCon := postCon
+hmmRegime := postExp > effective_expansion_certainty ? 1 : postCon > effective_contraction_certainty ? 2 : 0
+hmmProbExpDown := innovation < 0 ? hmmPosteriorExp : 0.0
+hmmProbConUp := innovation_mean_reversion > 0 ? hmmPosteriorCon : 0.0
+bool expansion_onset = hmmRegime == 1 and nz(hmmRegime[1], 0) != 1
+if expansion_onset
+    expansion_buffer_bars := 3
+else if expansion_buffer_bars > 0
+    expansion_buffer_bars := expansion_buffer_bars - 1
+contraction_regime_streak := hmmRegime == 2 ? contraction_regime_streak + 1 : 0
+color regime_bg_color = na
+if hmmRegime == 1
+    regime_bg_color := expansion_buffer_bars > 0 or immPosteriorBO > 0.60 ? color.new(color.red, 85) : color.new(color.orange, 85)
+else if hmmRegime == 2
+    regime_bg_color := immPosteriorMR > 0.60 ? color.new(color.teal, 85) : color.new(color.lime, 85)
+bgcolor(show_covariance_regimes ? regime_bg_color : na, title="KRC Regime BG")
+
+plot(stouffer_z, "Stouffer Z - Weighted Signal Agreement", color=color.new(color.black, 55), linewidth=1, display=display.pane)
+// float mahalanobis_roc = ta.change(mahalanobis_dist)
+// float mahalanobis_roc_pos = math.max(mahalanobis_roc, 0.0)
+// float mahalanobis_roc_p95 = math.max(ta.percentile_nearest_rank(mahalanobis_roc_pos, 100, 95), 1e-10)
+// float mahalanobis_roc_strength = f_clamp(mahalanobis_roc_pos / mahalanobis_roc_p95, 0.0, 1.0)
+// int mahalanobis_green_transp = 85 - math.round(mahalanobis_roc_strength * 85.0)
+color mahalanobis_plot_color = color.new(color.aqua, 10)
+plot(mahalanobis_dist, "Mahalanobis Distance - Joint Regime Stress", color=mahalanobis_plot_color, linewidth=3, display=display.pane)
+
+// plot(show_covariance_regimes ? immRegime : na, "IMM Regime State", color=immRegime == 1 ? color.new(color.red, 0) : immRegime == 2 ? color.new(color.aqua, 0) : color.new(color.gray, 70), linewidth=2, style=plot.style_stepline, display=display.pane)
+
+// hline(1.0, "Reference +1 Moderate", color=color.new(color.yellow, 70), linestyle=hline.style_dashed)
+// hline(-1.0, "Reference -1 Moderate", color=color.new(color.yellow, 70), linestyle=hline.style_dashed)
+// hline(2.0, "Reference +2 Extreme", color=color.new(color.orange, 65), linestyle=hline.style_dotted)
+// hline(-2.0, "Reference -2 Extreme", color=color.new(color.orange, 65), linestyle=hline.style_dotted)
+// hline(0, "Zero", color=color.new(color.gray, 50))
+
+// ──────────── IMM PLOTTING (Vertically Shifted) ────────────
+// Shift 1: Posterior Probabilities (0.0 to 1.0)
+float prob_base = 0.0
+plot(prob_base + immPosteriorNoise, "P(Noise)", color=color.new(color.gray, 50), linewidth=1)
+plot(prob_base + immPosteriorBO, "P(Breakout)", color=color.new(color.red, 0), linewidth=2)
+plot(prob_base + immPosteriorMR, "P(MR)", color=color.new(color.lime, 0), linewidth=2)
+hline(prob_base + immCertainty, "Certainty Threshold", color=color.new(color.white, 50), linestyle=hline.style_dashed)
+plot(prob_base + hmmPosteriorExp, "P(KRC Expansion)", color=color.new(color.orange, 20), linewidth=1)
+plot(prob_base + hmmPosteriorCon, "P(KRC Contraction)", color=color.new(color.aqua, 20), linewidth=1)
+hline(prob_base, "Prob Base", color=color.new(color.gray, 70))
+hline(prob_base + 1.0, "Prob Max", color=color.new(color.gray, 70))
+
+// Shift 2: Directional Signals (-1.5 to -0.5)
+float dir_base = -1.5
+float dir_scale = 1.0 // Map 0..1 to 0..1 relative to base
+plot(dir_base + immProbBODown * dir_scale, "BO Down", color=color.new(color.red, 30), style=plot.style_histogram, histbase=dir_base)
+plot(dir_base + immProbMRUp * dir_scale, "MR Up", color=color.new(color.lime, 30), style=plot.style_histogram, histbase=dir_base)
+hline(dir_base, "Dir Base", color=color.new(color.gray, 70))
+hline(dir_base + 1.0, "Dir Max", color=color.new(color.gray, 70))
+
+var label kalman_anchor_lbl = na
+var label kalman_center_lbl = na
+var label stouffer_lbl = na
+var label mahalanobis_lbl = na
+var label imm_noise_lbl = na
+var label imm_bo_lbl = na
+var label imm_mr_lbl = na
+var label hmm_exp_lbl = na
+var label hmm_con_lbl = na
+var label imm_bo_down_lbl = na
+var label imm_mr_up_lbl = na
+
+if barstate.islast
+    if not na(kalman_anchor_lbl)
+        label.delete(kalman_anchor_lbl)
+    if not na(kalman_center_lbl)
+        label.delete(kalman_center_lbl)
+    if not na(stouffer_lbl)
+        label.delete(stouffer_lbl)
+    if not na(mahalanobis_lbl)
+        label.delete(mahalanobis_lbl)
+    if not na(imm_noise_lbl)
+        label.delete(imm_noise_lbl)
+    if not na(imm_bo_lbl)
+        label.delete(imm_bo_lbl)
+    if not na(imm_mr_lbl)
+        label.delete(imm_mr_lbl)
+    if not na(hmm_exp_lbl)
+        label.delete(hmm_exp_lbl)
+    if not na(hmm_con_lbl)
+        label.delete(hmm_con_lbl)
+    if not na(imm_bo_down_lbl)
+        label.delete(imm_bo_down_lbl)
+    if not na(imm_mr_up_lbl)
+        label.delete(imm_mr_up_lbl)
+    
+    kalman_anchor_lbl := label.new(bar_index, composite_anchor, "Anchor", xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_left, textcolor=color.gray, color=color.new(color.black, 100), size=size.tiny, force_overlay=true, tooltip="Kalman Composite Anchor\n\nThis is the blended fair-value baseline built from the underlying engines before the final Kalman smoothing. Think of it as the structural map of where price should sit if Radonezh, Basket, VIX, and NRV are combined into one reference line.\n\nTrading use: helpful for judging whether price is stretched away from the model's baseline or simply tracking the broader fair-value map.")
+    kalman_center_lbl := label.new(bar_index, mu_filtered, "Center", xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_left, textcolor=color.blue, color=color.new(color.black, 100), size=size.tiny, force_overlay=true, tooltip="Kalman Center\n\nThis is the filtered tradeable fair value after the Kalman model absorbs the current feature state and noise. It is usually the line to trust more for active execution because it is the model's smoothed estimate, not just the raw blended baseline.\n\nTrading use: when price is far from this line, mean-reversion odds usually improve; when this line is sloping hard, trend-following conditions are stronger.")
+    stouffer_lbl := label.new(bar_index, stouffer_z, "Stouffer Z", xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_left, textcolor=color.black, color=color.new(color.black, 100), size=size.tiny, tooltip="Stouffer Z\n\nThis is the weighted agreement oscillator. It rises when the active feature set leans together in one direction and falls when that agreement flips.\n\nIn the rewritten regime logic it is one leg of the structural co-movement test with price and Mahalanobis.\n\nTrading use: strong positive or negative readings confirm broad directional agreement, but the regime model now cares most about whether Mahalanobis joins that move or stops responding.")
+    mahalanobis_lbl := label.new(bar_index, mahalanobis_dist, "Mahalanobis", xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_left, textcolor=color.aqua, color=color.new(color.black, 100), size=size.tiny, tooltip="Mahalanobis Distance\n\nThis is the joint regime-stress oscillator. It measures how unusual the current multi-feature state is after accounting for covariance.\n\nIn the rewritten regime logic this line is the key discriminator: expansion is strongest when bullish candles lift Mahalanobis together with price and Stouffer, and contraction is strongest when bearish candles drag Mahalanobis lower while its overall level collapses.\n\nTrading use: watch whether Mahalanobis still lifts on bull bars or stops responding. That fade is an early sign that expansion is exhausting.")
+    imm_noise_lbl := label.new(bar_index, prob_base + immPosteriorNoise, "IMM Noise", xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_left, textcolor=color.gray, color=color.new(color.black, 100), size=size.tiny, tooltip="IMM Noise\n\nThis posterior is high when the tape is structurally incoherent: price, Stouffer, and Mahalanobis are not lining up cleanly enough for either expansion-style breakout or contraction-style mean reversion to dominate.\n\nTrading use: high Noise means lower tactical confidence from the IMM and a greater chance that local moves are just chop or transition.")
+    imm_bo_lbl := label.new(bar_index, prob_base + immPosteriorBO, "IMM Breakout", xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_left, textcolor=color.red, color=color.new(color.black, 100), size=size.tiny, tooltip="IMM Breakout\n\nThis posterior now rises when the tactical structure looks like live expansion: bullish candles are lifting price, Stouffer, and Mahalanobis together, expansion persistence remains elevated, and contraction drag is still weak.\n\nTrading use: sustained high values mean the fast IMM layer still sees trend-continuation structure as the best local fit.")
+    imm_mr_lbl := label.new(bar_index, prob_base + immPosteriorMR, "IMM Mean Rev", xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_left, textcolor=color.lime, color=color.new(color.black, 100), size=size.tiny, tooltip="IMM Mean Reversion\n\nThis posterior now rises when contraction structure dominates: bearish candles drag Mahalanobis down, the Mahalanobis/Stouffer level structure softens, and bullish countertrend bars fail to restore the previous expansion lift.\n\nTrading use: sustained high values mean the fast IMM layer sees pullback, reversion, and contraction-style behavior as dominant.")
+    hmm_exp_lbl := label.new(bar_index, prob_base + hmmPosteriorExp, "KRC Expansion", xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_left, textcolor=color.orange, color=color.new(color.black, 100), size=size.tiny, tooltip="KRC Expansion\n\nThis is the slow structural KRC posterior for expansion. It fuses the 3-factor covariance texture with the dual-Kalman tension field, so expansion rises when bullish candles lift price, Stouffer, and Mahalanobis together and the fast Kalman variance escapes above the mean-reversion variance.\n\nBackground meaning: when this state wins the classifier, the chart background turns red. Here red means expansion / trend pressure, not bearish direction.\n\nTrading use: use it as the macro filter for whether breakout structure is genuinely scaling up instead of just flashing tactically.")
+    hmm_con_lbl := label.new(bar_index, prob_base + hmmPosteriorCon, "KRC Contraction", xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_left, textcolor=color.aqua, color=color.new(color.black, 100), size=size.tiny, tooltip="KRC Contraction\n\nThis is the slow structural KRC posterior for contraction. It rises when the bullish-candle Mahalanobis lift fades, bearish candles drag Mahalanobis lower, and the fast Kalman variance collapses back under the mean-reversion variance.\n\nBackground meaning: when this state wins the classifier, the chart background turns green. Here green means contraction / cooling / reversion structure, not bullish direction.\n\nTrading use: use it as the macro filter for compression, reversion, and failed-expansion environments.")
+    imm_bo_down_lbl := label.new(bar_index, dir_base + immProbBODown * dir_scale, "IMM BO Down", xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_left, textcolor=color.red, color=color.new(color.black, 100), size=size.tiny, tooltip="IMM BO Down\n\nThis directional signal is the downside branch of the breakout state. It becomes positive when the IMM still leans breakout, but the active breakout pressure is pointing down.\n\nTrading use: useful for spotting bearish continuation inside a structurally expansion-like tape.")
+    imm_mr_up_lbl := label.new(bar_index, dir_base + immProbMRUp * dir_scale, "IMM MR Up", xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_left, textcolor=color.lime, color=color.new(color.black, 100), size=size.tiny, tooltip="IMM MR Up\n\nThis directional signal is the bullish branch of the mean-reversion state. It becomes positive when the IMM favors contraction / reversion structure, but the local mean-reversion setup points upward.\n\nTrading use: useful for isolating bullish bounce opportunities inside a broader contraction regime.")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// STATE TABLE
+// ══════════════════════════════════════════════════════════════════════════════
+
+if show_state_table and barstate.islast
+    var table state_tbl = table.new(position.top_right, 3, 9, border_width=1)
+    color tbl_header_bg = color.new(color.silver, 15)
+    color tbl_label_bg = color.new(color.white, 0)
+    color tbl_info_bg = color.new(color.silver, 88)
+    color tbl_center_bg = color.new(color.aqua, 88)
+    color tbl_sigma_bg = color.new(color.yellow, 85)
+    color tbl_beta_bg = color.new(color.lime, 88)
+    color tbl_ready_bg = color.new(color.green, 86)
+    color tbl_running_bg = color.new(color.orange, 84)
+    color tbl_load_ok_bg = color.new(color.green, 88)
+    color tbl_load_wait_bg = color.new(color.orange, 86)
+    color tbl_load_slow_bg = color.new(color.red, 88)
+    
+    table.cell(state_tbl, 0, 0, "State", bgcolor=tbl_header_bg, text_color=color.black)
+    table.cell(state_tbl, 1, 0, "Value", bgcolor=tbl_header_bg, text_color=color.black)
+    table.cell(state_tbl, 2, 0, "Info", bgcolor=tbl_header_bg, text_color=color.black)
+    
+    table.cell(state_tbl, 0, 1, "μ (Fair Value)", text_color=color.black, bgcolor=tbl_label_bg)
+    table.cell(state_tbl, 1, 1, str.tostring(mu_filtered, "#.##"), text_color=color.black, bgcolor=tbl_center_bg)
+    table.cell(state_tbl, 2, 1, "Kalman Center", text_color=color.black, bgcolor=tbl_info_bg)
+    
+    table.cell(state_tbl, 0, 2, "σ (Innovation)", text_color=color.black, bgcolor=tbl_label_bg)
+    table.cell(state_tbl, 1, 2, str.tostring(sigma_innovation, "#.##"), text_color=color.black, bgcolor=tbl_sigma_bg)
+    table.cell(state_tbl, 2, 2, "Band Width", text_color=color.black, bgcolor=tbl_info_bg)
+    
+    if show_beta_weights
+        table.cell(state_tbl, 0, 3, "β₁ (Radonezh)", text_color=color.black, bgcolor=tbl_label_bg)
+        table.cell(state_tbl, 1, 3, str.tostring(beta_1, "#.###"), text_color=color.black, bgcolor=tbl_beta_bg)
+        
+        table.cell(state_tbl, 0, 4, "β₂ (Basket)", text_color=color.black, bgcolor=tbl_label_bg)
+        table.cell(state_tbl, 1, 4, str.tostring(beta_2, "#.###"), text_color=color.black, bgcolor=tbl_beta_bg)
+        
+        table.cell(state_tbl, 0, 5, "β₃ (VIX CT)", text_color=color.black, bgcolor=tbl_label_bg)
+        table.cell(state_tbl, 1, 5, str.tostring(beta_3, "#.###"), text_color=color.black, bgcolor=tbl_beta_bg)
+        
+        table.cell(state_tbl, 0, 6, "β₄ (NRV)", text_color=color.black, bgcolor=tbl_label_bg)
+        table.cell(state_tbl, 1, 6, str.tostring(beta_4, "#.###"), text_color=color.black, bgcolor=tbl_beta_bg)
+    
+    table.cell(state_tbl, 0, 7, "MC Status", text_color=color.black, bgcolor=tbl_label_bg)
+    string mc_status = mc_ready ? "Ready (" + str.tostring(mc_runs_done) + ")" : "Running (" + str.tostring(mc_runs_done) + "/" + str.tostring(mc_target_runs) + ")"
+    table.cell(state_tbl, 1, 7, mc_status, text_color=color.black, bgcolor=mc_ready ? tbl_ready_bg : tbl_running_bg)
+    table.cell(state_tbl, 2, 7, "Simulations", text_color=color.black, bgcolor=tbl_info_bg)
+
+    // Load time counter
+    string load_txt = load_secs_captured ? (str.tostring(load_secs_latched, "#.##") + "s") : ("Loading " + str.tostring(load_secs_live, "#.##") + "s")
+    color load_col = load_secs_captured ? (load_secs_latched <= 1.0 ? color.lime : load_secs_latched <= 3.0 ? color.orange : color.red) : color.orange
+    color load_bg = load_secs_captured ? (load_secs_latched <= 1.0 ? tbl_load_ok_bg : load_secs_latched <= 3.0 ? tbl_load_wait_bg : tbl_load_slow_bg) : tbl_load_wait_bg
+    
+    // Add an extra row for load time
+    table.cell(state_tbl, 0, 8, "Load Time", text_color=color.black, bgcolor=tbl_label_bg)
+    table.cell(state_tbl, 1, 8, load_txt, text_color=color.black, bgcolor=load_bg)
+    table.cell(state_tbl, 2, 8, load_secs_captured ? "Complete" : "Wait...", text_color=color.black, bgcolor=tbl_info_bg)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DRAW FUTURE MC CONE
+// ══════════════════════════════════════════════════════════════════════════════
+var line[] mc_lines_upper = array.new_line()
+var line[] mc_lines_lower = array.new_line()
+
+if barstate.islast and mc_ready and show_future_cone
+    // Clean old drawings
+    if array.size(mc_lines_upper) > 0
+        for i = 0 to array.size(mc_lines_upper) - 1
+            line.delete(array.get(mc_lines_upper, i))
+            line.delete(array.get(mc_lines_lower, i))
+        array.clear(mc_lines_upper)
+        array.clear(mc_lines_lower)
+        
+    int dt = time - nz(time[1], time - 86400000)
+    
+    // Draw paths step by step into the future
+    for h = 1 to mc_horizon - 1
+        float prev_u5 = array.get(future_paths_flat, (h-1) * 7 + 5)
+        float prev_l5 = array.get(future_paths_flat, (h-1) * 7 + 1)
+        
+        float curr_u5 = array.get(future_paths_flat, h * 7 + 5)
+        float curr_l5 = array.get(future_paths_flat, h * 7 + 1)
+        
+        int x1 = time + (h - 1) * dt
+        int x2 = time + h * dt
+        
+        if not na(prev_u5) and not na(curr_u5)
+            array.push(mc_lines_upper, line.new(x1, prev_u5, x2, curr_u5, xloc=xloc.bar_time, color=color.new(color.red, 30), style=line.style_dashed, width=2))
+        if not na(prev_l5) and not na(curr_l5)
+            array.push(mc_lines_lower, line.new(x1, prev_l5, x2, curr_l5, xloc=xloc.bar_time, color=color.new(color.red, 30), style=line.style_dashed, width=2))

@@ -174,3 +174,100 @@ export f_detect_confluence(float basis, float fv, float dev, float tol_mult, int
     if _ncl_size > 0
         for c = 0 to _ncl_size - 1
             array.push(prev_cluster_levels, array.get(next_cluster_levels, c))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STATISTICAL DISTANCE & COVARIANCE
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Rolling covariance helper (Pine-safe replacement for unavailable ta.covariance)
+// @param x First series
+// @param y Second series
+// @param len Lookback window
+// @returns Covariance between x and y over len bars
+export f_covariance(float x, float y, int len) =>
+    ta.sma(x * y, len) - ta.sma(x, len) * ta.sma(y, len)
+
+// Regularized 4x4 Mahalanobis distance using Pine-safe Gaussian elimination
+// Computes the statistical distance of a 4D point from the origin under a covariance matrix.
+// Uses Gaussian elimination to solve the linear system Σ⁻¹·z without explicit matrix inversion.
+// Ridge regularization prevents singularity in near-collinear feature spaces.
+//
+// @param z1 First feature z-score
+// @param z2 Second feature z-score
+// @param z3 Third feature z-score
+// @param z4 Fourth feature z-score
+// @param var1 Variance of feature 1
+// @param var2 Variance of feature 2
+// @param var3 Variance of feature 3
+// @param var4 Variance of feature 4
+// @param cov12 Covariance between features 1 and 2
+// @param cov13 Covariance between features 1 and 3
+// @param cov14 Covariance between features 1 and 4
+// @param cov23 Covariance between features 2 and 3
+// @param cov24 Covariance between features 2 and 4
+// @param cov34 Covariance between features 3 and 4
+// @param ridge Ridge regularization parameter (e.g., 0.05)
+// @returns Mahalanobis distance (scalar >= 0)
+export f_mahalanobis_4x4(float z1, float z2, float z3, float z4, float var1, float var2, float var3, float var4, float cov12, float cov13, float cov14, float cov23, float cov24, float cov34, float ridge) =>
+    // Regularize covariance matrix diagonal
+    float s11 = math.max(var1, 1e-6) + ridge
+    float s22 = math.max(var2, 1e-6) + ridge
+    float s33 = math.max(var3, 1e-6) + ridge
+    float s44 = math.max(var4, 1e-6) + ridge
+    float s12 = cov12
+    float s13 = cov13
+    float s14 = cov14
+    float s23 = cov23
+    float s24 = cov24
+    float s34 = cov34
+    
+    // Gaussian elimination to solve Σ·x = z
+    float x1 = 0.0
+    float x2 = 0.0
+    float x3 = 0.0
+    float x4 = 0.0
+    bool solved = false
+    
+    // Forward elimination
+    if math.abs(s11) > 1e-10
+        float f21 = s12 / s11
+        float f31 = s13 / s11
+        float f41 = s14 / s11
+        float s22_1 = s22 - f21 * s12
+        float s23_1 = s23 - f21 * s13
+        float s24_1 = s24 - f21 * s14
+        float b2_1 = z2 - f21 * z1
+        float s33_1 = s33 - f31 * s13
+        float s34_1 = s34 - f31 * s14
+        float b3_1 = z3 - f31 * z1
+        float s44_1 = s44 - f41 * s14
+        float b4_1 = z4 - f41 * z1
+        
+        if math.abs(s22_1) > 1e-10
+            float f32 = s23_1 / s22_1
+            float f42 = s24_1 / s22_1
+            float s33_2 = s33_1 - f32 * s23_1
+            float s34_2 = s34_1 - f32 * s24_1
+            float b3_2 = b3_1 - f32 * b2_1
+            float s44_2 = s44_1 - f42 * s24_1
+            float b4_2 = b4_1 - f42 * b2_1
+            
+            if math.abs(s33_2) > 1e-10
+                float f43 = s34_2 / s33_2
+                float s44_3 = s44_2 - f43 * s34_2
+                float b4_3 = b4_2 - f43 * b3_2
+                
+                // Back substitution
+                if math.abs(s44_3) > 1e-10
+                    x4 := b4_3 / s44_3
+                    x3 := (b3_2 - s34_2 * x4) / s33_2
+                    x2 := (b2_1 - s24_1 * x4 - s23_1 * x3) / s22_1
+                    x1 := (z1 - s12 * x2 - s13 * x3 - s14 * x4) / s11
+                    solved := true
+    
+    // Compute quadratic form: z^T · Σ⁻¹ · z
+    float quad_diag = z1 * z1 / s11 + z2 * z2 / s22 + z3 * z3 / s33 + z4 * z4 / s44
+    float quad_full = z1 * x1 + z2 * x2 + z3 * x3 + z4 * x4
+    
+    // Return distance (sqrt of quadratic form)
+    math.sqrt(math.max(solved ? quad_full : quad_diag, 0.0))
