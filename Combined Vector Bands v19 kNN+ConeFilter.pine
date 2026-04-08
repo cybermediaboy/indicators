@@ -3420,7 +3420,8 @@ else
 // LTF correlation: higher |ema| = more coupled = more opaque → also invert
 float _transp_raw = pred_ma_transparency_src == "LTF Correlation" ? (1.0 - math.abs(nz(ltf_corr_ema))) : (1.0 - nz(corr_damping, 0.5))
 float _transp_pctile = TAUtilityLib.f_percentile_rank_fisher(_transp_raw, 200)
-int transparency = int(15 + (_transp_pctile * 75))  // 15% base (P0→coupled→15%), 90% ceiling (P100→decoupled→90%)
+// FIX: Cap max transparency at 60% so pred MA line is always ≥40% opaque and visible
+int transparency = int(10 + (_transp_pctile * 50))  // 10% base (coupled→10%), 60% ceiling (decoupled→60%)
 col_ma = color.new(col_ma_base, transparency)
 p_ma = plot(not pred_fv_color_candles ? pred_ma : na, "Predictive Vector MA", color=col_ma, linewidth=3, force_overlay=true)
 barcolor(pred_fv_color_candles ? col_ma : na)
@@ -4005,6 +4006,8 @@ plot(setup_context_bits, "Setup Context Flags", color=color.new(color.fuchsia, 0
 // Continuous Setup Diagnostics (non-bit-encodable values)
 plot(basket_fit, "Basket Fit (0-100)", color=color.new(color.aqua, 0), display=display.data_window)
 plot(te_direction_smoothed, "TE Direction", color=color.new(color.orange, 0), display=display.data_window)
+// FIX: Export corr_damping as standalone CSV column for debugging transparency issues
+plot(corr_damping, "Corr Damping (0-1)", color=color.new(color.purple, 0), display=display.data_window)
 
 // Setup debug code (complete - includes all setup types)
 float setup_debug_code = 0.0

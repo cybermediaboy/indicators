@@ -358,7 +358,30 @@ Continuous value, not bit-encoded.
 ### Column 38: `TE Direction`
 Continuous value (-1 to +1 range), not bit-encoded.
 
-### Column 41: `kNN Superpack (Conf|Damp|Fam|Vec)`
+### Column 39: `Corr Damping (0-1)`
+**NEW**: Correlation filter dampening factor. Continuous value 0.0-1.0.
+- Near 1.0 = asset coupled to basket (full vector influence)
+- Near 0.0 = asset decoupled (vector pressure suppressed to 0)
+- Used for Pred MA transparency: high damping = opaque line, low damping = transparent
+
+### Column 40: `Debug Combined`
+**Formula**: `actualfiresignal + (actualfiresignal > 0 ? 10000.0 : 0.0) + (is_realtime ? 20000.0 : 0.0) + cld_debug_bitfield * 100000.0`
+
+| Bits | Field | Values |
+|---|---|---|
+| 0-13 | Setup debug code | S1=100, S5=500, S6=600, S7=700, S8=800, S9=900, S10=1000, S11=1110, S12=1120, L1=1100, L2=1200, L3=1300, L5=1500, L6=1600, L7=1700, L8=1800, L9=1900, V1=2100, V2=2200, V3=2300, V4=2400, 81=8100, 73=7300, 75=7500, 64=6400 |
+| 14 | Setup active flag | `10000.0` when setup code > 0 |
+| 15 | Realtime flag | `20000.0` on realtime bars |
+| 17-18 | CLD continuation | `100000.0` (encoded as `100 * 100000`) |
+| 19-20 | CLD exhaustion | `200000.0` (encoded as `200 * 100000`) |
+| 21-22 | Macro exhaustion | `300000.0` (encoded as `300 * 100000`) |
+
+**Decode**: `setup_code = value % 100000`, `cld_code = floor(value / 100000)`. S10 special case: if `cat=1, num=0`, set `num=10`.
+
+### Column 41: `MC Visualization`
+MAE/MFE micro squares plotted at absolute price levels. Red = MAE, Lime = MFE. Not a bitfield.
+
+### Column 42: `kNN Superpack (Conf|Damp|Fam|Vec)`
 **Formula**: `(confidence << 34) | (corr_damping_q << 31) | (family << 28) | packed_vec`
 = `confidence * 17179869184 + corr_damping_q * 2147483648 + family * 268435456 + packed_vec`
 
@@ -404,15 +427,17 @@ Each feature = 3-bit index (0-7) + 1-bit residual (0-1) = 4 bits.
 | Required by BT Validator | Available in CSV? | Source |
 |---|---|---|
 | OHLCV | ✅ | Columns 1-5 |
-| Setup fire events | ✅ | Column 39 (Debug Combined) |
+| Corr damping | ✅ NEW | Column 39 (Corr Damping 0-1) |
+| Setup fire events | ✅ | Column 40 (Debug Combined) |
 | TP/SL/MaxHold simulation | ✅ | From OHLCV + indicator params |
-| Packed feature history | ✅ (quantized) | Column 41 (kNN Superpack), decode per bar |
+| Packed feature history | ✅ (quantized) | Column 42 (kNN Superpack), decode per bar |
 | Raw float features (f1-f7) | ⚠️ Approximate | Reconstruct from packed_vec via `f_reconstruct_feature()` |
-| Setup family classification | ✅ | Column 41 (mc_family component) |
-| kNN confidence | ✅ | Column 41 (confidence component) |
+| Setup family classification | ✅ | Column 42 (mc_family component) |
+| kNN confidence | ✅ | Column 42 (confidence component) |
+| kNN corr_damping quantized | ✅ | Column 42 (damping_q component) |
 | BT validator internal state | ❌ | `mc_oracle_dir`, `mc_pct_agree`, `actual_mae`, `actual_mfe` not exported |
 | `arr_setup_id` / `arr_setup_family` history | ⚠️ Reconstructable | From Debug Combined + mc_family per bar |
-| `arr_close` / `arr_ATR` history | ✅ | From OHLCV columns |
+| `arr_close` / `arr_ATR` / `arr_predma` history | ✅ | From OHLCV columns |
 
 **Verdict**: CSV dumps contain **sufficient data for approximate BT validation** via packed vector reconstruction. The quantization error (~0.2-0.4 z-score units) will cause some kNN neighbor ranking differences vs. the live indicator. For exact replication, add raw feature arrays to CSV export.
 
