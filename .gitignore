@@ -1,3 +1,5 @@
 .windsurf/
 .claude/
 Pinescript knowledgebase
+.DS_Store
+__pycache__/
