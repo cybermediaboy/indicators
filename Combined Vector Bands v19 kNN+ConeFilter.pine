@@ -3511,9 +3511,10 @@ f_calc_survival_zone_params(bool force_low_fit, bool final_squeeze, bool squeeze
     bool all_green = ma_green and innov_green and cld_green
     bool all_red = ma_red and innov_red and cld_red
 
-    // Zone 1 fill color — squeeze score modulates intensity
-    int z1_sqz_alpha = int(40 + sqz_score * 30)  // 40-70 range based on score
-    color z1_fill = all_green ? color.new(color.lime, 50 + fill_boost) :(all_red ? color.new(color.red, 50 + fill_boost) :(final_squeeze ? (squeeze_bull ? color.new(color.rgb(0, 100, 0), z1_sqz_alpha) : color.new(color.rgb(139, 0, 0), z1_sqz_alpha)) :color.new(col_base, fill_z1)))
+    // Zone 1 fill color — 3-way alignment only (MA + Innov + Cloud), no squeeze override
+    color z1_fill = all_green ? color.new(color.lime, 50 + fill_boost) :
+                    (all_red ? color.new(color.red, 50 + fill_boost) :
+                     color.new(col_base, fill_z1))
 
     // Zone 2 fill color — throat direction + score overlay
     color z2_fill = squeeze_bull ? color.new(color.rgb(0, 100, 0), fill_z2_squeeze) :(squeeze_bear ? color.new(color.rgb(139, 0, 0), fill_z2_squeeze) : color.new(color.yellow, fill_z2))
