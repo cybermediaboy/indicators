@@ -296,8 +296,7 @@ export f_squeeze_mahal_features(
   float z3_bwv) =>
 
     float sz1 = 1.0 - nz(bw_pct, 1.0)
-    float sz2 = innov_bw_std > 1e-6 ?
-                -(innov_bw - innov_bw_mean) / innov_bw_std : 0.0
+    float sz2 = innov_bw_std > 1e-6 ? -(innov_bw - innov_bw_mean) / innov_bw_std : 0.0
     float sz3 = nz(phi_div_score, 0.0)
     float sz4 = -(nz(z3_bwv, 0.0))
     [sz1, sz2, sz3, sz4]
