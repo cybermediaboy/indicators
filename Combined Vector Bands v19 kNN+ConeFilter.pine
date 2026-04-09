@@ -1702,9 +1702,7 @@ float hurst_exp = is_hard_zone ? TAUtilityLib.f_hurst_rs(sqz_hurst_buf) : 0.5
 
 // Reactive confirms (used later in f_squeeze_state after innov_band definition)
 bool ltf_at_extreme = ltf_is_decoupled or (not na(ltf_corr_ema) and math.abs(ltf_corr_ema) > 0.6)
-float burst_for_sqz = burst_osc_mode == "pathA" ? path_A : f7_burst_raw
-float burst_pct_val = math.min(1.0, math.max(0.0, (burst_for_sqz + 3.0) / 6.0))
-bool burst_pct_high = burst_pct_val > 0.80
+// burst_for_sqz computed after path_A/f7_burst_raw definition (see F7 section)
 
 // --- VECTOR & CORRELATION OSCILLATORS (needed for Synergic Density) ---
 // PVB-style vector oscillator calculation
@@ -1787,7 +1785,7 @@ float phi_div_z = (f6_phi_raw - phi_div_mean) / phi_div_std
 float _burst_atr_fast = ta.atr(14)
 float _burst_atr_slow = ta.sma(_burst_atr_fast, 50)
 float innov_squeeze = math.max(0.0, 1.0 - _burst_atr_fast / math.max(_burst_atr_slow, syminfo.mintick))
-float phi_div_accel = math.abs(f6_phi_raw - nz(f6_phi_raw[1]))
+// phi_div_accel now returned from f_phi_divergence_score above
 
 float mr_tension = math.max(0.0, math.abs(mr_osc) - 1.0)
 float predma_delta = pred_ma - nz(pred_ma[1], pred_ma)
@@ -1805,6 +1803,11 @@ float path_C = math.max(0.0, -band_conv) * vec_vel * pred_spread_chg / math.max(
 float f7_burst_raw = path_A * (1.0 + path_B + path_C) * (1.0 + innov_squeeze)
 bool innov_bw_squeeze_flag = bw_pct < 0.25
 float f7_burst_effective = f7_burst_raw * (innov_bw_squeeze_flag ? 1.0 : 0.0)
+
+// Burst reactive confirm for squeeze throat detector
+float burst_for_sqz = burst_osc_mode == "pathA" ? path_A : f7_burst_raw
+float burst_pct_val = math.min(1.0, math.max(0.0, (burst_for_sqz + 3.0) / 6.0))
+bool burst_pct_high = burst_pct_val > 0.80
 
 // --- BurstScore Oscillator Display Value ---
 float burst_osc_raw = burst_osc_mode == "pathA" ? path_A : f7_burst_raw
