@@ -3599,7 +3599,7 @@ if shouldrecalcpercentiles
     sqm_innov_bw_std  := math.max(ta.stdev(_ibw, sqm_cov_len), 1e-6)
     
     // Compute 4D features for covariance estimation (use previous bar's z3_bwv)
-    float _prev_z3_bwv = nz(sqz_raw.z3_bwv, 0.0)  // from previous bar's SqzState
+    float _prev_z3_bwv = not na(sqz_raw) ? nz(sqz_raw.z3_bwv, 0.0) : 0.0  // from previous bar's SqzState
     [_sz1, _sz2, _sz3, _sz4] = BandsLib.f_squeeze_mahal_features(
         bw_pct, _ibw, sqm_innov_bw_mean, sqm_innov_bw_std, phi_div_score, _prev_z3_bwv)
     
@@ -3616,7 +3616,7 @@ if shouldrecalcpercentiles
     sqm_c34 := BandsLib.f_covariance(_sz3, _sz4, sqm_cov_len)
 
 // Compute Mahalanobis distance for current bar
-float _curr_z3_bwv = nz(sqz_raw.z3_bwv, 0.0)  // from previous bar
+float _curr_z3_bwv = not na(sqz_raw) ? nz(sqz_raw.z3_bwv, 0.0) : 0.0  // from previous bar
 [sz1, sz2, sz3, sz4] = BandsLib.f_squeeze_mahal_features(
     bw_pct, innov_band_upper - innov_band_lower,
     sqm_innov_bw_mean, sqm_innov_bw_std,
