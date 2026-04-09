@@ -3651,9 +3651,29 @@ bool sqz_armed_state = sqz_raw.armed
 bool sqz_expanding  = sqz_raw.sq_expanding
 
 // BURST Oscillator Source Selection (for subpane display)
-burst_osc_raw := burst_osc_source == "squeeze" ? squeeze_score :
-                 (burst_osc_source == "mahalanobis" ? sqm_dist :
-                  (burst_osc_mode == "pathA" ? path_A : f7_burst_raw))
+// Adaptive range normalization: map squeeze [0,1] and mahal [0,∞] to burst's [-3,+3] range
+float burst_raw_prenorm = na
+if burst_osc_source == "squeeze"
+    // Squeeze score [0,1] → percentile normalize to [-3,+3]
+    int sqz_lookback = 200
+    float sqz_p10 = ta.percentile_nearest_rank(squeeze_score, sqz_lookback, 10)
+    float sqz_p90 = ta.percentile_nearest_rank(squeeze_score, sqz_lookback, 90)
+    float sqz_range = math.max(sqz_p90 - sqz_p10, 0.01)
+    float sqz_center = (sqz_p90 + sqz_p10) / 2.0
+    burst_raw_prenorm := ((squeeze_score - sqz_center) / sqz_range) * 3.0  // Scale to ±3
+else if burst_osc_source == "mahalanobis"
+    // Mahalanobis [0,∞] → center at threshold (1.5), scale by rolling range
+    int mahal_lookback = 200
+    float mahal_p10 = ta.percentile_nearest_rank(sqm_dist, mahal_lookback, 10)
+    float mahal_p90 = ta.percentile_nearest_rank(sqm_dist, mahal_lookback, 90)
+    float mahal_range = math.max(mahal_p90 - mahal_p10, 0.1)
+    float mahal_center = sqm_arm_thresh  // Center at arm threshold (1.5)
+    burst_raw_prenorm := ((sqm_dist - mahal_center) / mahal_range) * 3.0  // Scale to ±3
+else
+    // Burst score already in appropriate range
+    burst_raw_prenorm := burst_osc_mode == "pathA" ? path_A : f7_burst_raw
+
+burst_osc_raw := burst_raw_prenorm
 [_, burst_osc_z, _] := TAUtilityLib.f_zscore_standard(burst_osc_raw, len_z)
 
 // Legacy compat: override BandsLib squeeze signals with throat state
