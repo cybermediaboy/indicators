@@ -140,6 +140,7 @@ show_debug_osc = input.bool(false, "Show Debug Oscillators", group=grp_debug, to
 show_innov_pivots = input.bool(true, "Show Innovation Pivots", group=grp_debug, tooltip="Color high/low pivots on Innovation Z oscillator")
 innov_pivot_pct = input.float(15.0, "Pivot Percentile Threshold (%)", minval=1.0, maxval=49.0, step=1.0, group=grp_debug, tooltip="Only show pivots above/below this percentile (measured over 1000 bars)")
 burst_osc_mode = input.string("pathA", "BurstScore Mode", options=["pathA", "full"], group=grp_debug, tooltip="pathA = innov_squeeze² × phiDivAccel (clean signal). full = 3-path composite with additional factors.")
+burst_osc_source = input.string("burst", "BURST Oscillator Source", options=["burst", "squeeze", "mahalanobis"], group=grp_debug, tooltip="Choose which metric to display in BURST oscillator:\n• burst = BurstScore (default)\n• squeeze = Squeeze Score [0..1]\n• mahalanobis = Mahalanobis Distance")
 osc_compression = input.string("tanh", "Oscillator Compression", options=["tanh", "sigmoid", "clamp", "none"], group=grp_debug, tooltip="Visual compression for all subpane oscillators. tanh (smooth saturation), sigmoid (asymmetric saturation), clamp (hard linear clip), none (raw linear, may clip at ±1)")
 
 // REMOVED: Legend Table inputs (saves ~25 vars)
@@ -1809,8 +1810,8 @@ float burst_for_sqz = burst_osc_mode == "pathA" ? path_A : f7_burst_raw
 float burst_pct_val = math.min(1.0, math.max(0.0, (burst_for_sqz + 3.0) / 6.0))
 bool burst_pct_high = burst_pct_val > 0.80
 
-// --- BurstScore Oscillator Display Value ---
-float burst_osc_raw = burst_osc_mode == "pathA" ? path_A : f7_burst_raw
+// --- BurstScore Oscillator Display Value (placeholder, actual source selected after squeeze computation) ---
+float burst_osc_raw = 0.0  // Will be reassigned after squeeze_score is available
 [_, burst_osc_z, _] = TAUtilityLib.f_zscore_standard(burst_osc_raw, len_z)
 
 // --- Normalize Features (Bug 1 Fix C: Percentile-Rank + Fisher Transform) ---
@@ -3648,6 +3649,12 @@ bool throat_active  = sqz_raw.active
 float squeeze_score = sqz_raw.score
 bool sqz_armed_state = sqz_raw.armed
 bool sqz_expanding  = sqz_raw.sq_expanding
+
+// BURST Oscillator Source Selection (for subpane display)
+burst_osc_raw := burst_osc_source == "squeeze" ? squeeze_score :
+                 (burst_osc_source == "mahalanobis" ? sqm_dist :
+                  (burst_osc_mode == "pathA" ? path_A : f7_burst_raw))
+[_, burst_osc_z, _] := TAUtilityLib.f_zscore_standard(burst_osc_raw, len_z)
 
 // Legacy compat: override BandsLib squeeze signals with throat state
 bool pred_fv_slope_up = pred_ma > nz(pred_ma[1], pred_ma)
