@@ -3629,13 +3629,18 @@ float sqm_dist = BandsLib.f_mahalanobis_4x4(
     sqm_c23, sqm_c24, sqm_c34, 0.05)
 
 // Update squeeze state with phi+mahal gates
-[sqz_raw, sqz_armed, sqz_arm_bar, sqz_cooldown_bar, sqz_low_counter] := TAUtilityLib.f_squeeze_state(
+[_sqz_tmp, _armed_tmp, _arm_bar_tmp, _cooldown_tmp, _low_ctr_tmp] = TAUtilityLib.f_squeeze_state(
     innov_band_upper, innov_band_lower, z3_up, z3_dn, hurst_exp,
     ltf_at_extreme, burst_pct_high,
     sqz_bwv_len, sqz_bwz_len, sqz_bwv_sq, sqz_bwv_ex,
     sqz_arm_thresh, sqz_cooldown,
     sqz_armed, sqz_arm_bar, sqz_cooldown_bar, sqz_low_counter,
     phi_div_score, phi_onset, sqm_dist, sqm_arm_thresh)
+sqz_raw := _sqz_tmp
+sqz_armed := _armed_tmp
+sqz_arm_bar := _arm_bar_tmp
+sqz_cooldown_bar := _cooldown_tmp
+sqz_low_counter := _low_ctr_tmp
 
 // Extract computed state
 bool throat_active  = sqz_raw.active
