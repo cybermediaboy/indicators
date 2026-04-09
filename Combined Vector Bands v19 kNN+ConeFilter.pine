@@ -3755,6 +3755,26 @@ plotchar(is_smart_vwap_short_rejection ? current_intrabar_vwap : na, "VWAP Rejec
 // Squeeze breakout markers (HIDE IN SIMPLE MODE)
 plotshape(not simple_mode and squeeze_bull ? c0 : na, "Squeeze Bull", shape.circle, location.absolute, color.new(color.blue, 0), size=size.auto, force_overlay=true)
 
+// --- SQUEEZE THROAT STATE LABELS ---
+// ARM state: 💤 when squeeze is building (score >= 0.55 or phi_onset)
+bool sqz_arm_edge = sqz_armed_state and not nz(sqz_armed_state[1])
+if sqz_arm_edge and not simple_mode
+    string arm_tooltip = "Squeeze ARMED 💤\nScore: " + str.tostring(squeeze_score, "#.##") + 
+                         "\nPhi Div: " + str.tostring(phi_div_score, "#.##") + 
+                         "\nMahal: " + str.tostring(sqm_dist, "#.##") + 
+                         "\nWaiting for: expansion + reactive confirms"
+    f_add_signal_label("💤", arm_tooltip, false, high, color.new(color.blue, 30))
+
+// FIRE state: 🔥 when squeeze fires (armed + expanding + reactive)
+bool sqz_fire_edge = throat_active and not nz(throat_active[1])
+if sqz_fire_edge and not simple_mode
+    string fire_tooltip = "Squeeze FIRING 🔥\nScore: " + str.tostring(squeeze_score, "#.##") + 
+                          "\nDirection: " + (throat_squeeze_bull ? "BULL ↑" : "BEAR ↓") + 
+                          "\nPhi Div: " + str.tostring(phi_div_score, "#.##") + (phi_onset ? " ⚡ONSET" : "") +
+                          "\nMahal: " + str.tostring(sqm_dist, "#.##") + (sqz_raw.mahal_armed ? " ✓" : "") +
+                          "\nBreakout in progress"
+    f_add_signal_label("🔥", fire_tooltip, throat_squeeze_bull, throat_squeeze_bull ? low : high, color.new(throat_squeeze_bull ? color.lime : color.red, 0))
+
 // --- DUAL ENTROPY REGIME MARKERS ---
 // Aqua circles = MR regime entry | Lime circles = Bounce regime entry
 float dist_to_z3_up = math.abs(c0 - z3_up)
