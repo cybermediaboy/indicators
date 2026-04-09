@@ -3897,9 +3897,14 @@ if bar_index == 0
         1, -3.0, 3.0, osc_compression, 1.0, false,
         true, ltf_enabled and not simple_mode, color.teal, color.maroon)
     
+    string burst_label = burst_osc_source == "squeeze" ? "SQUEEZE" :
+                         (burst_osc_source == "mahalanobis" ? "MAHAL" : "BURST")
+    string burst_desc = burst_osc_source == "squeeze" ? "Composite squeeze score [0..1] (5 components)" :
+                        (burst_osc_source == "mahalanobis" ? "4D Mahalanobis distance (structural anomaly)" :
+                         "Volatility squeeze × PhiDiv acceleration composite")
     TAUtilityLib.f_register_osc(oscs, states,
-        "BURST", "BurstScore Oscillator",
-        "Volatility squeeze × PhiDiv acceleration composite",
+        burst_label, burst_label + " Oscillator",
+        burst_desc,
         0, -3.0, 3.0, osc_compression, 1.0, false,
         true, not simple_mode, color.orange, color.gray)
     
