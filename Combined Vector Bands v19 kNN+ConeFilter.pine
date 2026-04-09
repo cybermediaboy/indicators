@@ -3643,11 +3643,6 @@ float squeeze_score = sqz_raw.score
 bool sqz_armed_state = sqz_raw.armed
 bool sqz_expanding  = sqz_raw.sq_expanding
 
-// Legacy compat: override BandsLib squeeze signals with throat state
-bool throat_squeeze_bull  = throat_active and pred_fv_slope_up
-bool throat_squeeze_bear  = throat_active and not pred_fv_slope_up
-bool throat_final_squeeze = throat_active
-
 // Innovation Band Coloring: Green when correlation rises with FV up, Red when correlation rises with FV down
 bool corr_rising = not na(rho) and not na(rho[1]) and math.abs(rho) > math.abs(nz(rho[1]))
 bool fv_rising = pred_ma > nz(pred_ma[1], pred_ma)
@@ -3696,6 +3691,12 @@ bool basket_dir_dn = basket_vec_z < -0.15
 bool same_direction_outrun = (asset_dir_up and basket_dir_up) or (asset_dir_dn and basket_dir_dn)
 bool vel_dec_plot_edge = vel_dec_edge and not same_direction_outrun
 bool pred_fv_slope_up = pred_ma > nz(pred_ma[1], pred_ma)
+
+// Legacy compat: override BandsLib squeeze signals with throat state
+bool throat_squeeze_bull  = throat_active and pred_fv_slope_up
+bool throat_squeeze_bear  = throat_active and not pred_fv_slope_up
+bool throat_final_squeeze = throat_active
+
 float vel_dec_y = pred_fv_color_candles ? high : pred_ma
 float vel_rec_y = pred_fv_color_candles ? low : pred_ma
 // Velocity Coupling Circles (KEEP IN SIMPLE MODE) - MERGED
