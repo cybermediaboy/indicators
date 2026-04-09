@@ -3758,7 +3758,7 @@ plotshape(not simple_mode and squeeze_bull ? c0 : na, "Squeeze Bull", shape.circ
 
 // --- SQUEEZE THROAT STATE LABELS ---
 // ARM state: 💤 when squeeze is building (score >= 0.55 or phi_onset)
-bool sqz_arm_edge = sqz_armed_state and not nz(sqz_armed_state[1])
+bool sqz_arm_edge = sqz_armed_state and not sqz_armed_state[1]
 if sqz_arm_edge and not simple_mode
     string arm_tooltip = "Squeeze ARMED 💤\nScore: " + str.tostring(squeeze_score, "#.##") + 
                          "\nPhi Div: " + str.tostring(phi_div_score, "#.##") + 
@@ -3767,7 +3767,7 @@ if sqz_arm_edge and not simple_mode
     f_add_signal_label("💤", arm_tooltip, false, high, color.new(color.blue, 30))
 
 // FIRE state: 🔥 when squeeze fires (armed + expanding + reactive)
-bool sqz_fire_edge = throat_active and not nz(throat_active[1])
+bool sqz_fire_edge = throat_active and not throat_active[1]
 if sqz_fire_edge and not simple_mode
     string fire_tooltip = "Squeeze FIRING 🔥\nScore: " + str.tostring(squeeze_score, "#.##") + 
                           "\nDirection: " + (throat_squeeze_bull ? "BULL ↑" : "BEAR ↓") + 
