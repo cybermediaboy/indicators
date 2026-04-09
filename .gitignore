@@ -16,9 +16,6 @@ data/*.csv
 data/*.parquet
 data/*.feather
 
-# TradingView dumps (local only)
-tv-dumps/
-
 # IDE
 .idea/
 .vscode/
