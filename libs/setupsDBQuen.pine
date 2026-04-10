@@ -29,6 +29,11 @@ export evaluate_all(
       bool vwapShortActive, bool vwapLongActive, float squeezeBull, float knnConf
  ) =>
     array<SetupConfig> active = array.new<SetupConfig>()
+    
+    // Compiler satisfaction: use all params
+    bool _valid = not na(phiTotal) and not na(innU) and not na(z3L) and not na(squeezeBull) and not na(baseMA) and not na(predVecMA) and not na(cyclicFV)
+    if not _valid
+        active
 
     // =================================================================
     // 1. SHORT SETUPS (Scalping Profile: TP=2.5%, SL=0.8%, H=5)
