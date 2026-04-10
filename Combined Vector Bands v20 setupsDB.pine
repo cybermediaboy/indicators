@@ -485,6 +485,10 @@ f_cld(float corr_osc, float price, float z_score, float slope_thresh) =>
 // Family is owned by SetupsLib and each SetupSpec carries its family reference.
 var families = SetupsLib.f_build_family_table()
 var SETUP_DB = SetupsLib.f_build_setup_db_v19(families)
+
+// setupsDB architecture: store triggered configs for use in f_fire_setup_by_id
+var array<SetupsDB.SetupConfig> setupsdb_cache = array.new<SetupsDB.SetupConfig>()
+
 var setup_labels = array.new<label>()        // Pool for setup labels (cap 300, never evict until validated)
 var overlay_labels = array.new<label>()      // Pool for CLD/div markers (cap 150, can evict)
 var array<SetupsLib.LevelTracker> level_trackers = na
@@ -2765,26 +2769,32 @@ f_fire_setup_by_id(string fire_setup_id, string fire_tooltip, string fire_size_i
     float out_entry_ctx = na
     int out_fire_code = 0
     
-    // Fix 0C: Guard against unmapped setup IDs (setup_code=0)
-    int setup_code = SetupsLib.f_setup_id_to_code(fire_setup_id)
-    if setup_code == 0
+    // setupsDB architecture: find config in cache
+    SetupsDB.SetupConfig cfg = na
+    for i = 0 to array.size(setupsdb_cache) - 1
+        SetupsDB.SetupConfig c = array.get(setupsdb_cache, i)
+        if c.id == fire_setup_id
+            cfg := c
+            break
+    
+    if na(cfg)
+        // Setup not found in cache - skip
         [pos, out_last_trigger_bar, out_mae, out_mfe, out_entry_ctx, out_fire_code]
     else
         // Freshness check: skip if too close to previous setup
         bool is_stale = (bar_index - last_trigger_bar) < 3
-        [db_name, db_dir, db_wr, db_sharpe, db_tp, db_sl, db_avg_bars, db_tooltip] = SetupsLib.f_find_setup_spec(SETUP_DB, fire_setup_id)
         // MC Cone direction filter: suppress if cone disagrees with setup direction
-        bool cone_conflict = mc_opt_score >= 0.6 and mc_opt_dir != "" and ((db_dir == "LONG" and mc_opt_dir == "BEAR") or (db_dir == "SHORT" and mc_opt_dir == "BULL"))
+        bool cone_conflict = mc_opt_score >= 0.6 and mc_opt_dir != "" and ((cfg.dir == "LONG" and mc_opt_dir == "BEAR") or (cfg.dir == "SHORT" and mc_opt_dir == "BULL"))
         if is_stale or cone_conflict
             [pos, out_last_trigger_bar, out_mae, out_mfe, out_entry_ctx, out_fire_code]
         else
             out_last_trigger_bar := bar_index
-            string setup_name = db_name == "" ? fire_setup_id : db_name
-            string setup_dir = db_dir == "" ? "LONG" : db_dir
-            float setup_wr = na(db_wr) ? 0.0 : db_wr
-            float setup_sharpe = na(db_sharpe) ? 0.0 : db_sharpe
-            float setup_tp = na(db_tp) ? 0.8 : db_tp
-            float setup_sl = na(db_sl) ? -1.2 : db_sl
+            string setup_name = cfg.name
+            string setup_dir = cfg.dir
+            float setup_wr = cfg.wr
+            float setup_sharpe = cfg.sharpe
+            float setup_tp = cfg.tp_pct
+            float setup_sl = cfg.sl_pct
             
             // MC-INFORMED ADAPTIVE TP: Use mc_opt_horizon from live cone to override fixed TP
             float mc_tp = na
@@ -2804,14 +2814,14 @@ f_fire_setup_by_id(string fire_setup_id, string fire_tooltip, string fire_size_i
             out_mfe := r_mfe
             out_entry_ctx := r_entry_ctx
 
-            // FIX 1: Return fire code — assigned to global actualfiresignal at call site
-            out_fire_code := SetupsLib.f_setup_id_to_code(fire_setup_id)
+            // FIX 1: Return fire code — use simple hash for setupsDB IDs
+            out_fire_code := str.length(fire_setup_id) * 100 + str.pos(fire_setup_id, "S") + str.pos(fire_setup_id, "L")
 
             // FIX 7: Guard multi-fire race — only write if this bar's slot hasn't been claimed yet
             int setup_id_count = array.size(arr_setup_id)
             if setup_id_count > 0
                 int last_code = array.get(arr_setup_id, setup_id_count - 1)
-                int fire_setup_code = SetupsLib.f_setup_id_to_code(fire_setup_id)
+                int fire_setup_code = out_fire_code  // Use the hash we already calculated
                 if fire_setup_code != 0 and last_code == 0
                     array.set(arr_setup_id, setup_id_count - 1, fire_setup_code)
 
@@ -3246,6 +3256,8 @@ triggered_setups := SetupsDB.evaluate_all(
 
 // Process triggered setups from setupsDB
 array<SetupsLib.SetupEvent> engine_events = array.new<SetupsLib.SetupEvent>()
+array.clear(setupsdb_cache)  // Clear cache for this bar
+
 if array.size(triggered_setups) > 0
     for i = 0 to array.size(triggered_setups) - 1
         SetupsDB.SetupConfig cfg = array.get(triggered_setups, i)
@@ -3256,9 +3268,12 @@ if array.size(triggered_setups) > 0
         bool cooldown_ok = f_setup_cooldown_ok(cfg.id, cfg.dir, last_bar)
         
         if is_dir_allowed and cooldown_ok
-            // Register setup event
+            // Cache config for f_fire_setup_by_id to use
+            array.push(setupsdb_cache, cfg)
+            // Register setup event with metadata in tooltip
             string tooltip_data = cfg.name + " | WR: " + str.tostring(cfg.wr, "#.#") + "% | Sharpe: " + str.tostring(cfg.sharpe, "#.###")
-            SetupsLib.f_register_event_auto(engine_events, SETUP_DB, true, cfg.id, tooltip_data)
+            string size_info = str.tostring(cfg.tp_pct, "#.#") + "," + str.tostring(cfg.sl_pct, "#.#") + "," + str.tostring(cfg.hold_bars)
+            SetupsLib.f_register_event_auto(engine_events, SETUP_DB, true, cfg.id, tooltip_data, size_info)
 
 // Reset MC visualization variables at start of each bar
 mae_viz_price := na
