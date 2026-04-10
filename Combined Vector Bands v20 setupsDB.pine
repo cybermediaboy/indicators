@@ -2814,8 +2814,12 @@ f_fire_setup_by_id(string fire_setup_id, string fire_tooltip, string fire_size_i
             out_mfe := r_mfe
             out_entry_ctx := r_entry_ctx
 
-            // FIX 1: Return fire code — use simple hash for setupsDB IDs
-            out_fire_code := str.length(fire_setup_id) * 100 + str.pos(fire_setup_id, "S") + str.pos(fire_setup_id, "L")
+            // FIX 1: Return fire code — use simple hash for setupsDB IDs (never returns 0)
+            // Base 1000 ensures non-zero, then add length*100 + character positions
+            int s_pos = str.pos(fire_setup_id, "S")
+            int l_pos = str.pos(fire_setup_id, "L")
+            int n_pos = str.pos(fire_setup_id, "N")
+            out_fire_code := 1000 + str.length(fire_setup_id) * 100 + (s_pos >= 0 ? s_pos : 0) + (l_pos >= 0 ? l_pos : 0) + (n_pos >= 0 ? n_pos : 0)
 
             // FIX 7: Guard multi-fire race — only write if this bar's slot hasn't been claimed yet
             int setup_id_count = array.size(arr_setup_id)
