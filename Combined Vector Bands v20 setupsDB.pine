@@ -4131,3 +4131,20 @@ int corr_damping_q = int(math.round(nz(corr_damping, 0.0) * 7.0))  // 3-bit quan
 float knn_diag_superpack = show_knn_diag_pack ? (math.round(nz(mc_knn_confidence)) * 17179869184.0) + (corr_damping_q * 2147483648.0) + (mc_family * 268435456.0) + packed_vec : na
 plot(knn_diag_superpack, "kNN Superpack (Conf|Damp|Fam|Vec)", color=color.new(color.yellow, 0), linewidth=1, display=display.data_window)
 
+// ═══════════════════════════════════════════════════════════════════════════
+// DIAGNOSTIC LABEL - setupsDB integration debug
+// ═══════════════════════════════════════════════════════════════════════════
+if barstate.islast
+    int bt_size = array.size(bt_setups)
+    int triggered_size = array.size(triggered_setups)
+    int label_count = array.size(setup_labels)
+    int cache_size = array.size(setupsdb_cache)
+    string diag_text = "setupsDB Diagnostic:\n" + 
+                       "bt_setups: " + str.tostring(bt_size) + "\n" +
+                       "triggered_setups: " + str.tostring(triggered_size) + "\n" +
+                       "setupsdb_cache: " + str.tostring(cache_size) + "\n" +
+                       "setup_labels: " + str.tostring(label_count) + "\n" +
+                       "max_labels: 500"
+    label.new(bar_index, high * 1.02, diag_text, color=color.new(color.blue, 80), 
+              textcolor=color.white, style=label.style_label_down, size=size.normal)
+
