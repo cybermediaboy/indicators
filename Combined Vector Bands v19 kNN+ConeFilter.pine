@@ -3672,8 +3672,9 @@ else
     burst_raw_prenorm := burst_osc_mode == "pathA" ? path_A : f7_burst_raw
 
 burst_osc_raw := burst_raw_prenorm
-float _unused1 = 0.0
-[_unused1, burst_osc_z, _] := TAUtilityLib.f_zscore_standard(burst_osc_raw, len_z)
+float _burst_z_temp = 0.0
+[_, _burst_z_temp, _] = TAUtilityLib.f_zscore_standard(burst_osc_raw, len_z)
+burst_osc_z := _burst_z_temp
 
 // Legacy compat: override BandsLib squeeze signals with throat state
 bool pred_fv_slope_up = pred_ma > nz(pred_ma[1], pred_ma)
