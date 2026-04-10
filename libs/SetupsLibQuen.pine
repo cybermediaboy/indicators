@@ -768,63 +768,63 @@ export f_build_setup_db_quen(array<Family> fam) =>
     Family FAM_VEL = f_family_get(fam, 3)
     Family FAM_UNC = f_family_get(fam, 4)
 
-    // ── SHORT SETUPS (sweep-optimized) ──
-    // S1: N=414 fires | WR 75.6% (+11.1%) | Sh=0.03 | PnL=+7.01% | tp=0.40 sl=-1.20 mh=20
-    SetupSpec qs1 = SetupSpec.new("S1", "TE0.8+LTFlow", "SHORT", FAM_VEL, 75.6, 0.03, 0.40, -1.20, 20, "N414 WR76% Sh0.03 PnL+7.01% (quen)", na, 1.08, "DECOUPLE", 0, SS_NONE, 1.0, 101, 1)
-    // S5: N=310 fires | WR 72.3% (+12.1%) | Sh=0.00 | PnL=+0.40% | tp=0.50 sl=-1.50 mh=16
-    SetupSpec qs5 = SetupSpec.new("S5", "LTFlow", "SHORT", FAM_VEL, 72.3, 0.00, 0.50, -1.50, 16, "N310 WR72% Sh0.00 PnL+0.40% (quen)", na, 1.08, "DECOUPLE", 0, SS_NONE, 1.0, 105, 4)
-    // S6: N=575 fires | WR 74.1% (+9.1%) | Sh=0.03 | PnL=+8.82% | tp=0.30 sl=-0.80 mh=20
-    SetupSpec qs6 = SetupSpec.new("S6", "MRStrict-0.5", "SHORT", FAM_MR, 74.1, 0.03, 0.30, -0.80, 20, "N575 WR74% Sh0.03 PnL+8.82% (quen)", na, 1.15, "MR", 0, SS_NONE, 1.0, 106, 8192)
-    // S7: not in sweep (no fires in current dumps) — keep v19
+    // ── SHORT SETUPS (sweep-optimized with 0.10% commission) ──
+    // S1: N=414 | WR 75.1% (+10.6%) | Sh=-0.12 | RR=0.24 | PnL=-34.39% | tp=0.40 sl=-1.20 mh=20
+    SetupSpec qs1 = SetupSpec.new("S1", "TE0.8+LTFlow", "SHORT", FAM_VEL, 75.1, -0.12, 0.40, -1.20, 20, "N414 WR75% Sh-0.12 RR0.24 PnL-34.39% (quen-comm)", na, 1.08, "DECOUPLE", 0, SS_NONE, 1.0, 101, 1)
+    // S5: N=310 | WR 71.6% (+11.4%) | Sh=-0.12 | RR=0.30 | PnL=-30.28% | tp=0.50 sl=-1.50 mh=20
+    SetupSpec qs5 = SetupSpec.new("S5", "LTFlow", "SHORT", FAM_VEL, 71.6, -0.12, 0.50, -1.50, 20, "N310 WR72% Sh-0.12 RR0.30 PnL-30.28% (quen-comm)", na, 1.08, "DECOUPLE", 0, SS_NONE, 1.0, 105, 4)
+    // S6: N=575 | WR 73.7% (+8.7%) | Sh=-0.18 | RR=0.23 | PnL=-48.68% | tp=0.30 sl=-0.80 mh=20
+    SetupSpec qs6 = SetupSpec.new("S6", "MRStrict-0.5", "SHORT", FAM_MR, 73.7, -0.18, 0.30, -0.80, 20, "N575 WR74% Sh-0.18 RR0.23 PnL-48.68% (quen-comm)", na, 1.15, "MR", 0, SS_NONE, 1.0, 106, 8192)
+    // S7: not in sweep (no fires) — keep v19
     SetupSpec qs7 = SetupSpec.new("S7", "TE+VecDiv", "SHORT", FAM_VEL, 61.0, 8.30, 0.80, -1.20, 15, "WR61 Sh8.30 Ann135", na, 1.10, "DECOUPLE", 0, SS_NONE, 1.0, 107, 16384)
-    // S8: N=202 fires | WR 81.7% (+12.5%) | Sh=0.29 | PnL=+38.68% | tp=0.50 sl=-1.50 mh=16
-    SetupSpec qs8 = SetupSpec.new("S8", "SReentry+VecDiv", "SHORT", FAM_VEL, 81.7, 0.29, 0.50, -1.50, 16, "N202 WR82% Sh0.29 PnL+38.68% (quen)", na, 1.20, "DECOUPLE", 0, SS_NONE, 1.0, 108, 32768)
-    // S9: N=238 fires | WR 72.3% (-0.7%) | Sh=0.15 | PnL=+33.43% | tp=0.70 sl=-1.50 mh=20
-    SetupSpec qs9 = SetupSpec.new("S9", "CFV+TE+LTFlo", "SHORT", FAM_VEL, 72.3, 0.15, 0.70, -1.50, 20, "N238 WR72% Sh0.15 PnL+33.43% (quen)", na, 1.25, "DECOUPLE", 0, SS_NONE, 1.0, 109, 65536)
-    // S10: N=107 fires | WR 64.5% (+3.0%) | Sh=0.04 | PnL=+2.16% | tp=0.40 sl=-1.20 mh=6
-    SetupSpec qs10 = SetupSpec.new("S10", "PredMA+VelDec", "SHORT", FAM_VEL, 64.5, 0.04, 0.40, -1.20, 6, "N107 WR64% Sh0.04 PnL+2.16% (quen)", na, 1.30, "DECOUPLE", 0, SS_NONE, 1.0, 110, 131072)
-    // S11: N=409 fires | WR 73.3% (new) | Sh=0.08 | PnL=+13.70% | tp=0.30 sl=-0.70 mh=16
-    SetupSpec qs11 = SetupSpec.new("S11", "LTF+MR+Coupled", "SHORT", FAM_MR, 73.3, 0.08, 0.30, -0.70, 16, "N409 WR73% Sh0.08 PnL+13.70% (quen)", na, 1.15, "MR", 0, SS_NONE, 1.0, 111, 16777216)
-    // S12: N=254 fires | WR 77.6% (+3.7%) | Sh=0.08 | PnL=+13.28% | tp=0.40 sl=-1.20 mh=20
-    SetupSpec qs12 = SetupSpec.new("S12", "PhiDiv+MRinfl", "SHORT", FAM_TRAN, 77.6, 0.08, 0.40, -1.20, 20, "N254 WR78% Sh0.08 PnL+13.28% (quen)", na, 1.18, "INNOVATION", 0, SS_NONE, 1.0, 112, 8388608)
+    // S8: N=202 | WR 81.2% (+12.0%) | Sh=0.14 | RR=0.32 | PnL=+18.48% | tp=0.50 sl=-1.50 mh=16 ★★★
+    SetupSpec qs8 = SetupSpec.new("S8", "SReentry+VecDiv", "SHORT", FAM_VEL, 81.2, 0.14, 0.50, -1.50, 16, "N202 WR81% Sh0.14 RR0.32 PnL+18.48% (quen-comm)", na, 1.20, "DECOUPLE", 0, SS_NONE, 1.0, 108, 32768)
+    // S9: N=238 | WR 71.4% (-1.6%) | Sh=0.04 | RR=0.44 | PnL=+9.63% | tp=0.70 sl=-1.50 mh=20 ★★
+    SetupSpec qs9 = SetupSpec.new("S9", "CFV+TE+LTFlo", "SHORT", FAM_VEL, 71.4, 0.04, 0.70, -1.50, 20, "N238 WR71% Sh0.04 RR0.44 PnL+9.63% (quen-comm)", na, 1.25, "DECOUPLE", 0, SS_NONE, 1.0, 109, 65536)
+    // S10: N=107 | WR 68.2% (+6.7%) | Sh=-0.17 | RR=0.31 | PnL=-14.90% | tp=0.50 sl=-1.50 mh=20
+    SetupSpec qs10 = SetupSpec.new("S10", "PredMA+VelDec", "SHORT", FAM_VEL, 68.2, -0.17, 0.50, -1.50, 20, "N107 WR68% Sh-0.17 RR0.31 PnL-14.90% (quen-comm)", na, 1.30, "DECOUPLE", 0, SS_NONE, 1.0, 110, 131072)
+    // S11: N=409 | WR 73.3% (new) | Sh=-0.15 | RR=0.25 | PnL=-27.20% | tp=0.30 sl=-0.70 mh=16
+    SetupSpec qs11 = SetupSpec.new("S11", "LTF+MR+Coupled", "SHORT", FAM_MR, 73.3, -0.15, 0.30, -0.70, 16, "N409 WR73% Sh-0.15 RR0.25 PnL-27.20% (quen-comm)", na, 1.15, "MR", 0, SS_NONE, 1.0, 111, 16777216)
+    // S12: N=254 | WR 77.6% (+3.7%) | Sh=-0.07 | RR=0.24 | PnL=-12.12% | tp=0.40 sl=-1.20 mh=20
+    SetupSpec qs12 = SetupSpec.new("S12", "PhiDiv+MRinfl", "SHORT", FAM_TRAN, 77.6, -0.07, 0.40, -1.20, 20, "N254 WR78% Sh-0.07 RR0.24 PnL-12.12% (quen-comm)", na, 1.18, "INNOVATION", 0, SS_NONE, 1.0, 112, 8388608)
 
-    // ── LONG SETUPS (sweep-optimized) ──
-    // L1: N=416 fires | WR 73.6% (+10.0%) | Sh=0.07 | PnL=+17.99% | tp=0.40 sl=-1.20 mh=12
-    SetupSpec ql1 = SetupSpec.new("L1", "TE0.8+CFVrise", "LONG", FAM_TRAN, 73.6, 0.07, 0.40, -1.20, 12, "N416 WR74% Sh0.07 PnL+17.99% (quen)", na, 1.17, "MR", 0, SS_NONE, 1.0, 201, 8)
-    // L2: N=194 fires | WR 75.8% (+24.1%) | Sh=0.05 | PnL=+6.75% | tp=0.40 sl=-1.20 mh=10
-    SetupSpec ql2 = SetupSpec.new("L2", "CFVrising", "LONG", FAM_TRAN, 75.8, 0.05, 0.40, -1.20, 10, "N194 WR76% Sh0.05 PnL+6.75% (quen)", na, 1.30, "INNOVATION", 0, SS_NONE, 1.0, 202, 16)
+    // ── LONG SETUPS (sweep-optimized with 0.10% commission) ──
+    // L1: N=416 | WR 73.1% (+9.5%) | Sh=-0.09 | RR=0.29 | PnL=-23.61% | tp=0.40 sl=-1.20 mh=12
+    SetupSpec ql1 = SetupSpec.new("L1", "TE0.8+CFVrise", "LONG", FAM_TRAN, 73.1, -0.09, 0.40, -1.20, 12, "N416 WR73% Sh-0.09 RR0.29 PnL-23.61% (quen-comm)", na, 1.17, "MR", 0, SS_NONE, 1.0, 201, 8)
+    // L2: N=194 | WR 75.3% (+23.6%) | Sh=-0.07 | RR=0.27 | PnL=-11.59% | tp=0.50 sl=-1.50 mh=20
+    SetupSpec ql2 = SetupSpec.new("L2", "CFVrising", "LONG", FAM_TRAN, 75.3, -0.07, 0.50, -1.50, 20, "N194 WR75% Sh-0.07 RR0.27 PnL-11.59% (quen-comm)", na, 1.30, "INNOVATION", 0, SS_NONE, 1.0, 202, 16)
     // L3: not in sweep (no fires) — keep v19
     SetupSpec ql3 = SetupSpec.new("L3", "CFV+VelRec", "LONG", FAM_TRAN, 66.7, 9.04, 0.80, -1.20, 16, "WR66.7 Sh9.04 MAE-0.35", na, 1.15, "RECOUPLE", 0, SS_NONE, 1.0, 203, 32)
     // L4: not in sweep — keep v19
     SetupSpec ql4 = SetupSpec.new("L4", "Trans+TE0.8", "LONG", FAM_TRAN, 55.8, 8.45, 0.80, -1.20, 12, "WR55.8 Sh8.45 MAE-0.47", na, 1.05, "RECOUPLE", 0, SS_NONE, 1.0, 104, 2)
-    // L5: N=752 fires | WR 71.7% (+3.7%) | Sh=-0.02 | PnL=-10.78% | tp=0.50 sl=-1.50 mh=20
-    SetupSpec ql5 = SetupSpec.new("L5", "MRStrict+0.5", "LONG", FAM_MR, 71.7, -0.02, 0.50, -1.50, 20, "N752 WR72% Sh-0.02 PnL-10.78% (quen)", na, 1.18, "MR", 0, SS_NONE, 1.0, 205, 262144)
-    // L6: N=250 fires | WR 57.6% (-12.4%) | Sh=-0.10 | PnL=-9.87% | tp=0.30 sl=-0.50 mh=10 — DEGRADED
-    SetupSpec ql6 = SetupSpec.new("L6", "LReentry+VecDiv", "LONG", FAM_TRAN, 57.6, -0.10, 0.30, -0.50, 10, "N250 WR58% Sh-0.10 PnL-9.87% (quen-degraded)", na, 1.12, "RECOUPLE", 0, SS_NONE, 1.0, 206, 524288)
-    // L7: N=924 fires | WR 72.4% (-0.1%) | Sh=-0.04 | PnL=-25.25% | tp=0.40 sl=-1.20 mh=20
-    SetupSpec ql7 = SetupSpec.new("L7", "CFV+TE+LTFhi", "LONG", FAM_TRAN, 72.4, -0.04, 0.40, -1.20, 20, "N924 WR72% Sh-0.04 PnL-25.25% (quen)", na, 1.22, "MR", 0, SS_NONE, 1.0, 207, 1048576)
-    // L8: N=162 fires | WR 73.5% (+13.5%) | Sh=0.08 | PnL=+5.60% | tp=0.30 sl=-0.70 mh=20
-    SetupSpec ql8 = SetupSpec.new("L8", "PredMA+VelRec", "LONG", FAM_TRAN, 73.5, 0.08, 0.30, -0.70, 20, "N162 WR73% Sh0.08 PnL+5.60% (quen)", na, 1.28, "RECOUPLE", 0, SS_NONE, 1.0, 208, 2097152)
-    // L9: N=313 fires | WR 72.5% (-2.8%) | Sh=0.01 | PnL=+1.09% | tp=0.30 sl=-0.80 mh=12
-    SetupSpec ql9 = SetupSpec.new("L9", "PhiDiv+MRinfl", "LONG", FAM_TRAN, 72.5, 0.01, 0.30, -0.80, 12, "N313 WR73% Sh0.01 PnL+1.09% (quen)", na, 1.22, "INNOVATION", 0, SS_NONE, 1.0, 209, 4194304)
+    // L5: N=752 | WR 71.4% (+3.4%) | Sh=-0.14 | RR=0.29 | PnL=-85.98% | tp=0.50 sl=-1.50 mh=20
+    SetupSpec ql5 = SetupSpec.new("L5", "MRStrict+0.5", "LONG", FAM_MR, 71.4, -0.14, 0.50, -1.50, 20, "N752 WR71% Sh-0.14 RR0.29 PnL-85.98% (quen-comm)", na, 1.18, "MR", 0, SS_NONE, 1.0, 205, 262144)
+    // L6: N=250 | WR 59.6% (-10.4%) | Sh=-0.23 | RR=0.39 | PnL=-52.28% | tp=0.60 sl=-1.50 mh=14 — DEGRADED
+    SetupSpec ql6 = SetupSpec.new("L6", "LReentry+VecDiv", "LONG", FAM_TRAN, 59.6, -0.23, 0.60, -1.50, 14, "N250 WR60% Sh-0.23 RR0.39 PnL-52.28% (quen-comm-degraded)", na, 1.12, "RECOUPLE", 0, SS_NONE, 1.0, 206, 524288)
+    // L7: N=924 | WR 72.3% (-0.2%) | Sh=-0.18 | RR=0.24 | PnL=-117.65% | tp=0.40 sl=-1.20 mh=20
+    SetupSpec ql7 = SetupSpec.new("L7", "CFV+TE+LTFhi", "LONG", FAM_TRAN, 72.3, -0.18, 0.40, -1.20, 20, "N924 WR72% Sh-0.18 RR0.24 PnL-117.65% (quen-comm)", na, 1.22, "MR", 0, SS_NONE, 1.0, 207, 1048576)
+    // L8: N=162 | WR 74.7% (+14.7%) | Sh=-0.09 | RR=0.27 | PnL=-12.07% | tp=0.50 sl=-1.50 mh=14
+    SetupSpec ql8 = SetupSpec.new("L8", "PredMA+VelRec", "LONG", FAM_TRAN, 74.7, -0.09, 0.50, -1.50, 14, "N162 WR75% Sh-0.09 RR0.27 PnL-12.07% (quen-comm)", na, 1.28, "RECOUPLE", 0, SS_NONE, 1.0, 208, 2097152)
+    // L9: N=313 | WR 72.8% (-2.5%) | Sh=-0.20 | RR=0.22 | PnL=-30.90% | tp=0.30 sl=-0.80 mh=14
+    SetupSpec ql9 = SetupSpec.new("L9", "PhiDiv+MRinfl", "LONG", FAM_TRAN, 72.8, -0.20, 0.30, -0.80, 14, "N313 WR73% Sh-0.20 RR0.22 PnL-30.90% (quen-comm)", na, 1.22, "INNOVATION", 0, SS_NONE, 1.0, 209, 4194304)
 
-    // ── V (VELOCITY/VOLATILITY) SETUPS ──
+    // ── V (VELOCITY/VOLATILITY) SETUPS (sweep-optimized with 0.10% commission) ──
     // V1: not in sweep — keep v19
     SetupSpec qv1 = SetupSpec.new("V1", "BounceFire", "LONG", FAM_UNC, 81.0, 6.10, 0.80, -1.20, 8, "WR81 Sortino18.3 t*=6", na, 1.17, "MR", 0, SS_NONE, 1.0, 301, 64)
-    // V2: N=716 fires | WR 74.0% (+1.0%) | Sh=0.09 | PnL=+28.85% | tp=0.30 sl=-0.70 mh=16
-    SetupSpec qv2 = SetupSpec.new("V2", "MRSetup", "SHORT", FAM_MR, 74.0, 0.09, 0.30, -0.70, 16, "N716 WR74% Sh0.09 PnL+28.85% (quen)", na, 1.26, "MR", 0, SS_NONE, 1.0, 302, 128)
-    // V3: N=311 fires | WR 69.8% (-5.2%) | Sh=-0.06 | PnL=-12.90% | tp=0.40 sl=-1.20 mh=14 — DEGRADED
-    SetupSpec qv3 = SetupSpec.new("V3", "Transition", "LONG", FAM_TRAN, 69.8, -0.06, 0.40, -1.20, 14, "N311 WR70% Sh-0.06 PnL-12.90% (quen-degraded)", na, 1.14, "MR", 0, SS_NONE, 1.0, 303, 256)
+    // V2: N=716 | WR 76.4% (+3.4%) | Sh=-0.11 | RR=0.24 | PnL=-50.41% | tp=0.40 sl=-1.20 mh=20
+    SetupSpec qv2 = SetupSpec.new("V2", "MRSetup", "SHORT", FAM_MR, 76.4, -0.11, 0.40, -1.20, 20, "N716 WR76% Sh-0.11 RR0.24 PnL-50.41% (quen-comm)", na, 1.26, "MR", 0, SS_NONE, 1.0, 302, 128)
+    // V3: N=311 | WR 69.5% (-5.5%) | Sh=-0.21 | RR=0.26 | PnL=-44.00% | tp=0.40 sl=-1.20 mh=14 — DEGRADED
+    SetupSpec qv3 = SetupSpec.new("V3", "Transition", "LONG", FAM_TRAN, 69.5, -0.21, 0.40, -1.20, 14, "N311 WR70% Sh-0.21 RR0.26 PnL-44.00% (quen-comm-degraded)", na, 1.14, "MR", 0, SS_NONE, 1.0, 303, 256)
     // V4: not in sweep — keep v19
     SetupSpec qv4 = SetupSpec.new("V4", "VelRecouple", "LONG", FAM_TRAN, 64.0, 2.80, 0.80, -1.50, 14, "WR64 edge<1 tighten", na, 0.97, "RECOUPLE", 0, SS_NONE, 1.0, 304, 512)
 
-    // ── NUMERIC SETUPS ──
+    // ── NUMERIC SETUPS (sweep-optimized with 0.10% commission) ──
     // 81: not in sweep — keep v19
     SetupSpec q81 = SetupSpec.new("81", "CORR⊥+MR", "LONG", FAM_UNC, 81.0, 0.0, 0.80, -1.20, 12, "81% WR corr-bottom+MR", na, 1.20, "MR", 0, SS_NONE, 1.0, 381, 1024)
     // 73: not in sweep — keep v19
     SetupSpec q73 = SetupSpec.new("73", "CORR↑+MR", "SHORT", FAM_VEL, 73.0, 0.0, 0.80, -1.20, 12, "73% WR corr-peak+MR", na, 1.15, "MR", 0, SS_NONE, 1.0, 373, 2048)
-    // 75: N=165 fires | WR 77.0% (+2.0%) | Sh=0.09 | PnL=+11.75% | tp=0.50 sl=-1.50 mh=20
-    SetupSpec q75 = SetupSpec.new("75", "BearDiv⊥OS", "SHORT", FAM_VEL, 77.0, 0.09, 0.50, -1.50, 20, "N165 WR77% Sh0.09 PnL+11.75% (quen)", na, 1.10, "MR", 0, SS_NONE, 1.0, 375, 4096)
+    // 75: N=165 | WR 76.4% (+1.4%) | Sh=-0.04 | RR=0.28 | PnL=-4.75% | tp=0.50 sl=-1.50 mh=20
+    SetupSpec q75 = SetupSpec.new("75", "BearDiv⊥OS", "SHORT", FAM_VEL, 76.4, -0.04, 0.50, -1.50, 20, "N165 WR76% Sh-0.04 RR0.28 PnL-4.75% (quen-comm)", na, 1.10, "MR", 0, SS_NONE, 1.0, 375, 4096)
     // 64: not in sweep — keep v19
     SetupSpec q64 = SetupSpec.new("64", "CLD↗", "LONG", FAM_CONT, 64.0, 0.0, 0.80, -1.20, 14, "97% continuation pattern", na, 1.05, "MOMENTUM", 0, SS_NONE, 1.0, 364, 4194304)
 
