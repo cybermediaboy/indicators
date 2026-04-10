@@ -546,43 +546,32 @@ string fallback_sym4 = basket_preset == "Basket B (Memes)" ? "BINANCE:SOLUSDT" :
 
 // REMOVED: fallback_sym5, fallback_use_sym5 (5th asset not needed)
 
-string scan_01 = "BINANCE:BTCUSDT"
-string scan_02 = "BINANCE:ETHUSDT"
-string scan_03 = "BINANCE:SOLUSDT"
-string scan_04 = "BINANCE:BNBUSDT"
-string scan_05 = "BINANCE:DOGEUSDT"
-string scan_06 = "BINANCE:SHIBUSDT"
-string scan_07 = "BINANCE:BONKUSDT"
-string scan_08 = "BINANCE:APTUSDT"
-string scan_09 = "BINANCE:TONUSDT"
-string scan_10 = "BINANCE:AVAXUSDT"
-
-float sc01 = request.security(scan_01, timeframe.period, close)
-float sc02 = request.security(scan_02, timeframe.period, close)
-float sc03 = request.security(scan_03, timeframe.period, close)
-float sc04 = request.security(scan_04, timeframe.period, close)
-float sc05 = request.security(scan_05, timeframe.period, close)
-float sc06 = request.security(scan_06, timeframe.period, close)
-float sc07 = request.security(scan_07, timeframe.period, close)
-float sc08 = request.security(scan_08, timeframe.period, close)
-float sc09 = request.security(scan_09, timeframe.period, close)
-float sc10 = request.security(scan_10, timeframe.period, close)
+float sc01 = request.security("BINANCE:BTCUSDT", timeframe.period, close)
+float sc02 = request.security("BINANCE:ETHUSDT", timeframe.period, close)
+float sc03 = request.security("BINANCE:SOLUSDT", timeframe.period, close)
+float sc04 = request.security("BINANCE:BNBUSDT", timeframe.period, close)
+float sc05 = request.security("BINANCE:DOGEUSDT", timeframe.period, close)
+float sc06 = request.security("BINANCE:SHIBUSDT", timeframe.period, close)
+float sc07 = request.security("BINANCE:BONKUSDT", timeframe.period, close)
+float sc08 = request.security("BINANCE:APTUSDT", timeframe.period, close)
+float sc09 = request.security("BINANCE:TONUSDT", timeframe.period, close)
+float sc10 = request.security("BINANCE:AVAXUSDT", timeframe.period, close)
 
 // Calculate correlation scores via function (saves ~100 global variables)
 float base_ret_scan = ta.roc(c0, 1)
 int corr_smooth_len = math.max(3, int(math.round(fit_eval_len * 0.25)))
 
 var scan_symbols = array.new<string>(10)
-array.set(scan_symbols, 0, scan_01)
-array.set(scan_symbols, 1, scan_02)
-array.set(scan_symbols, 2, scan_03)
-array.set(scan_symbols, 3, scan_04)
-array.set(scan_symbols, 4, scan_05)
-array.set(scan_symbols, 5, scan_06)
-array.set(scan_symbols, 6, scan_07)
-array.set(scan_symbols, 7, scan_08)
-array.set(scan_symbols, 8, scan_09)
-array.set(scan_symbols, 9, scan_10)
+array.set(scan_symbols, 0, "BINANCE:BTCUSDT")
+array.set(scan_symbols, 1, "BINANCE:ETHUSDT")
+array.set(scan_symbols, 2, "BINANCE:SOLUSDT")
+array.set(scan_symbols, 3, "BINANCE:BNBUSDT")
+array.set(scan_symbols, 4, "BINANCE:DOGEUSDT")
+array.set(scan_symbols, 5, "BINANCE:SHIBUSDT")
+array.set(scan_symbols, 6, "BINANCE:BONKUSDT")
+array.set(scan_symbols, 7, "BINANCE:APTUSDT")
+array.set(scan_symbols, 8, "BINANCE:TONUSDT")
+array.set(scan_symbols, 9, "BINANCE:AVAXUSDT")
 
 array<float> scan_prices = array.from(sc01, sc02, sc03, sc04, sc05, sc06, sc07, sc08, sc09, sc10)
 var scan_scores = BasketLib.f_calc_scan_correlation_scores(base_ret_scan, scan_prices, scan_symbols,
@@ -3672,8 +3661,7 @@ else
     burst_raw_prenorm := burst_osc_mode == "pathA" ? path_A : f7_burst_raw
 
 burst_osc_raw := burst_raw_prenorm
-float _burst_z_temp = 0.0
-[_, _burst_z_temp, _] = TAUtilityLib.f_zscore_standard(burst_osc_raw, len_z)
+[_burst_z_mean, _burst_z_temp, _burst_z_std] = TAUtilityLib.f_zscore_standard(burst_osc_raw, len_z)
 burst_osc_z := _burst_z_temp
 
 // Legacy compat: override BandsLib squeeze signals with throat state
@@ -3747,20 +3735,22 @@ if not simple_mode and continuation_setup and not continuation_setup[1]
 // Combined Probability Heatmap (moved to indicator pane)
 combined_z = (z0 + basket_vec_z) / 2.0
 
-// Breakout Markers (using Zone 3)
-float total_band_width = math.max(z3_up - z3_dn, syminfo.mintick)
-float tiny_triangle_vicinity = total_band_width * 0.05
-float nearest_band_or_ma = math.min(math.abs(c0 - z3_up), math.min(math.abs(c0 - z2_up), math.min(math.abs(c0 - z1_up), math.min(math.abs(c0 - ma0), math.min(math.abs(c0 - z1_dn), math.min(math.abs(c0 - z2_dn), math.abs(c0 - z3_dn)))))))
-bool price_near_structure = nearest_band_or_ma <= tiny_triangle_vicinity
-float innov_pivot_high_fast = ta.pivothigh(innov_z_score, 2, 2)
-float innov_pivot_low_fast = ta.pivotlow(innov_z_score, 2, 2)
-bool surprise_peak_fast = not na(innov_pivot_high_fast) and innov_pivot_high_fast > 0.85
-bool surprise_valley_fast = not na(innov_pivot_low_fast) and innov_pivot_low_fast < -0.85
-bool trend_bull_relaxed = est_trend > 0.025
-bool trend_bear_relaxed = est_trend < -0.025
-bool corr_ok_relaxed = corr_damping > 0.20
-bool tiny_triangle_bull = price_near_structure and surprise_valley_fast and trend_bull_relaxed and corr_ok_relaxed and mr_bull
-bool tiny_triangle_bear = price_near_structure and surprise_peak_fast and trend_bear_relaxed and corr_ok_relaxed and mr_bear
+// Breakout Markers — tiny triangle + VWAP flags computed in function (saves 13 vars from global scope)
+f_calc_breakout_flags(float _c0, float _z3u, float _z3d, float _z2u, float _z2d, float _z1u, float _z1d, float _ma0, float _izs, float _trend, float _damp, bool _mr_bull, bool _mr_bear, float _vwap, float _fdev, bool _show_vwap, bool _en_vwap, float _vwap_tgt, float _ib_lo, float _ib_hi) =>
+    float _bw = math.max(_z3u - _z3d, syminfo.mintick)
+    float _near = math.min(math.abs(_c0 - _z3u), math.min(math.abs(_c0 - _z2u), math.min(math.abs(_c0 - _z1u), math.min(math.abs(_c0 - _ma0), math.min(math.abs(_c0 - _z1d), math.min(math.abs(_c0 - _z2d), math.abs(_c0 - _z3d)))))))
+    bool _pns = _near <= _bw * 0.05
+    bool _spk = not na(ta.pivothigh(_izs, 2, 2)) and ta.pivothigh(_izs, 2, 2) > 0.85
+    bool _svl = not na(ta.pivotlow(_izs, 2, 2)) and ta.pivotlow(_izs, 2, 2) < -0.85
+    bool _tt_bull = _pns and _svl and _trend > 0.025 and _damp > 0.20 and _mr_bull
+    bool _tt_bear = _pns and _spk and _trend < -0.025 and _damp > 0.20 and _mr_bear
+    float _vdz = not na(_vwap) ? (_vwap - low) / math.max(nz(_fdev, syminfo.mintick), syminfo.mintick) : na
+    float _vdzs = not na(_vwap) ? (high - _vwap) / math.max(nz(_fdev, syminfo.mintick), syminfo.mintick) : na
+    bool _vwl = _show_vwap and _en_vwap and not na(_vdz) and low < _ib_lo and _vdz > _vwap_tgt
+    bool _vws = _show_vwap and _en_vwap and not na(_vdzs) and high > _ib_hi and _vdzs > _vwap_tgt
+    [_tt_bull, _tt_bear, _vwl, _vws]
+
+[tiny_triangle_bull, tiny_triangle_bear, is_smart_vwap_long_rejection, is_smart_vwap_short_rejection] = f_calc_breakout_flags(c0, z3_up, z3_dn, z2_up, z2_dn, z1_up, z1_dn, ma0, innov_z_score, est_trend, corr_damping, mr_bull, mr_bear, current_intrabar_vwap, fast_dev, show_vwap_rejection_signal, enable_vwap_sgd, vwap_rejection_target_z, innov_band_lower, innov_band_upper)
 
 // Breakout markers (HIDE IN SIMPLE MODE)
 if not simple_mode and (expansion_up or tiny_triangle_bull)
@@ -3769,11 +3759,6 @@ if not simple_mode and (expansion_up or tiny_triangle_bull)
 if not simple_mode and (expansion_dn or tiny_triangle_bear)
     string breakout_dn_tip = expansion_dn ? "Breakout Down\nPrice expanded through outer structure in bearish trend context" : "Breakout Down\nTiny-triangle bearish release near structure with innovation peak confirmation"
     f_add_signal_label("▼", breakout_dn_tip, false, high, color.new(color.red, 0))
-
-float current_vwap_dist_z = not na(current_intrabar_vwap) ? (current_intrabar_vwap - low) / math.max(nz(fast_dev, syminfo.mintick), syminfo.mintick) : na
-float current_vwap_dist_z_short = not na(current_intrabar_vwap) ? (high - current_intrabar_vwap) / math.max(nz(fast_dev, syminfo.mintick), syminfo.mintick) : na
-bool is_smart_vwap_long_rejection = show_vwap_rejection_signal and enable_vwap_sgd and not na(current_vwap_dist_z) and low < innov_band_lower and current_vwap_dist_z > vwap_rejection_target_z
-bool is_smart_vwap_short_rejection = show_vwap_rejection_signal and enable_vwap_sgd and not na(current_vwap_dist_z_short) and high > innov_band_upper and current_vwap_dist_z_short > vwap_rejection_target_z
 
 // VWAP Rejection signals as small centered plotchar points at LTF close level - MERGED
 color vwap_col = is_smart_vwap_long_rejection ? color.new(color.lime, 0) : is_smart_vwap_short_rejection ? color.new(color.red, 0) : na
@@ -3965,72 +3950,49 @@ plot(_ov(5), "BURST", color=_oc(5, burst_osc_z), linewidth=2, display=simple_mod
 // kNN Confidence is event-level data (computed only in State 4 on realtime bars)
 // Display via Info Table or Label, not as time-series plot()
 
-// Orthogonal MR diagnostics (visual z-score normalization for pane alignment)
-float phi_total_mean = ta.sma(PhiTotal_orth, 200)
-float phi_total_stdev = math.max(ta.stdev(PhiTotal_orth, 200), syminfo.mintick)
-float phi_total_vis = math.max(-3.0, math.min((PhiTotal_orth - phi_total_mean) / phi_total_stdev, 3.0))
+// phi_total_vis, phi_latch_vis removed (plots removed, 6 vars saved)
 
-float phi_latch_mean = ta.sma(PhiLatch, 200)
-float phi_latch_stdev = math.max(ta.stdev(PhiLatch, 200), syminfo.mintick)
-float phi_latch_vis = math.max(-3.0, math.min((PhiLatch - phi_latch_mean) / phi_latch_stdev, 3.0))
+// TE Pit Detection — stateful state machine wrapped in function (saves 7 vars from global scope)
+f_detect_te_pit(float _te_osc, int _lookback, float _drop_sigma, float _abs_floor, int _window, float _rec2, float _rec3) =>
+    var bool _armed = false
+    var int _start_bar = na
+    var float _bottom = na
+    var int _bottom_bar = na
+    float _delta = not na(_te_osc) and not na(_te_osc[1]) ? _te_osc - _te_osc[1] : na
+    float _dmean = ta.sma(_delta, _lookback)
+    float _dstdev = ta.stdev(_delta, _lookback)
+    bool _drop = not na(_delta) and ((not na(_dmean) and not na(_dstdev) and _delta < _dmean - _drop_sigma * _dstdev) or _delta < _abs_floor)
+    int _sig = 0
+    if _drop and not _armed
+        _armed := true
+        _start_bar := bar_index
+        _bottom := _te_osc
+        _bottom_bar := bar_index
+    else if _armed
+        if _te_osc < _bottom
+            _bottom := _te_osc
+            _bottom_bar := bar_index
+        int _bspit = bar_index - nz(_start_bar, bar_index)
+        int _bsbot = bar_index - nz(_bottom_bar, bar_index)
+        float _rec = not na(_bottom) ? _te_osc - _bottom : 0.0
+        if _bspit <= _window and ((_bsbot >= 2 and _rec >= _rec2) or (_bsbot >= 3 and _rec >= _rec3))
+            _sig := 1
+            _armed := false
+            _start_bar := na
+            _bottom := na
+            _bottom_bar := na
+        else if _bspit > _window
+            _sig := -1
+            _armed := false
+            _start_bar := na
+            _bottom := na
+            _bottom_bar := na
+    [_sig, _armed, _bottom_bar, _delta, _dmean, _dstdev]
 
-// DEBUG PLOTS REMOVED: phi_total_vis, phi_latch_vis
-
-// TE Pit Detection: Identify sharp drops in Transfer Entropy (manipulation warning)
-float te_delta = not na(te_osc) and not na(te_osc[1]) ? te_osc - te_osc[1] : na
-float te_delta_mean = ta.sma(te_delta, te_pit_delta_lookback)
-float te_delta_stdev = ta.stdev(te_delta, te_pit_delta_lookback)
-bool te_drop_trigger = not na(te_delta) and ((not na(te_delta_mean) and not na(te_delta_stdev) and te_delta < te_delta_mean - te_pit_drop_sigma * te_delta_stdev) or te_delta < te_pit_abs_floor)
-
-var bool te_pit_armed = false
-var int te_pit_start_bar = na
-var float te_pit_bottom = na
-var int te_pit_bottom_bar = na
-var int te_pit_signal = 0
-var float te_pit_confirm_recovery = na
-var int te_pit_confirm_bars = na
-
-te_pit_signal := 0
-te_pit_confirm_recovery := na
-te_pit_confirm_bars := na
-
-if te_drop_trigger and not te_pit_armed
-    te_pit_armed := true
-    te_pit_start_bar := bar_index
-    te_pit_bottom := te_osc
-    te_pit_bottom_bar := bar_index
-else if te_pit_armed
-    // Track lowest point during pit
-    if te_osc < te_pit_bottom
-        te_pit_bottom := te_osc
-        te_pit_bottom_bar := bar_index
-    
-    int te_bars_since_pit = bar_index - nz(te_pit_start_bar, bar_index)
-    int te_bars_since_bottom = bar_index - nz(te_pit_bottom_bar, bar_index)
-    float te_recovery = not na(te_pit_bottom) ? te_osc - te_pit_bottom : 0.0
-    
-    // Relaxed recovery: OR instead of AND, check from bottom not from start
-    bool te_rec2_ok = te_bars_since_bottom >= 2 and te_recovery >= te_pit_recovery_2
-    bool te_rec3_ok = te_bars_since_bottom >= 3 and te_recovery >= te_pit_recovery_3
-    
-    if te_bars_since_pit <= te_pit_window and (te_rec2_ok or te_rec3_ok)
-        te_pit_signal := 1
-        te_pit_confirm_recovery := te_recovery
-        te_pit_confirm_bars := te_bars_since_bottom
-        te_pit_armed := false
-        te_pit_start_bar := na
-        te_pit_bottom := na
-        te_pit_bottom_bar := na
-    else if te_bars_since_pit > te_pit_window
-        te_pit_signal := -1  // Sustained crash, no recovery
-        te_pit_armed := false
-        te_pit_start_bar := na
-        te_pit_bottom := na
-        te_pit_bottom_bar := na
-
-bool te_pit_recovery = te_pit_signal == 1
-bool te_pit_pending = te_pit_armed and not te_pit_recovery
-bool te_pit_at_bottom = te_pit_armed and bar_index == te_pit_bottom_bar
+[_te_pit_sig, _te_pit_armed, _te_pit_bbar, te_delta, te_delta_mean, te_delta_stdev] = f_detect_te_pit(te_osc, te_pit_delta_lookback, te_pit_drop_sigma, te_pit_abs_floor, te_pit_window, te_pit_recovery_2, te_pit_recovery_3)
+bool te_pit_recovery = _te_pit_sig == 1
+bool te_pit_pending = _te_pit_armed and not te_pit_recovery
+bool te_pit_at_bottom = _te_pit_armed and bar_index == _te_pit_bbar
 color te_col = te_pit_pending ? color.new(color.yellow, 0) : (te_pit_recovery ? color.new(color.red, 0) : color.new(color.purple, 20))
 
 // Remove Z-score normalization because it crushes small TE variance to 0.0
@@ -4114,29 +4076,11 @@ color innov_color = high_pivot_valid ? color.new(color.red, 0) : (low_pivot_vali
 // Bits 8-9: CLD patterns (continuation, exhaustion)
 
 // Encode all signals and thresholds into a single statement to bypass CE10296
-float density_debug_bit = 0.0
-
-// DEBUG REMOVED: packed_trade_bitfield, mc_debug_bitfield calculations (~11 vars)
-
-// DEBUG PLOTS RESTORED: Display in data window for diagnostic visibility
-// Trade state bits (simplified)
-float packed_trade_bitfield = (barstate.isrealtime ? 1.0 : 0.0) * 1000.0 + (bt_table_ready ? 100.0 : 0.0) + (mc_has_results ? 10.0 : 0.0)
-plot(packed_trade_bitfield, "Trade State", color=color.new(color.blue, 0), display=display.data_window)
-
-// MC state machine bits (simplified)
-float mc_debug_bitfield = mc_phase * 1000.0 + mc_chunk_done * 100.0 + bt_validated_setups * 10.0 + bt_confirmed_setups
-plot(mc_debug_bitfield, "MC Debug", color=color.new(color.orange, 0), display=display.data_window)
-
-// Entry context bits (simplified - use global state)
-float entrycontextbitfield = (not na(pos) ? 1000.0 : 0.0) + (pos.dir == "LONG" ? 100.0 : pos.dir == "SHORT" ? 200.0 : 0.0)
-plot(entrycontextbitfield, "Entry Context", color=color.new(color.green, 0), display=display.data_window)
-
-// Exit context bits (simplified - use position state)
-float exitcontextbitfield = (not na(pos) and not pos.is_active ? 1000.0 : 0.0) + (not na(pos) ? 100.0 : 0.0)
-plot(exitcontextbitfield, "Exit Context", color=color.new(color.red, 0), display=display.data_window)
-
-// Density debug bits (restored from existing variable)
-plot(density_debug_bit, "Density Debug", color=color.new(color.purple, 0), display=display.data_window)
+plot((barstate.isrealtime ? 1.0 : 0.0) * 1000.0 + (bt_table_ready ? 100.0 : 0.0) + (mc_has_results ? 10.0 : 0.0), "Trade State", color=color.new(color.blue, 0), display=display.data_window)
+plot(mc_phase * 1000.0 + mc_chunk_done * 100.0 + bt_validated_setups * 10.0 + bt_confirmed_setups, "MC Debug", color=color.new(color.orange, 0), display=display.data_window)
+plot((not na(pos) ? 1000.0 : 0.0) + (pos.dir == "LONG" ? 100.0 : pos.dir == "SHORT" ? 200.0 : 0.0), "Entry Context", color=color.new(color.green, 0), display=display.data_window)
+plot((not na(pos) and not pos.is_active ? 1000.0 : 0.0) + (not na(pos) ? 100.0 : 0.0), "Exit Context", color=color.new(color.red, 0), display=display.data_window)
+plot(0.0, "Density Debug", color=color.new(color.purple, 0), display=display.data_window)
 
 // Setup Context Bitfield (boolean flags for setup diagnostics)
 // Bit 0: pred_rounded
@@ -4155,24 +4099,7 @@ plot(density_debug_bit, "Density Debug", color=color.new(color.purple, 0), displ
 // Bit 13: continuation_setup
 // Bit 14: idiosyncratic_flow
 // Bit 15: is_falling_knife
-float setup_context_bits = 0.0
-setup_context_bits += pred_rounded ? 1.0 : 0.0
-setup_context_bits += pred_round_long ? 2.0 : 0.0
-setup_context_bits += pred_round_short ? 4.0 : 0.0
-setup_context_bits += ltf_is_decoupled ? 8.0 : 0.0
-setup_context_bits += ltf_decouple_event ? 16.0 : 0.0
-setup_context_bits += ltf_recouple_event ? 32.0 : 0.0
-setup_context_bits += phi_informative ? 64.0 : 0.0
-setup_context_bits += bounce_event ? 128.0 : 0.0
-setup_context_bits += mr_event ? 256.0 : 0.0
-setup_context_bits += transition_event ? 512.0 : 0.0
-setup_context_bits += cld_continuation ? 1024.0 : 0.0
-setup_context_bits += cld_exhaustion ? 2048.0 : 0.0
-setup_context_bits += macro_exhaustion ? 4096.0 : 0.0
-setup_context_bits += continuation_setup ? 8192.0 : 0.0
-setup_context_bits += idiosyncratic_flow ? 16384.0 : 0.0
-setup_context_bits += is_falling_knife ? 32768.0 : 0.0
-plot(setup_context_bits, "Setup Context Flags", color=color.new(color.fuchsia, 0), display=display.data_window)
+plot((pred_rounded ? 1.0 : 0.0) + (pred_round_long ? 2.0 : 0.0) + (pred_round_short ? 4.0 : 0.0) + (ltf_is_decoupled ? 8.0 : 0.0) + (ltf_decouple_event ? 16.0 : 0.0) + (ltf_recouple_event ? 32.0 : 0.0) + (phi_informative ? 64.0 : 0.0) + (bounce_event ? 128.0 : 0.0) + (mr_event ? 256.0 : 0.0) + (transition_event ? 512.0 : 0.0) + (cld_continuation ? 1024.0 : 0.0) + (cld_exhaustion ? 2048.0 : 0.0) + (macro_exhaustion ? 4096.0 : 0.0) + (continuation_setup ? 8192.0 : 0.0) + (idiosyncratic_flow ? 16384.0 : 0.0) + (is_falling_knife ? 32768.0 : 0.0), "Setup Context Flags", color=color.new(color.fuchsia, 0), display=display.data_window)
 
 // Continuous Setup Diagnostics (non-bit-encodable values)
 plot(basket_fit, "Basket Fit (0-100)", color=color.new(color.aqua, 0), display=display.data_window)
@@ -4180,76 +4107,11 @@ plot(te_direction_smoothed, "TE Direction", color=color.new(color.orange, 0), di
 // FIX: Export corr_damping as standalone CSV column for debugging transparency issues
 plot(corr_damping, "Corr Damping (0-1)", color=color.new(color.purple, 0), display=display.data_window)
 
-// Setup debug code (complete - includes all setup types)
-float setup_debug_code = 0.0
-if setup_s1
-    setup_debug_code := 100.0
-else if setup_s5
-    setup_debug_code := 500.0
-else if setup_s6
-    setup_debug_code := 600.0
-else if setup_s7
-    setup_debug_code := 700.0
-else if setup_s8
-    setup_debug_code := 800.0
-else if setup_s9
-    setup_debug_code := 900.0
-else if setup_s10
-    setup_debug_code := 1000.0
-else if setup_s11
-    setup_debug_code := 1110.0
-else if setup_s12
-    setup_debug_code := 1120.0
-else if fire_l1
-    setup_debug_code := 1100.0
-else if fire_l2
-    setup_debug_code := 1200.0
-else if fire_l3
-    setup_debug_code := 1300.0
-else if setup_l5
-    setup_debug_code := 1500.0
-else if setup_l6
-    setup_debug_code := 1600.0
-else if setup_l7
-    setup_debug_code := 1700.0
-else if setup_l8
-    setup_debug_code := 1800.0
-else if setup_l9
-    setup_debug_code := 1900.0
-// Missing V setups (engine events)
-else if setup_v1
-    setup_debug_code := 2100.0
-else if setup_v2
-    setup_debug_code := 2200.0
-else if setup_v3
-    setup_debug_code := 2300.0
-else if setup_v4
-    setup_debug_code := 2400.0
-// Missing numeric setups (engine events)
-else if setup_corr_bottom_mr_confirm  // 81
-    setup_debug_code := 8100.0
-else if setup_corr_peak_mr_confirm    // 73
-    setup_debug_code := 7300.0
-else if setup_bear_div_oversold      // 75
-    setup_debug_code := 7500.0
-else if setup_cld_fall_rise_up       // 64
-    setup_debug_code := 6400.0
-
-// MERGE Setup Debug + CLD Debug into ONE plot using bit-packing:
-// FIX 1: Use actualfiresignal (set ONLY when setup passes ALL gates in f_fire_setup_byid)
-// instead of setup_debug_code (which fires on raw conditions without debounce/suppression layers)
-// Bits 0-9: Setup ID (100-1800)
-// Bits 10-12: Setup state (000=no setup, 001=setup active, 010=realtime, 011=both)
-// Bits 13-15: CLD patterns (continuation=100, exhaustion=200, macro=300)
-float setup_debug_merged = actualfiresignal + ((actualfiresignal > 0 ? 1.0 : 0.0) * 10000.0) + (barstate.isrealtime ? 20000.0 : 0.0)
-float cld_debug_bitfield = (cld_continuation ? 100.0 : 0.0) + (cld_exhaustion ? 200.0 : 0.0) + (macro_exhaustion ? 300.0 : 0.0)
-float debug_combined = setup_debug_merged + cld_debug_bitfield * 100000.0
-plot(debug_combined, "Debug Combined", color=color.new(color.yellow, 0), display=display.data_window)
+// Debug Combined: actualfiresignal + state bits + CLD (setup_debug_code removed — replaced by actualfiresignal)
+plot(actualfiresignal + ((actualfiresignal > 0 ? 1.0 : 0.0) * 10000.0) + (barstate.isrealtime ? 20000.0 : 0.0) + ((cld_continuation ? 100.0 : 0.0) + (cld_exhaustion ? 200.0 : 0.0) + (macro_exhaustion ? 300.0 : 0.0)) * 100000.0, "Debug Combined", color=color.new(color.yellow, 0), display=display.data_window)
 
 // MC Setup Validator - MAE/MFE Visualization (red/green micro squares) - MERGED
-float mc_y = not na(mae_viz_price) ? mae_viz_price : not na(mfe_viz_price) ? mfe_viz_price : na
-color mc_col = not na(mae_viz_price) ? color.new(color.red, 0) : not na(mfe_viz_price) ? color.new(color.lime, 0) : na
-plotshape(not na(mc_y) ? mc_y : na, "MC Visualization", shape.square, location.absolute, mc_col, size=size.tiny, force_overlay=true)
+plotshape(not na(mae_viz_price) or not na(mfe_viz_price) ? nz(mae_viz_price, mfe_viz_price) : na, "MC Visualization", shape.square, location.absolute, not na(mae_viz_price) ? color.new(color.red, 0) : color.new(color.lime, 0), size=size.tiny, force_overlay=true)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MONTE CARLO FORWARD PATH SIMULATION
