@@ -3231,8 +3231,11 @@ float innov_width = innov_band_upper - innov_band_lower
 float innov_width_med = ta.median(innov_width, 50)
 
 var array<SetupsDB.SetupConfig> triggered_setups = na
+// Map z0 to discrete entry context codes: 1000 (LONG zone), 1100 (neutral), 1200 (SHORT zone)
+int entry_context_code = z0 < -0.5 ? 1000 : z0 > 0.5 ? 1200 : 1100
+
 triggered_setups := SetupsDB.evaluate_all(
-    int(z0 * 1200),  // Entry context: map z0 to 1000/1100/1200 codes
+    entry_context_code,  // Entry context: 1000=LONG zone, 1100=neutral, 1200=SHORT zone
     nz(mr_for_setups),
     nz(basket_vec_z),
     nz(basket_vec_z),
@@ -4139,11 +4142,22 @@ if barstate.islast
     int triggered_size = array.size(triggered_setups)
     int label_count = array.size(setup_labels)
     int cache_size = array.size(setupsdb_cache)
+    
+    // Check if any setups were triggered on this bar
+    string last_triggered_ids = ""
+    if triggered_size > 0
+        for i = 0 to math.min(triggered_size - 1, 2)
+            SetupsDB.SetupConfig c = array.get(triggered_setups, i)
+            last_triggered_ids += c.id + (i < math.min(triggered_size - 1, 2) ? "," : "")
+    
     string diag_text = "setupsDB Diagnostic:\n" + 
                        "bt_setups: " + str.tostring(bt_size) + "\n" +
                        "triggered_setups: " + str.tostring(triggered_size) + "\n" +
+                       "  IDs: " + (triggered_size > 0 ? last_triggered_ids : "none") + "\n" +
                        "setupsdb_cache: " + str.tostring(cache_size) + "\n" +
                        "setup_labels: " + str.tostring(label_count) + "\n" +
+                       "allow_short: " + str.tostring(allow_short) + "\n" +
+                       "allow_long: " + str.tostring(allow_long) + "\n" +
                        "max_labels: 500"
     label.new(bar_index, high * 1.02, diag_text, color=color.new(color.blue, 80), 
               textcolor=color.white, style=label.style_label_down, size=size.normal)
