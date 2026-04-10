@@ -3272,8 +3272,7 @@ if array.size(triggered_setups) > 0
             array.push(setupsdb_cache, cfg)
             // Register setup event with metadata in tooltip
             string tooltip_data = cfg.name + " | WR: " + str.tostring(cfg.wr, "#.#") + "% | Sharpe: " + str.tostring(cfg.sharpe, "#.###")
-            string size_info = str.tostring(cfg.tp_pct, "#.#") + "," + str.tostring(cfg.sl_pct, "#.#") + "," + str.tostring(cfg.hold_bars)
-            SetupsLib.f_register_event_auto(engine_events, SETUP_DB, true, cfg.id, tooltip_data, size_info)
+            SetupsLib.f_register_event_auto(engine_events, SETUP_DB, true, cfg.id, tooltip_data)
 
 // Reset MC visualization variables at start of each bar
 mae_viz_price := na
