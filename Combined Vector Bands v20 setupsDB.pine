@@ -4159,14 +4159,13 @@ if barstate.islast
     int current_entry_ctx = z0 < -0.5 ? 1000 : z0 > 0.5 ? 1200 : 1100
     
     string diag_text = "setupsDB Diagnostic:\n" + 
-                       "bt_setups: " + str.tostring(bt_size) + "\n" +
-                       "triggered_setups: " + str.tostring(triggered_size) + "\n" +
-                       "  IDs: " + (triggered_size > 0 ? last_triggered_ids : "none") + "\n" +
-                       "setupsdb_cache: " + str.tostring(cache_size) + "\n" +
+                       "triggered: " + str.tostring(triggered_size) + " | cache: " + str.tostring(cache_size) + "\n" +
+                       "IDs: " + (triggered_size > 0 ? last_triggered_ids : "none") + "\n" +
                        "entryCtx: " + str.tostring(current_entry_ctx) + " (z0=" + str.tostring(z0, "#.##") + ")\n" +
-                       "basket_fit: " + str.tostring(basket_fit, "#.#") + " | te_osc: " + str.tostring(te_osc, "#.#") + "\n" +
-                       "f7_burst: " + str.tostring(f7_burst_raw, "#.##") + " | mr: " + str.tostring(mr_for_setups, "#.#") + "\n" +
-                       "vec(bvz): " + str.tostring(basket_vec_z, "#.##") + " | allow_s/l: " + str.tostring(allow_short) + "/" + str.tostring(allow_long)
+                       "basket_latched: " + str.tostring(basket_latched) + " | peers: " + str.tostring(peer_count_active, "#") + " | stable: " + str.tostring(basket_stable) + "\n" +
+                       "basket_vec_z: " + str.tostring(basket_vec_z, "#.##") + " | basket_fit: " + str.tostring(basket_fit, "#.#") + "\n" +
+                       "te_osc: " + str.tostring(te_osc, "#.##") + " | mr: " + str.tostring(mr_for_setups, "#.##") + "\n" +
+                       "f7_burst: " + str.tostring(f7_burst_raw, "#.##") + " | allow_s/l: " + str.tostring(allow_short) + "/" + str.tostring(allow_long)
     label.new(bar_index, high * 1.02, diag_text, color=color.new(color.blue, 80), 
               textcolor=color.white, style=label.style_label_down, size=size.normal)
 
