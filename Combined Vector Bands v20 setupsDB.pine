@@ -2886,23 +2886,7 @@ bool allow_long = not is_falling_knife
 bool allow_short = not is_falling_knife
 
 // OLD HARDCODED SETUPS REMOVED - Now using setupsDB architecture
-// Note: setupsDB.evaluate_all() call moved after innov_band definition (line ~3280)
-
-// Process triggered setups from setupsDB
-array<SetupsLib.SetupEvent> engine_events = array.new<SetupsLib.SetupEvent>()
-if array.size(triggered_setups) > 0
-    for i = 0 to array.size(triggered_setups) - 1
-        SetupsDB.SetupConfig cfg = array.get(triggered_setups, i)
-        
-        // Direction-based cooldown check
-        int last_bar = cfg.dir == "SHORT" ? last_pred_short_bar : last_pred_long_bar
-        bool is_dir_allowed = (cfg.dir == "SHORT" and allow_short) or (cfg.dir == "LONG" and allow_long)
-        bool cooldown_ok = f_setup_cooldown_ok(cfg.id, cfg.dir, last_bar)
-        
-        if is_dir_allowed and cooldown_ok
-            // Register setup event
-            string tooltip_data = cfg.name + " | WR: " + str.tostring(cfg.wr, "#.#") + "% | Sharpe: " + str.tostring(cfg.sharpe, "#.###")
-            SetupsLib.f_register_event_auto(engine_events, SETUP_DB, true, cfg.id, tooltip_data)
+// Note: setupsDB.evaluate_all() call and processing moved after innov_band definition (line ~3280)
 
 // DEBUG REMOVED: setup_debug_code, setup_debug_mask
 
@@ -3280,11 +3264,27 @@ triggered_setups := SetupsDB.evaluate_all(
     innov_width,
     innov_width_med,
     nz(z3_dn),
-    is_smart_vwap_short_rejection,  // Correct variable name
-    is_smart_vwap_long_rejection,   // Correct variable name
+    false,  // vwap_short_rej (defined later at line ~3447)
+    false,  // vwap_long_rej (defined later at line ~3447)
     nz(squeeze_bull),
     nz(mc_knn_confidence)
 )
+
+// Process triggered setups from setupsDB
+array<SetupsLib.SetupEvent> engine_events = array.new<SetupsLib.SetupEvent>()
+if array.size(triggered_setups) > 0
+    for i = 0 to array.size(triggered_setups) - 1
+        SetupsDB.SetupConfig cfg = array.get(triggered_setups, i)
+        
+        // Direction-based cooldown check
+        int last_bar = cfg.dir == "SHORT" ? last_pred_short_bar : last_pred_long_bar
+        bool is_dir_allowed = (cfg.dir == "SHORT" and allow_short) or (cfg.dir == "LONG" and allow_long)
+        bool cooldown_ok = f_setup_cooldown_ok(cfg.id, cfg.dir, last_bar)
+        
+        if is_dir_allowed and cooldown_ok
+            // Register setup event
+            string tooltip_data = cfg.name + " | WR: " + str.tostring(cfg.wr, "#.#") + "% | Sharpe: " + str.tostring(cfg.sharpe, "#.###")
+            SetupsLib.f_register_event_auto(engine_events, SETUP_DB, true, cfg.id, tooltip_data)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MAHALANOBIS SQUEEZE CACHE (covariance matrix for 4D structural features)

@@ -745,18 +745,19 @@ export f_build_setup_db_v19(array<Family> fam) =>
     db
 
 // ═══════════════════════════════════════════════════════════════════════════
-// QUEN RECALIBRATED SETUP DATABASE — SWEEP OPTIMIZED
+// QUEN RECALIBRATED SETUP DATABASE — SWEEP OPTIMIZED (with 0.10% round-trip commission)
 // ═══════════════════════════════════════════════════════════════════════════
 // Based on parameter sweep across 8 CSV dumps (6,714 total setup fires).
+// Commission: 0.05% per side × 2 = 0.10% round-trip (Bybit/Binance market order).
 // Optimizes TP/SL/MaxHold per setup by composite score (WR% × Sharpe × RR).
 // Original f_build_setup_db_v19() left untouched above.
 //
-// Key findings:
-//   - Optimal TP is 0.30-0.50% for most setups (not 0.80% uniform)
-//   - SL varies by setup speed: -0.50 to -1.50%
-//   - MaxHold: 6 bars (S10) to 20 bars (S5/L5/S9)
-//   - WR improvements: L2 +24%, S8 +12.5%, S5 +12.1%, S1 +11.1%
-//   - Weak setups needing gate review: L6 (57.6%), V3 (69.8%), L5 (neg Sharpe)
+// Key findings (with commission):
+//   - Only S8 (Sh=0.14) and S9 (Sh=0.04) remain profitable after commission
+//   - All other setups have negative Sharpe — commission eats the small edges
+//   - Optimal TP shifts to 0.40-0.50% (wider targets to overcome friction)
+//   - SL shifts to -1.50% for most setups (tight SL gets stopped out by commission)
+//   - MaxHold shifts to 20 bars for most (longer holds to let winners develop)
 
 export f_build_setup_db_quen(array<Family> fam) =>
     array<SetupSpec> db = array.new<SetupSpec>()
