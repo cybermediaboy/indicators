@@ -854,21 +854,6 @@ export f_build_setup_db_quen(array<Family> fam) =>
     array.push(db, q75)
     array.push(db, q64)
     db
-    array.push(db, ql4)
-    array.push(db, ql5)
-    array.push(db, ql6)
-    array.push(db, ql7)
-    array.push(db, ql8)
-    array.push(db, ql9)
-    array.push(db, qv1)
-    array.push(db, qv2)
-    array.push(db, qv3)
-    array.push(db, qv4)
-    array.push(db, q81)
-    array.push(db, q73)
-    array.push(db, q75)
-    array.push(db, q64)
-    db
 
 export f_get_edge_ratio_v19(SetupSpec spec) => spec.edge_ratio
 

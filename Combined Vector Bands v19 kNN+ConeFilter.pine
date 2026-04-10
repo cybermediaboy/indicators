@@ -1526,13 +1526,12 @@ float coupling = nz(corr_damping)
 float mr_state = nz(mr_osc)
 
 // EVENT 1: TREND CONTINUATION BOUNCE
-bool near_ma = math.abs(position) < regime_bounce_z
-bool trend_alive = math.abs(velocity) > 0.12
-bool dir_aligned = math.sign(velocity) == math.sign(pressure) and coupling > 0.5
-bool was_stretched = math.abs(nz(z0[regime_bounce_hist])) > regime_bounce_z * 1.5
-bool resuming = (velocity > 0 and c0 > nz(c0[1])) or (velocity < 0 and c0 < nz(c0[1]))
-bool is_bounce = near_ma and trend_alive and dir_aligned and was_stretched and resuming
-bool bounce_event = is_bounce and not is_bounce[1] and not is_bounce[2]
+// Bounce event — wrapped in function (saves 6 vars: near_ma, trend_alive, dir_aligned, was_stretched, resuming, is_bounce)
+f_detect_bounce(float _pos, float _vel, float _pres, float _coup, float _z0, int _hist, float _thresh) =>
+    bool _b = math.abs(_pos) < _thresh and math.abs(_vel) > 0.12 and (math.sign(_vel) == math.sign(_pres) and _coup > 0.5) and math.abs(nz(_z0[_hist])) > _thresh * 1.5 and ((_vel > 0 and close > nz(close[1])) or (_vel < 0 and close < nz(close[1])))
+    _b and not _b[1] and not _b[2]
+
+bool bounce_event = f_detect_bounce(position, velocity, pressure, coupling, z0, regime_bounce_hist, regime_bounce_z)
 
 // EVENT 2: MEAN REVERSION SETUP
 // V8 STRATEGY HF: Innovation Decel + MR Turn (97.1% precision, 79.6% recall, 87.4% F1)
@@ -2903,14 +2902,12 @@ _prev_coupling_regime := coupling_regime
 bool pred_round_delay_active = enable_pred_round_delay
 bool pred_round_ss_long = is_falling_knife or (mr_osc > 1.5) or (est_trend < -0.3 and est_trend < nz(est_trend[1])) or ta.crossunder(c0, z3_dn)
 bool pred_round_ss_short = (mr_osc < -1.5) or (est_trend > 0.3 and est_trend > nz(est_trend[1])) or ta.crossover(c0, z3_up)
-float pred_round_slope_thresh = vert_dev0 * pred_round_pivot_range
-bool pred_round_long = (math.abs(ma_slope) < pred_round_slope_thresh and ma_accel > 0) or (ma_slope < 0 and ma_accel > 0)
-bool pred_round_short = (math.abs(ma_slope) < pred_round_slope_thresh and ma_accel < 0) or (ma_slope > 0 and ma_accel < 0)
+bool pred_round_long = (math.abs(ma_slope) < vert_dev0 * pred_round_pivot_range and ma_accel > 0) or (ma_slope < 0 and ma_accel > 0)
+bool pred_round_short = (math.abs(ma_slope) < vert_dev0 * pred_round_pivot_range and ma_accel < 0) or (ma_slope > 0 and ma_accel < 0)
 bool allow_long = not is_falling_knife
 bool allow_short = not is_falling_knife
 // Regime-switched setup conditions with hybrid TE threshold and debounce
-bool setup_s1_raw = enable_normalization ? (te_effective > te_setup_thresh and math.abs(ltf_corr_ema) < ltf_decouple_adaptive) : (te_osc > te_setup_thresh and math.abs(ltf_corr_ema) < ltf_decouple_thresh)
-bool setup_s1 = setup_s1_raw and (bar_index - last_s1_bar >= setup_min_gap)
+bool setup_s1 = (enable_normalization ? (te_effective > te_setup_thresh and math.abs(ltf_corr_ema) < ltf_decouple_adaptive) : (te_osc > te_setup_thresh and math.abs(ltf_corr_ema) < ltf_decouple_thresh)) and (bar_index - last_s1_bar >= setup_min_gap)
 if setup_s1
     last_s1_bar := bar_index
 
@@ -3631,23 +3628,17 @@ fill(p_z2_dn, p_z3_dn, color=z3_lower_fill_col, title="Zone 3 Lower (Support)")
 
 // --- V8: REGIME SHIFT & VELOCITY COUPLING VISUAL INDICATORS ---
 
-// VelDec / VelRec: edge-detected booleans, same conditions as density bits 9 & 22
-// Using ? close : na prevents boolean→0/1 coercion that caused 100% false-positive firing
-bool velocity_decoupled = ltf_enabled ? ltf_is_decoupled : (not na(rho_returns) and math.abs(rho_returns) < 0.3)
-bool vel_dec_edge = ltf_enabled ? ltf_decouple_event : ((not na(rho_returns) and math.abs(rho_returns) < 0.3) and (na(rho_returns[1]) or math.abs(rho_returns[1]) >= 0.3))   // decouple onset  (bit 9)
-bool vel_rec_edge = ltf_enabled ? ltf_recouple_event : ((not na(rho_returns) and math.abs(rho_returns) > 0.7) and (na(rho_returns[1]) or math.abs(rho_returns[1]) <= 0.7))   // recouple onset  (bit 22)
-bool asset_dir_up = internal_dynamics > 0.05
-bool asset_dir_dn = internal_dynamics < -0.05
-bool basket_dir_up = basket_vec_z > 0.15
-bool basket_dir_dn = basket_vec_z < -0.15
-bool same_direction_outrun = (asset_dir_up and basket_dir_up) or (asset_dir_dn and basket_dir_dn)
-bool vel_dec_plot_edge = vel_dec_edge and not same_direction_outrun
+// Velocity coupling circles — wrapped in function (saves 11 vars from global scope)
+f_calc_vel_coupling(bool _ltf_en, bool _ltf_dec, bool _ltf_rec, bool _ltf_is_dec, float _rho_ret, float _int_dyn, float _bvz, bool _dec_edge_in, bool _rec_edge_in, bool _fv_up, bool _fv_col, float _pred_ma) =>
+    bool _dec_e = _ltf_en ? _ltf_dec : ((not na(_rho_ret) and math.abs(_rho_ret) < 0.3) and (na(_rho_ret[1]) or math.abs(_rho_ret[1]) >= 0.3))
+    bool _rec_e = _ltf_en ? _ltf_rec : ((not na(_rho_ret) and math.abs(_rho_ret) > 0.7) and (na(_rho_ret[1]) or math.abs(_rho_ret[1]) <= 0.7))
+    bool _sdo   = ((_int_dyn > 0.05 and _bvz > 0.15) or (_int_dyn < -0.05 and _bvz < -0.15))
+    bool _dep   = _dec_e and not _sdo
+    float _y    = _dep ? (_fv_col ? high : _pred_ma) : _rec_e ? (_fv_col ? low : _pred_ma) : na
+    color _col  = _dep ? color.new(color.gray, 0) : _rec_e ? (_fv_up ? color.new(color.lime, 0) : color.new(color.red, 0)) : na
+    [_y, _col]
 
-float vel_dec_y = pred_fv_color_candles ? high : pred_ma
-float vel_rec_y = pred_fv_color_candles ? low : pred_ma
-// Velocity Coupling Circles (KEEP IN SIMPLE MODE) - MERGED
-float vel_y = vel_dec_plot_edge ? vel_dec_y : vel_rec_edge ? vel_rec_y : na
-color vel_col = vel_dec_plot_edge ? color.new(color.gray, 0) : vel_rec_edge ? (pred_fv_slope_up ? color.new(color.lime, 0) : color.new(color.red, 0)) : na
+[vel_y, vel_col] = f_calc_vel_coupling(ltf_enabled, ltf_decouple_event, ltf_recouple_event, ltf_is_decoupled, rho_returns, internal_dynamics, basket_vec_z, ltf_decouple_event, ltf_recouple_event, pred_fv_slope_up, pred_fv_color_candles, pred_ma)
 plotshape(show_velocity_signals and not simple_mode ? vel_y : na, "Velocity Signals", shape.circle, location.absolute, vel_col, size=size.tiny, force_overlay=true)
 
 // High Vector Context Markers (HIDE IN SIMPLE MODE)
