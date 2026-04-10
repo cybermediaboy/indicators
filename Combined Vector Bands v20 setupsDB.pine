@@ -3283,7 +3283,8 @@ int engine_event_count = array.size(engine_events)
 if engine_event_count > 0
     for i = 0 to engine_event_count - 1
         SetupsLib.SetupEvent setup_event = array.get(engine_events, i)
-        [next_pos, next_last_trigger_bar, next_mae, next_mfe, next_entry_ctx, next_fire_code] = f_fire_setup_by_id(setup_event.id, setup_event.tooltip, setup_event.size_info, last_setup_trigger_bar)
+        // setupsDB: size_info not used, data comes from setupsdb_cache
+        [next_pos, next_last_trigger_bar, next_mae, next_mfe, next_entry_ctx, next_fire_code] = f_fire_setup_by_id(setup_event.id, setup_event.tooltip, "", last_setup_trigger_bar)
         if next_fire_code != 0
             actualfiresignal := next_fire_code
         pos := next_pos
