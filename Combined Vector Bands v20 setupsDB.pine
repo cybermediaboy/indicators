@@ -4150,12 +4150,16 @@ if barstate.islast
             SetupsDB.SetupConfig c = array.get(triggered_setups, i)
             last_triggered_ids += c.id + (i < math.min(triggered_size - 1, 2) ? "," : "")
     
+    // Show current entry context
+    int current_entry_ctx = z0 < -0.5 ? 1000 : z0 > 0.5 ? 1200 : 1100
+    
     string diag_text = "setupsDB Diagnostic:\n" + 
                        "bt_setups: " + str.tostring(bt_size) + "\n" +
                        "triggered_setups: " + str.tostring(triggered_size) + "\n" +
                        "  IDs: " + (triggered_size > 0 ? last_triggered_ids : "none") + "\n" +
                        "setupsdb_cache: " + str.tostring(cache_size) + "\n" +
                        "setup_labels: " + str.tostring(label_count) + "\n" +
+                       "entryCtx: " + str.tostring(current_entry_ctx) + " (z0=" + str.tostring(z0, "#.##") + ")\n" +
                        "allow_short: " + str.tostring(allow_short) + "\n" +
                        "allow_long: " + str.tostring(allow_long) + "\n" +
                        "max_labels: 500"
