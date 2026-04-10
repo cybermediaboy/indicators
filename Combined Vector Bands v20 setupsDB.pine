@@ -3242,9 +3242,9 @@ int entry_context_code = z0 < -0.5 ? 1000 : z0 > 0.5 ? 1200 : 1100
 triggered_setups := SetupsDB.evaluate_all(
     entry_context_code,  // Entry context: 1000=LONG zone, 1100=neutral, 1200=SHORT zone
     nz(mr_for_setups),
-    nz(basket_vec_z),
-    nz(basket_vec_z),
-    burst_pct_high ? 1.0 : 0.0,  // Convert bool to float
+    nz(basket_vec_z),     // vec: peer z-score vector
+    nz(basket_fit),         // basket: 0-100 correlation score (NOT z-score)
+    nz(f7_burst_raw),       // burst: raw float burst score (NOT bool)
     nz(te_osc),
     close,
     nz(fv_cyclic_kalman),
@@ -4158,19 +4158,15 @@ if barstate.islast
     // Show current entry context (must match thresholds at line 3236)
     int current_entry_ctx = z0 < -0.5 ? 1000 : z0 > 0.5 ? 1200 : 1100
     
-    // Show oscillator values for neutral setup debugging
-    float burst_val = burst_pct_high ? 1.0 : 0.0
-    
     string diag_text = "setupsDB Diagnostic:\n" + 
                        "bt_setups: " + str.tostring(bt_size) + "\n" +
                        "triggered_setups: " + str.tostring(triggered_size) + "\n" +
                        "  IDs: " + (triggered_size > 0 ? last_triggered_ids : "none") + "\n" +
                        "setupsdb_cache: " + str.tostring(cache_size) + "\n" +
-                       "setup_labels: " + str.tostring(label_count) + "\n" +
                        "entryCtx: " + str.tostring(current_entry_ctx) + " (z0=" + str.tostring(z0, "#.##") + ")\n" +
-                       "te_osc: " + str.tostring(te_osc, "#.#") + " | basket: " + str.tostring(basket_vec_z, "#") + "\n" +
-                       "burst: " + str.tostring(burst_val, "#.#") + " | mr: " + str.tostring(mr_for_setups, "#.#") + "\n" +
-                       "allow_short: " + str.tostring(allow_short) + " | allow_long: " + str.tostring(allow_long)
+                       "basket_fit: " + str.tostring(basket_fit, "#.#") + " | te_osc: " + str.tostring(te_osc, "#.#") + "\n" +
+                       "f7_burst: " + str.tostring(f7_burst_raw, "#.##") + " | mr: " + str.tostring(mr_for_setups, "#.#") + "\n" +
+                       "vec(bvz): " + str.tostring(basket_vec_z, "#.##") + " | allow_s/l: " + str.tostring(allow_short) + "/" + str.tostring(allow_long)
     label.new(bar_index, high * 1.02, diag_text, color=color.new(color.blue, 80), 
               textcolor=color.white, style=label.style_label_down, size=size.normal)
 

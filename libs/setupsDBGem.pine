@@ -89,12 +89,14 @@ export evaluate_all(
     // =================================================================
 
     // 9. N_TE_Short: Transfer Entropy driven short in neutral zone
-    bool n_te_short = valid_data and (entryCtx == 1100) and (te > 4.0) and (basket > 50) and (burst > 1.0) and not vwapShortActive
+    // basket: 0-100 scale (basket_fit), burst: f7_burst_raw float
+    bool n_te_short = valid_data and (entryCtx == 1100) and (te > 3.0) and (basket > 30) and (burst > 0.5) and not vwapShortActive
     if n_te_short
         active.push(SetupConfig.new("N_TE_S", "N_TE_Short", "SHORT", 0.04, 0.012, 12, 52.0, 0.15, true))
-
+    
     // 10. N_TE_Long: Transfer Entropy driven long in neutral zone  
-    bool n_te_long = valid_data and (entryCtx == 1100) and (te > 4.0) and (basket > 50) and (burst < -1.0) and not vwapLongActive
+    // basket: 0-100 scale (basket_fit), burst: f7_burst_raw float
+    bool n_te_long = valid_data and (entryCtx == 1100) and (te > 3.0) and (basket > 30) and (burst < -0.5) and not vwapLongActive
     if n_te_long
         active.push(SetupConfig.new("N_TE_L", "N_TE_Long", "LONG", 0.04, 0.012, 12, 52.0, 0.15, true))
 
