@@ -44,13 +44,15 @@ export evaluate_all(
     if s11
         active.push(SetupConfig.new("S11", "S11_Cyclic_Div", "SHORT", 0.06, 0.015, 16, 48.2, -0.013, true))
 
-    // 2. S3_Sniper: Deep Reversion (MR < -0.2, VEC < -7) + Quiet Market + Not at support
-    bool s3 = valid_data and (entryCtx == 1200) and (mr < -0.2) and (vec < -7.0) and not (((close_price - innL) / close_price) < 0.01) and (burst < 0.5)
+    // 2. S3_Sniper: Deep Reversion (MR < -0.2, VEC bearish) + Quiet Market + Not at support
+    // vec = basket_vec_z, range ~[-3, 3], threshold adjusted from -7.0 to -1.0
+    bool s3 = valid_data and (entryCtx == 1200) and (mr < -0.2) and (vec < -1.0) and not (((close_price - innL) / close_price) < 0.01) and (burst < 0.5)
     if s3
         active.push(SetupConfig.new("S3", "S3_MR_VEC_Sniper", "SHORT", 0.06, 0.015, 16, 54.0, 0.267, true))
 
     // 3. S_Inn_Contraction: Volatility Squeeze Breakout (Peak Momentum Only)
-    bool s_inn = valid_data and (entryCtx == 1200) and (innWidth < innWidthMed) and not vwapShortActive and (burst > 2.0)
+    // burst = f7_burst_raw, threshold adjusted from 2.0 to 0.5
+    bool s_inn = valid_data and (entryCtx == 1200) and (innWidth < innWidthMed) and not vwapShortActive and (burst > 0.5)
     if s_inn
         active.push(SetupConfig.new("S_Inn", "S_Inn_Contraction", "SHORT", 0.06, 0.015, 16, 50.7, 0.073, true))
 
@@ -65,7 +67,8 @@ export evaluate_all(
         active.push(SetupConfig.new("S8", "S8_BURST", "SHORT", 0.06, 0.015, 16, 44.0, 0.004, true))
 
     // 6. S4_Basket: Highly Correlated Breakout (Peak Momentum Only)
-    bool s4 = valid_data and (entryCtx == 1200) and (basket > 70) and not (te >= 4.0) and (burst > 2.0)
+    // burst = f7_burst_raw, threshold adjusted from 2.0 to 0.5
+    bool s4 = valid_data and (entryCtx == 1200) and (basket > 70) and not (te >= 4.0) and (burst > 0.5)
     if s4
         active.push(SetupConfig.new("S4", "S4_Basket", "SHORT", 0.06, 0.015, 16, 48.5, 0.025, true))
 
@@ -74,14 +77,21 @@ export evaluate_all(
     // =================================================================
 
     // 7. L6_Neutral_Bounce: Standard Bounce + Machine Learning Filter (Conf >= 98)
-    bool l6 = valid_data and (entryCtx == 1000) and (mr > 1.5) and (vec < -5.0) and not vwapLongActive and (knnConf >= 98.0)
+    // vec = basket_vec_z range ~[-3,3], threshold adjusted from -5.0 to -1.0
+    bool l6 = valid_data and (entryCtx == 1000) and (mr > 1.5) and (vec < -1.0) and not vwapLongActive and (knnConf >= 98.0)
     if l6
         active.push(SetupConfig.new("L6", "L6_Neutral_AI", "LONG", 0.08, 0.015, 24, 44.0, 0.153, true))
 
     // 8. L_Inn_Expansion: Deep Capitulation Volatility Breakout
-    bool l_inn = valid_data and (entryCtx == 1000) and (mr > 1.5) and (vec < -5.0) and (innWidth > innWidthMed) and not (close_price < cyclicFV) and (burst < -2.0)
+    // vec threshold adjusted from -5.0 to -1.0, burst from -2.0 to -0.5
+    bool l_inn = valid_data and (entryCtx == 1000) and (mr > 1.5) and (vec < -1.0) and (innWidth > innWidthMed) and not (close_price < cyclicFV) and (burst < -0.5)
     if l_inn
         active.push(SetupConfig.new("L_Exp", "L_Inn_Expansion", "LONG", 0.08, 0.015, 24, 63.4, 0.459, true))
+
+    // 9. L8_BURST: LONG mirror of S8 — oversold impulse + valid correlation (no entryCtx gate)
+    bool l8 = valid_data and (burst != 0) and (mr > 0.3) and not (basket < 30)
+    if l8
+        active.push(SetupConfig.new("L8", "L8_BURST", "LONG", 0.08, 0.015, 24, 44.0, 0.004, true))
 
     // =================================================================
     // 3. NEUTRAL ZONE SETUPS (entryCtx == 1100, z0 ∈ [-0.5, 0.5])
