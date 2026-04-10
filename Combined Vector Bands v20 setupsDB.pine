@@ -2881,7 +2881,6 @@ bool allow_long = not is_falling_knife
 bool allow_short = not is_falling_knife
 
 // Gather all oscillator data for setupsDB.evaluate_all()
-int entry_ctx = z0  // Using z0 as entry context proxy (1000/1100/1200 mapping needed)
 float innov_width = innov_band_upper - innov_band_lower
 float innov_width_med = ta.median(innov_width, 50)
 // OLD HARDCODED SETUPS REMOVED - Now using setupsDB architecture
@@ -2889,7 +2888,7 @@ float innov_width_med = ta.median(innov_width, 50)
 // Call setupsDB to evaluate all active setups this bar
 var array<SetupsDB.SetupConfig> triggered_setups = na
 triggered_setups := SetupsDB.evaluate_all(
-    int(z0 * 1200),
+    int(z0 * 1200),  // Entry context: map z0 to 1000/1100/1200 codes
     nz(mr_for_setups),
     nz(basket_vec_z),
     nz(basket_vec_z),
