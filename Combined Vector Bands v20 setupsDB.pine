@@ -2877,38 +2877,16 @@ _prev_coupling_regime := coupling_regime
 // ═══════════════════════════════════════════════════════════════════════════
 // DATA-DRIVEN SETUP ROUTING (setupsDB Architecture)
 // ═══════════════════════════════════════════════════════════════════════════
+// Pred round detection (used in bitfield diagnostics)
+bool pred_round_long = (math.abs(ma_slope) < vert_dev0 * pred_round_pivot_range and ma_accel > 0) or (ma_slope < 0 and ma_accel > 0)
+bool pred_round_short = (math.abs(ma_slope) < vert_dev0 * pred_round_pivot_range and ma_accel < 0) or (ma_slope > 0 and ma_accel < 0)
+int cooldown_bars = 15  // Display value for info table
+
 bool allow_long = not is_falling_knife
 bool allow_short = not is_falling_knife
 
-// Gather all oscillator data for setupsDB.evaluate_all()
-float innov_width = innov_band_upper - innov_band_lower
-float innov_width_med = ta.median(innov_width, 50)
 // OLD HARDCODED SETUPS REMOVED - Now using setupsDB architecture
-
-// Call setupsDB to evaluate all active setups this bar
-var array<SetupsDB.SetupConfig> triggered_setups = na
-triggered_setups := SetupsDB.evaluate_all(
-    int(z0 * 1200),  // Entry context: map z0 to 1000/1100/1200 codes
-    nz(mr_for_setups),
-    nz(basket_vec_z),
-    nz(basket_vec_z),
-    nz(burst_pct_val),
-    nz(te_osc),
-    close,
-    nz(fv_cyclic_kalman),
-    nz(ma0),
-    nz(pred_vec_ma),
-    nz(PhiTotal_orth),
-    nz(innov_band_lower),
-    nz(innov_band_upper),
-    innov_width,
-    innov_width_med,
-    nz(z3_dn),
-    vwap_short_rej_active,
-    vwap_long_rej_active,
-    nz(squeeze_bull),
-    nz(mc_knn_confidence)
-)
+// Note: setupsDB.evaluate_all() call moved after innov_band definition (line ~3280)
 
 // Process triggered setups from setupsDB
 array<SetupsLib.SetupEvent> engine_events = array.new<SetupsLib.SetupEvent>()
@@ -3277,6 +3255,36 @@ else if innov_band_dev_type == "ATR"
 float final_innov_mult = innov_band_mult
 float innov_band_upper = fast_ma + (fast_dev * final_innov_mult)
 float innov_band_lower = fast_ma - (fast_dev * final_innov_mult)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SETUP DATABASE EVALUATION (after innov_band definition)
+// ═══════════════════════════════════════════════════════════════════════════
+float innov_width = innov_band_upper - innov_band_lower
+float innov_width_med = ta.median(innov_width, 50)
+
+var array<SetupsDB.SetupConfig> triggered_setups = na
+triggered_setups := SetupsDB.evaluate_all(
+    int(z0 * 1200),  // Entry context: map z0 to 1000/1100/1200 codes
+    nz(mr_for_setups),
+    nz(basket_vec_z),
+    nz(basket_vec_z),
+    nz(burst_pct_high),  // Correct variable name
+    nz(te_osc),
+    close,
+    nz(fv_cyclic_kalman),
+    nz(ma0),
+    nz(pred_ma),  // Correct variable name
+    nz(PhiTotal_orth),
+    nz(innov_band_lower),
+    nz(innov_band_upper),
+    innov_width,
+    innov_width_med,
+    nz(z3_dn),
+    is_smart_vwap_short_rejection,  // Correct variable name
+    is_smart_vwap_long_rejection,   // Correct variable name
+    nz(squeeze_bull),
+    nz(mc_knn_confidence)
+)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MAHALANOBIS SQUEEZE CACHE (covariance matrix for 4D structural features)
