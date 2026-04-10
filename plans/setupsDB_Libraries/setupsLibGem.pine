@@ -1,0 +1,262 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0
+//@version=5
+library("SetupsLibGem")
+
+// =====================================================================
+// SECTION: SHORT-1 OPTIMIZED CONSTANTS
+// =====================================================================
+export get_s1_ctx1200(series int ctx) =>
+    ctx == 1200
+
+export get_s2_mr(series int ctx, series float mr) =>
+    ctx == 1200 and mr < -0.1
+
+export get_s3_mr_vec(series int ctx, series float mr, series float vec) =>
+    ctx == 1200 and mr < -0.2 and vec < -7
+
+export get_s4_basket(series int ctx, series float basket) =>
+    ctx == 1200 and basket > 70
+
+export get_s5_full(series int ctx, series float mr, series float vec, series float basket) =>
+    ctx == 1200 and mr < -0.2 and vec < -7 and basket > 80
+
+// =====================================================================
+// SECTION: DEBUG OVERLAY
+// =====================================================================
+export debug_overlay(series bool show_debug, series int ctx, series float mr, series float vec, series float basket) =>
+    if show_debug
+        var table dbg = table.new(position.bottom_right, 2, 5, bgcolor=color.new(color.black, 80), border_color=color.gray, border_width=1)
+        table.cell(dbg, 0, 0, "Variable", text_color=color.white)
+        table.cell(dbg, 1, 0, "Value", text_color=color.white)
+        table.cell(dbg, 0, 1, "Context", text_color=color.white)
+        table.cell(dbg, 1, 1, str.tostring(ctx), text_color=color.white)
+        table.cell(dbg, 0, 2, "MR", text_color=color.white)
+        table.cell(dbg, 1, 2, str.tostring(mr), text_color=color.white)
+        table.cell(dbg, 0, 3, "VEC", text_color=color.white)
+        table.cell(dbg, 1, 3, str.tostring(vec), text_color=color.white)
+        table.cell(dbg, 0, 4, "BasketFit", text_color=color.white)
+        table.cell(dbg, 1, 4, str.tostring(basket), text_color=color.white)
+
+// =====================================================================
+// SECTION: GROUP 2 OPTIMIZED CONSTANTS
+// =====================================================================
+// S7: LTF < x (Оптимизация показала, что все бары в ctx=1200 уже имеют LTF < -3.0, порог не влияет)
+export get_s7_ltf(series int ctx, series float ltf) =>
+    ctx == 1200 and ltf < -2.0
+
+// S8: BURST short (Оптимизация: MR < -0.3 дает лучший баланс Sharpe/PnL)
+export get_s8_burst(series int burst, series float mr) =>
+    burst != 0 and mr < -0.3
+
+// L1: Baseline ctx=1100
+export get_l1_ctx1100(series int ctx) =>
+    ctx == 1100
+
+// L2: ctx1100 + MR > 0.7 (Наименее убыточный в текущем датасете)
+export get_l2_mr(series int ctx, series float mr) =>
+    ctx == 1100 and mr > 0.7
+
+// =====================================================================
+// SECTION: GROUP 3 OPTIMIZED CONSTANTS
+// =====================================================================
+// L3: ctx1100 + MR > 1.2 + LTF > 1.0
+export get_l3_mr_ltf(series int ctx, series float mr, series float ltf) =>
+    ctx == 1100 and mr > 1.2 and ltf > 1.0
+
+// L4: ctx1100 + VWAPRejLong
+export get_l4_vwap(series int ctx, series float vwapLong) =>
+    ctx == 1100 and not na(vwapLong)
+
+// L5: ctx1100 + MR > 0.8 + Basket > 75 (Наименее убыточный)
+export get_l5_mr_basket(series int ctx, series float mr, series float basket) =>
+    ctx == 1100 and mr > 0.8 and basket > 75
+
+// L6: Neutral Bounce: ctx1000 + MR > 1.5 + VEC < -5 (Прибыльный лонг)
+export get_l6_neutral_bounce(series int ctx, series float mr, series float vec) =>
+    ctx == 1000 and mr > 1.5 and vec < -5
+
+// L7: BURST Long: MR > 0.2
+export get_l7_burst(series int burst, series float mr) =>
+    burst != 0 and mr > 0.2
+
+// Updated L7: BURST Long with Optimal Filter (VEC < -6)
+// This filter drastically improves Sharpe (4x) and Total PnL (2x) while cutting noisy signals
+export get_l7_burst_optimized(series int burst, series float mr, series float vec) =>
+    burst != 0 and mr > 0.2 and vec < -6.0
+
+// L7 Super-Optimized BURST Long (Ctx=1000 + VEC < -6 + MR > 0.5)
+// Achieves maximum WR and PnL efficiency for BURST signals
+export get_l7_burst_super(series int burst, series float mr, series float vec, series int ctx) =>
+    burst != 0 and mr > 0.5 and vec < -6.0 and ctx == 1000
+
+// =====================================================================
+// SECTION: SPATIAL FILTERS (RARE & HIGH QUALITY)
+// =====================================================================
+// S9_Spatial: Short Overbought Innovation + Target Pull
+// High precision short setup filtering out noise by entering only when price pierces 
+// Innovation Band Upper while remaining above the PhiLatch Reversal Target
+export get_s9_spatial(series int ctx, series float high_price, series float close_price, series float innUpper, series float phiLatch) =>
+    ctx == 1200 and high_price >= innUpper and close_price > phiLatch
+
+// L9_Spatial: Long Oversold Innovation + Target Pull
+// Precision long bounce triggered when price pierces the Innovation Band Lower
+// and has room to grow towards PhiLatch Target
+export get_l9_spatial(series int ctx, series float low_price, series float close_price, series float innLower, series float phiLatch) =>
+    (ctx == 1000 or ctx == 1100) and low_price <= innLower and close_price < phiLatch
+
+// L10_Spatial: Neutral Trend Alignment
+// Early trend capture: Neutral context (1000) breaking above both Baseline and Vector MAs
+export get_l10_spatial(series int ctx, series float close_price, series float baseMA, series float vecMA) =>
+    ctx == 1000 and close_price > baseMA and close_price > vecMA
+
+// =====================================================================
+// SECTION: GROUP 4 (DIVERGENCES & CORRELATION)
+// =====================================================================
+// S11_Cyclic: Short when price is overextended above Cyclic Fair Value
+export get_s11_cyclic_div(series int ctx, series float close_price, series float cyclicFV) =>
+    ctx == 1200 and close_price > cyclicFV
+
+// L12_PhiTotal: Long when price is below PhiTotal Orthogonal Target
+export get_l12_phitotal_pull(series int ctx, series float close_price, series float phiTotal) =>
+    (ctx == 1000 or ctx == 1100) and close_price < phiTotal
+
+// L13_Corr_MR: Long on severe correlation breakdown coupled with Mean Reversion
+export get_l13_corr_mr(series int ctx, series float corr, series float mr) =>
+    (ctx == 1000 or ctx == 1100) and corr < -7.0 and mr > 1.0
+
+// =====================================================================
+// SECTION: SHOWSTOPPERS (HARD FILTERS)
+// =====================================================================
+// SS_Short: Blocks short trades if SqueezeBull is active, VWAP Long rejection is present, or BasketFit is extremely low (<30)
+export get_showstopper_short(series float squeezeBull, series float vwapLong, series float basket) =>
+    na(squeezeBull) and na(vwapLong) and basket > 30
+
+// SS_Long: Blocks long trades if VWAP Short rejection is present or Density is too high (congestion)
+export get_showstopper_long(series float vwapShort, series float density) =>
+    na(vwapShort) and density < 8000
+
+// =====================================================================
+// SECTION: VOLATILITY & BAND PROXIMITY FILTERS
+// =====================================================================
+// S_Far_InnU: Short only when price is relatively far (>2%) from Innovation Upper
+// Avoids getting squeezed during tight band walking
+export get_s_far_innu(series int ctx, series float close_price, series float innU) =>
+    ctx == 1200 and ((innU - close_price) / close_price) > 0.02
+
+// L_Inn_Contraction: Long Neutral Bounce is safer during volatility contraction
+// Median width varies by asset, typically requires dynamic calculation in script
+export get_l_inn_contraction(series int ctx, series float mr, series float vec, series float innWidth, series float innWidthMed) =>
+    ctx == 1000 and mr > 1.5 and vec < -5 and innWidth < innWidthMed
+
+// =====================================================================
+// SECTION: MACHINE LEARNING & EARLY EXITS (KNN / EXIT CTX)
+// =====================================================================
+// KNN_High_Conf_Short: Short only when kNN AI module confidence is > 98%
+export get_knn_conf_short(series int ctx, series float knnPack) =>
+    float conf = na(knnPack) ? na : (knnPack / 100000000) // Rough approximation for 10 digit int
+    ctx == 1200 and conf >= 98.0
+
+// Safe_Short_ExitCtx: Only short when Exit Context does not equal 100 (Reversal warning)
+export get_safe_short_exitctx(series int entryCtx, series int exitCtx) =>
+    entryCtx == 1200 and exitCtx != 100
+
+// =====================================================================
+// SECTION: INDIVIDUAL SETUP CONSTRAINTS (SHOWSTOPPERS)
+// =====================================================================
+
+// Blocks S1 if the asset is completely decoupled from the market (BasketFit < 30)
+export block_s1_decoupled(series float basket) =>
+    basket < 30
+
+// Blocks S2 if price has already dropped below its Cyclic Fair Value
+export block_s2_below_fv(series float close_price, series float cyclicFV) =>
+    close_price < cyclicFV
+
+// Blocks S3 if price is dangerously close (<1%) to the lower Innovation Band
+export block_s3_band_proximity(series float close_price, series float innL) =>
+    (close_price - innL) / close_price < 0.01
+
+// Blocks S4 (high correlation short) if Trend Exhaustion (TE) is >= 4.0
+export block_s4_te_exhausted(series float te) =>
+    te >= 4.0
+
+// Blocks L6 (Neutral Bounce) if there is an active VWAP Short Rejection signal
+export block_l6_vwap_short(series float vwapShort) =>
+    not na(vwapShort)
+
+// Blocks L7 (BURST) if price is dangerously close (<1%) to upper Innovation Band resistance
+export block_l7_innu_resistance(series float close_price, series float innU) =>
+    (innU - close_price) / close_price < 0.01
+
+// =====================================================================
+// SECTION: INDIVIDUAL SETUP CONSTRAINTS (GROUP 3)
+// =====================================================================
+
+// Blocks S_Trapped_MA if price is dangerously close (<2%) to the extreme Zone 3 Lower
+export block_strapped_z3_proximity(series float close_price, series float z3L) =>
+    (close_price - z3L) / close_price < 0.02
+
+// Blocks S11_Cyclic_Div if Volatility is Expanding (shorting divergences is safer in quiet markets)
+export block_s11_vol_expansion(series float innWidth, series float innWidthMed) =>
+    innWidth > innWidthMed
+
+// Blocks L_Inn_Expansion if price is above Cyclic Fair Value (don't long tops in bear markets)
+export block_linn_above_fv(series float close_price, series float cyclicFV) =>
+    close_price > cyclicFV
+
+// Blocks L9_Combo_Rare if there is an active VWAP Short Rejection
+export block_l9_vwap_short(series float vwapShort) =>
+    not na(vwapShort)
+
+// =====================================================================
+// SECTION: INDIVIDUAL SETUP CONSTRAINTS (GROUP 4 - FINAL)
+// =====================================================================
+
+// Blocks S8_BURST if price is dangerously close to lower Innovation Band
+export block_s8_innl_proximity(series float close_price, series float innL) =>
+    (close_price - innL) / close_price < 0.01
+
+// Blocks S_kNN_98 if Trend Exhaustion (TE) >= 4.0 
+export block_sknn_te_exhausted(series float te) =>
+    te >= 4.0
+
+// Blocks L13_CORR_Break if Volatility is Contracting (Wait for expansion to buy the dip)
+export block_l13_vol_contraction(series float innWidth, series float innWidthMed) =>
+    innWidth < innWidthMed
+
+// =====================================================================
+// SECTION: FRICTION-ADJUSTED MACRO & MOMENTUM FILTERS
+// =====================================================================
+
+// Friction-adjusted filter for all SHORT breakouts: Block if upward momentum (BURST) is too high (> 0.5)
+export block_short_burst_friction(series float burst) =>
+    burst >= 0.5
+
+// =====================================================================
+// SECTION: FRICTION-ADJUSTED MACRO & MOMENTUM FILTERS (LONGS)
+// =====================================================================
+
+// Friction-adjusted filter for LONG bounces: Block if downward momentum (BURST) is too extreme (< -1.0)
+// Prevents catching literal falling knives during crashes
+export block_long_burst_friction(series float burst) =>
+    burst <= -1.0
+
+// =====================================================================
+// SECTION: PEAK / SQUEEZE FILTERS FOR NOISY SETUPS
+// =====================================================================
+
+// Peak filter for SHORT: Allow noisy short setups only if BURST is exceptionally high (> 2.0)
+export get_peak_burst_short(series float burst) =>
+    burst > 2.0
+
+// Safe filter for Divergences (Short): Allow ONLY if BURST is quiet (< 0.5)
+export get_quiet_burst_short(series float burst) =>
+    burst < 0.5
+
+// Peak filter for LONG: Allow noisy long setups only if BURST is an extreme capitulation (< -2.0)
+export get_peak_burst_long(series float burst) =>
+    burst < -2.0
+
+// Peak Squeeze filter for LONG: Allow only if bullish squeeze is mathematically extreme (> 10.0)
+export get_peak_squeeze_long(series float squeezeBull) =>
+    squeezeBull > 10.0

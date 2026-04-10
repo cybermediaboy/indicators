@@ -1,0 +1,81 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © cybermediaboy
+
+//@version=6
+// @description Setups Database: GEM Version (Market Orders, 0.15% Friction)
+library("setupsDBGem", overlay = true)
+
+// =====================================================================
+// UDT: Setup Contract
+// =====================================================================
+export type SetupConfig
+    string id
+    string name
+    string dir
+    float tp_pct
+    float sl_pct
+    int hold_bars
+    float wr
+    float sharpe
+    bool is_active
+
+// =====================================================================
+// EVALUATE ALL SETUPS (MASTER FUNCTION)
+// =====================================================================
+export evaluate_all(
+      int entryCtx, float mr, float vec, float basket, float burst, float te, 
+      float close_price, float cyclicFV, float baseMA, float predVecMA, float phiTotal, 
+      float innL, float innU, float innWidth, float innWidthMed, float z3L, 
+      bool vwapShortActive, bool vwapLongActive, float squeezeBull, float knnConf
+ ) =>
+    array<SetupConfig> active = array.new<SetupConfig>()
+
+    // =================================================================
+    // 1. SHORT SETUPS (Market Profile: TP=6%, SL=1.5%, H=16)
+    // =================================================================
+
+    // 1. S11_Cyclic_Div: Price > Fair Value (Quiet Market Only)
+    bool s11 = (entryCtx == 1200) and (close_price > cyclicFV) and not (innWidth > innWidthMed) and (burst < 0.5)
+    if s11
+        active.push(SetupConfig.new("S11", "S11_Cyclic_Div", "SHORT", 0.06, 0.015, 16, 48.2, -0.013, true))
+
+    // 2. S3_Sniper: Deep Reversion (MR < -0.2, VEC < -7) + Quiet Market + Not at support
+    bool s3 = (entryCtx == 1200) and (mr < -0.2) and (vec < -7.0) and not (((close_price - innL) / close_price) < 0.01) and (burst < 0.5)
+    if s3
+        active.push(SetupConfig.new("S3", "S3_MR_VEC_Sniper", "SHORT", 0.06, 0.015, 16, 54.0, 0.267, true))
+
+    // 3. S_Inn_Contraction: Volatility Squeeze Breakout (Peak Momentum Only)
+    bool s_inn = (entryCtx == 1200) and (innWidth < innWidthMed) and not vwapShortActive and (burst > 2.0)
+    if s_inn
+        active.push(SetupConfig.new("S_Inn", "S_Inn_Contraction", "SHORT", 0.06, 0.015, 16, 50.7, 0.073, true))
+
+    // 4. S_Trapped_MA: Trapped between BaseMA and PredVecMA (Quiet Market)
+    bool s_trap = (entryCtx == 1200) and (close_price < baseMA) and (close_price > predVecMA) and not (close_price < cyclicFV) and (burst < 0.5)
+    if s_trap
+        active.push(SetupConfig.new("S_Trap", "S_Trapped_MA", "SHORT", 0.06, 0.015, 16, 51.2, 0.113, true))
+
+    // 5. S8_BURST: Impulse momentum + Valid Correlation
+    bool s8 = (burst != 0) and (mr < -0.3) and not (basket < 30)
+    if s8
+        active.push(SetupConfig.new("S8", "S8_BURST", "SHORT", 0.06, 0.015, 16, 44.0, 0.004, true))
+
+    // 6. S4_Basket: Highly Correlated Breakout (Peak Momentum Only)
+    bool s4 = (entryCtx == 1200) and (basket > 70) and not (te >= 4.0) and (burst > 2.0)
+    if s4
+        active.push(SetupConfig.new("S4", "S4_Basket", "SHORT", 0.06, 0.015, 16, 48.5, 0.025, true))
+
+    // =================================================================
+    // 2. LONG SETUPS (Market Profile: TP=8%, SL=1.5%, H=24)
+    // =================================================================
+
+    // 7. L6_Neutral_Bounce: Standard Bounce + Machine Learning Filter (Conf >= 98)
+    bool l6 = (entryCtx == 1000) and (mr > 1.5) and (vec < -5.0) and not vwapLongActive and (knnConf >= 98.0)
+    if l6
+        active.push(SetupConfig.new("L6", "L6_Neutral_AI", "LONG", 0.08, 0.015, 24, 44.0, 0.153, true))
+
+    // 8. L_Inn_Expansion: Deep Capitulation Volatility Breakout
+    bool l_inn = (entryCtx == 1000) and (mr > 1.5) and (vec < -5.0) and (innWidth > innWidthMed) and not (close_price < cyclicFV) and (burst < -2.0)
+    if l_inn
+        active.push(SetupConfig.new("L_Exp", "L_Inn_Expansion", "LONG", 0.08, 0.015, 24, 63.4, 0.459, true))
+
+    active
