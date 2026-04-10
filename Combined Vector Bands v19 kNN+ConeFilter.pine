@@ -557,10 +557,7 @@ float sc08 = request.security("BINANCE:APTUSDT", timeframe.period, close)
 float sc09 = request.security("BINANCE:TONUSDT", timeframe.period, close)
 float sc10 = request.security("BINANCE:AVAXUSDT", timeframe.period, close)
 
-// Calculate correlation scores via function (saves ~100 global variables)
-float base_ret_scan = ta.roc(c0, 1)
-int corr_smooth_len = math.max(3, int(math.round(fit_eval_len * 0.25)))
-
+// Basket scan: inline 3 temporaries into calls (saves base_ret_scan, corr_smooth_len, basket_scan_history, scan_prices = 4 vars)
 var scan_symbols = array.new<string>(10)
 array.set(scan_symbols, 0, "BINANCE:BTCUSDT")
 array.set(scan_symbols, 1, "BINANCE:ETHUSDT")
@@ -573,13 +570,8 @@ array.set(scan_symbols, 7, "BINANCE:APTUSDT")
 array.set(scan_symbols, 8, "BINANCE:TONUSDT")
 array.set(scan_symbols, 9, "BINANCE:AVAXUSDT")
 
-array<float> scan_prices = array.from(sc01, sc02, sc03, sc04, sc05, sc06, sc07, sc08, sc09, sc10)
-var scan_scores = BasketLib.f_calc_scan_correlation_scores(base_ret_scan, scan_prices, scan_symbols,
-                                                            fit_eval_len, corr_smooth_len, current_base)
-
-// Auto Scan Pipeline - moved to BasketLib to reduce compiler vars
-int basket_scan_history = math.max(fit_eval_len * 3, len_z * 3)
-bool basket_scan_ready = bar_index >= basket_scan_history
+var scan_scores = BasketLib.f_calc_scan_correlation_scores(ta.roc(c0, 1), array.from(sc01, sc02, sc03, sc04, sc05, sc06, sc07, sc08, sc09, sc10), scan_symbols, fit_eval_len, math.max(3, int(math.round(fit_eval_len * 0.25))), current_base)
+bool basket_scan_ready = bar_index >= math.max(fit_eval_len * 3, len_z * 3)
 
 var int scan_idx_1 = 1  // Default: ETH (scan_02)
 var int scan_idx_2 = 2  // Default: SOL (scan_03)
@@ -696,25 +688,16 @@ float v_sum = (is_self1 ? 0.0 : v1) + (is_self2 ? 0.0 : v2) + (is_self3 ? 0.0 : 
 float peer_count_active = (is_self1 ? 0.0 : 1.0) + (is_self2 ? 0.0 : 1.0) + (is_self3 ? 0.0 : 1.0) + (is_self4 ? 0.0 : 1.0)
 basket_vec_z_raw = peer_count_active > 0 ? v_sum / peer_count_active : 0.0
 
-// For TE: extract raw z-scores from basket assets
-float z1_raw = 0.0
-float z2_raw = 0.0
-float z3_raw = 0.0
-float z4_raw = 0.0
-// REMOVED: z5_raw
-float ma1 = ta.sma(c1, len_z)
-float dev1 = ta.stdev(c1, len_z)
-z1_raw := dev1 == 0 ? 0 : (c1 - ma1) / dev1
-float ma2 = ta.sma(c2, len_z)
-float dev2 = ta.stdev(c2, len_z)
-z2_raw := dev2 == 0 ? 0 : (c2 - ma2) / dev2
-float ma3 = ta.sma(c3, len_z)
-float dev3 = ta.stdev(c3, len_z)
-z3_raw := dev3 == 0 ? 0 : (c3 - ma3) / dev3
-float ma4 = ta.sma(c4, len_z)
-float dev4 = ta.stdev(c4, len_z)
-z4_raw := dev4 == 0 ? 0 : (c4 - ma4) / dev4
-// REMOVED: z5_raw calculation
+// Peer z-scores — wrapped in function (saves 8 vars: ma1-4, dev1-4)
+f_calc_peer_zscores(float _c1, float _c2, float _c3, float _c4, int _len) =>
+    float _m1 = ta.sma(_c1, _len), float _d1 = ta.stdev(_c1, _len)
+    float _m2 = ta.sma(_c2, _len), float _d2 = ta.stdev(_c2, _len)
+    float _m3 = ta.sma(_c3, _len), float _d3 = ta.stdev(_c3, _len)
+    float _m4 = ta.sma(_c4, _len), float _d4 = ta.stdev(_c4, _len)
+    [_d1 == 0 ? 0.0 : (_c1 - _m1) / _d1, _d2 == 0 ? 0.0 : (_c2 - _m2) / _d2,
+     _d3 == 0 ? 0.0 : (_c3 - _m3) / _d3, _d4 == 0 ? 0.0 : (_c4 - _m4) / _d4]
+
+[z1_raw, z2_raw, z3_raw, z4_raw] = f_calc_peer_zscores(c1, c2, c3, c4, len_z)
 
 TAUtilityLib.f_push_limited(te_primary_returns, r0, te_max_size)
 TAUtilityLib.f_push_limited(te_basket_returns_1, r1, te_max_size)
@@ -1727,38 +1710,31 @@ float f6_phi_raw = PhiLatch - PhiTotal_orth
 // Phi divergence score for squeeze throat detector
 [phi_div_score, phi_onset, phi_spread, phi_div_accel] = TAUtilityLib.f_phi_divergence_score(PhiLatch, PhiTotal_orth, 5, 3)
 
-// Z-normalize PhiDiv for L9/S12 setup robustness (200-bar window per research)
-float phi_div_mean = ta.sma(f6_phi_raw, 200)
-float phi_div_std = math.max(ta.stdev(f6_phi_raw, 200), 0.01)
-float phi_div_z = (f6_phi_raw - phi_div_mean) / phi_div_std
+// Z-normalize PhiDiv — inline mean/std (saves 2 vars)
+float phi_div_z = (f6_phi_raw - ta.sma(f6_phi_raw, 200)) / math.max(ta.stdev(f6_phi_raw, 200), 0.01)
 
-// --- F7: BurstScore (3-path composite burst detector) ---
-float _burst_atr_fast = ta.atr(14)
-float _burst_atr_slow = ta.sma(_burst_atr_fast, 50)
-float innov_squeeze = math.max(0.0, 1.0 - _burst_atr_fast / math.max(_burst_atr_slow, syminfo.mintick))
-// phi_div_accel now returned from f_phi_divergence_score above
+// --- F7: BurstScore — wrapped in function (saves 14 vars from global scope) ---
+f_calc_burst_score(float _mr_osc, float _pred_ma, float _vdev0, float _z3u, float _z3d, float _vec_z, float _fv_kalman, float _phi_accel, float _bw_pct, string _mode) =>
+    float _atr_f = ta.atr(14)
+    float _isq   = math.max(0.0, 1.0 - _atr_f / math.max(ta.sma(_atr_f, 50), syminfo.mintick))
+    float _mrt   = math.max(0.0, math.abs(_mr_osc) - 1.0)
+    float _pmd   = _pred_ma - nz(_pred_ma[1], _pred_ma)
+    float _pma   = math.abs(_pmd - nz(_pmd[1], _pmd)) / math.max(_vdev0, syminfo.mintick)
+    float _bw    = _z3u - _z3d
+    float _bcv   = _bw - nz(_bw[1])
+    float _vv    = math.abs(_vec_z - nz(_vec_z[1]))
+    float _psr   = math.abs(_pred_ma - _fv_kalman)
+    float _psc   = math.max(0.0, _psr - nz(_psr[1], _psr))
+    float _pA    = _isq * _isq * _phi_accel
+    float _pB    = _pma * _mrt
+    float _pC    = math.max(0.0, -_bcv) * _vv * _psc / math.max(_vdev0, syminfo.mintick)
+    float _raw   = _pA * (1.0 + _pB + _pC) * (1.0 + _isq)
+    float _eff   = _raw * (_bw_pct < 0.25 ? 1.0 : 0.0)
+    float _bsqz  = _mode == "pathA" ? _pA : _raw
+    bool  _high  = math.min(1.0, math.max(0.0, (_bsqz + 3.0) / 6.0)) > 0.80
+    [_pA, _raw, _eff, _high]
 
-float mr_tension = math.max(0.0, math.abs(mr_osc) - 1.0)
-float predma_delta = pred_ma - nz(pred_ma[1], pred_ma)
-float predma_accel = math.abs(predma_delta - nz(predma_delta[1], predma_delta)) / math.max(vert_dev0, syminfo.mintick)
-
-float band_width = z3_up - z3_dn
-float band_conv = band_width - nz(band_width[1])
-float vec_vel = math.abs(vector_osc_z - nz(vector_osc_z[1]))
-float pred_spread_raw = math.abs(pred_ma - fv_cyclic_kalman)
-float pred_spread_chg = math.max(0.0, pred_spread_raw - nz(pred_spread_raw[1], pred_spread_raw))
-
-float path_A = innov_squeeze * innov_squeeze * phi_div_accel
-float path_B = predma_accel * mr_tension
-float path_C = math.max(0.0, -band_conv) * vec_vel * pred_spread_chg / math.max(vert_dev0, syminfo.mintick)
-float f7_burst_raw = path_A * (1.0 + path_B + path_C) * (1.0 + innov_squeeze)
-bool innov_bw_squeeze_flag = bw_pct < 0.25
-float f7_burst_effective = f7_burst_raw * (innov_bw_squeeze_flag ? 1.0 : 0.0)
-
-// Burst reactive confirm for squeeze throat detector
-float burst_for_sqz = burst_osc_mode == "pathA" ? path_A : f7_burst_raw
-float burst_pct_val = math.min(1.0, math.max(0.0, (burst_for_sqz + 3.0) / 6.0))
-bool burst_pct_high = burst_pct_val > 0.80
+[path_A, f7_burst_raw, f7_burst_effective, burst_pct_high] = f_calc_burst_score(mr_osc, pred_ma, vert_dev0, z3_up, z3_dn, vector_osc_z, fv_cyclic_kalman, phi_div_accel, bw_pct, burst_osc_mode)
 
 // --- BurstScore Oscillator Display Value (placeholder, actual source selected after squeeze computation) ---
 float burst_osc_raw = 0.0  // Will be reassigned after squeeze_score is available
@@ -3073,26 +3049,14 @@ if setup_v4
     last_v4_bar := bar_index
 
 // Setup #1: CORR_BOTTOM + MR_CONFIRM → LONG (81% WR, n=17)
-bool corr_bottom = not na(rho) and rho < 0.3 and rho > rho[1] and rho[1] <= rho[2]
-bool mr_confirm_long = mr_for_setups < -0.5 and mr_for_setups < nz(mr_for_setups[1])
-bool setup_corr_bottom_mr_confirm_raw = corr_bottom and mr_confirm_long and not is_falling_knife
-bool setup_corr_bottom_mr_confirm = setup_corr_bottom_mr_confirm_raw and bar_index - last_setup1_bar > cooldown_bars
-string tooltip_setup1 = "🏆 CORR_BOTTOM + MR_CONFIRM\n81% WR (n=17)\nAsset oversold while decoupled\nSpring-loaded reversal setup"
+// Setup #1 CORR_BOTTOM + MR_CONFIRM — inline intermediates (saves 3 vars)
+bool setup_corr_bottom_mr_confirm = (not na(rho) and rho < 0.3 and rho > rho[1] and rho[1] <= rho[2]) and (mr_for_setups < -0.5 and mr_for_setups < nz(mr_for_setups[1])) and not is_falling_knife and bar_index - last_setup1_bar > cooldown_bars
 
-// Setup #2: CORR_PEAK + MR_CONFIRM → SHORT (73% WR, n=18)
-bool corr_peak = not na(rho) and rho > 0.7 and rho < rho[1] and rho[1] >= rho[2]
-bool mr_confirm_short = mr_for_setups > 0.5 and mr_for_setups > nz(mr_for_setups[1])
-bool setup_corr_peak_mr_confirm_raw = corr_peak and mr_confirm_short and not is_falling_knife
-bool setup_corr_peak_mr_confirm = setup_corr_peak_mr_confirm_raw and bar_index - last_setup2_bar > cooldown_bars
-string tooltip_setup2 = "🏆 CORR_PEAK + MR_CONFIRM\n73% WR (n=18)\nAsset overbought while fully coupled\nReliable reversal setup"
+// Setup #2 CORR_PEAK + MR_CONFIRM — inline intermediates (saves 3 vars)
+bool setup_corr_peak_mr_confirm = (not na(rho) and rho > 0.7 and rho < rho[1] and rho[1] >= rho[2]) and (mr_for_setups > 0.5 and mr_for_setups > nz(mr_for_setups[1])) and not is_falling_knife and bar_index - last_setup2_bar > cooldown_bars
 
-// Setup #3: BEAR_DIV in OVERSOLD → SHORT (75% WR, n=9)
-bool oversold = mr_for_setups < -0.8
-bool mr_rising = mr_for_setups > nz(mr_for_setups[1])
-bool innov_falling = innov_chg_5 < -0.3 and innov_z_score < -0.5
-bool setup_bear_div_oversold_raw = oversold and mr_rising and innov_falling
-bool setup_bear_div_oversold = setup_bear_div_oversold_raw and bar_index - last_setup3_bar > cooldown_bars
-string tooltip_setup3 = "🏆 BEAR_DIV in OVERSOLD\n75% WR (n=9)\nOversold but Innovation falling\nStructural weakness, dump continues"
+// Setup #3 BEAR_DIV in OVERSOLD — inline intermediates (saves 4 vars)
+bool setup_bear_div_oversold = (mr_for_setups < -0.8) and (mr_for_setups > nz(mr_for_setups[1])) and (innov_chg_5 < -0.3 and innov_z_score < -0.5) and bar_index - last_setup3_bar > cooldown_bars
 
 if pred_round_delay_active
     if setup_s5 and pred_round_short and allow_short and f_setup_cooldown_ok("S5", "SHORT", last_pred_short_bar)

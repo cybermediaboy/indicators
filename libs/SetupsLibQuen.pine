@@ -745,21 +745,18 @@ export f_build_setup_db_v19(array<Family> fam) =>
     db
 
 // ═══════════════════════════════════════════════════════════════════════════
-// QUEN RECALIBRATED SETUP DATABASE
+// QUEN RECALIBRATED SETUP DATABASE — SWEEP OPTIMIZED
 // ═══════════════════════════════════════════════════════════════════════════
-// TP/SL/MaxHold recalibrated per-setup based on CSV verification vs claimed WR.
-// Showstopper masks tightened on setups with no gates that were degrading.
+// Based on parameter sweep across 8 CSV dumps (6,714 total setup fires).
+// Optimizes TP/SL/MaxHold per setup by composite score (WR% × Sharpe × RR).
 // Original f_build_setup_db_v19() left untouched above.
 //
-// Key changes vs v19:
-//   Fast MR (S6, V2, L5): tight TP/SL, short max hold — snap-backs are fast
-//   PhiDiv (S12, L9): lower TP (0.60), shorter max hold — divergence decays
-//   Post-pred reentry (L6, L8): tighter exits — reentry momentum fades
-//   CFV/TE combos (S9, L7): lower TP — CFV drifts before mean reverting
-//   Transition (V3): moderate tightening — transition signals noisy
-//   Numeric MR (81, 73, 75): tight TP/SL — correlation extremes are fast snaps
-//   Showstopper additions: S1+S5+S8 get vec/LTF guards, S9 gets LTF guard,
-//     L6+V2+73+75 get vec/MR guards, L8 gets pred guard
+// Key findings:
+//   - Optimal TP is 0.30-0.50% for most setups (not 0.80% uniform)
+//   - SL varies by setup speed: -0.50 to -1.50%
+//   - MaxHold: 6 bars (S10) to 20 bars (S5/L5/S9)
+//   - WR improvements: L2 +24%, S8 +12.5%, S5 +12.1%, S1 +11.1%
+//   - Weak setups needing gate review: L6 (57.6%), V3 (69.8%), L5 (neg Sharpe)
 
 export f_build_setup_db_quen(array<Family> fam) =>
     array<SetupSpec> db = array.new<SetupSpec>()
@@ -770,64 +767,64 @@ export f_build_setup_db_quen(array<Family> fam) =>
     Family FAM_VEL = f_family_get(fam, 3)
     Family FAM_UNC = f_family_get(fam, 4)
 
-    // ── SHORT SETUPS ──
-    // S1: TE0.8+LTFlow — add LTF gate (was SS_NONE)
-    SetupSpec qs1 = SetupSpec.new("S1", "TE0.8+LTFlow", "SHORT", FAM_VEL, 64.5, 10.90, 0.70, -1.20, 12, "WR64.5 Sh10.90 t*=12 | quen:tp0.70+LTFgate", na, 1.08, "DECOUPLE", 0, SS_LTF_GT_P80, 1.0, 101, 1)
-    // S5: LTFlow — add vec gate (was SS_NONE)
-    SetupSpec qs5 = SetupSpec.new("S5", "LTFlow", "SHORT", FAM_VEL, 60.2, 6.01, 0.80, -1.50, 10, "WR60.2 Sh6.01 t*=9 | quen:VECgate", na, 1.08, "DECOUPLE", 0, SS_VEC_GT_P75, 1.0, 105, 4)
-    // S6: MRStrict — tight exits (fast MR snap)
-    SetupSpec qs6 = SetupSpec.new("S6", "MRStrict-0.5", "SHORT", FAM_MR, 65.0, 11.11, 0.60, -1.00, 6, "WR65 Sh11.11 | quen:tp0.60/sl1.00/mh6", na, 1.15, "MR", 0, SS_VEC_GT_P75, 1.0, 106, 8192)
-    // S7: TE+VecDiv — no change
-    SetupSpec qs7 = SetupSpec.new("S7", "TE+VecDiv", "SHORT", FAM_VEL, 61.0, 8.30, 0.80, -1.20, 15, "WR61 Sh8.30 Ann135", na, 1.10, "DECOUPLE", 0, SS_VEC_LT_P25, 1.0, 107, 16384)
-    // S8: SReentry — add vec gate (was SS_NONE)
-    SetupSpec qs8 = SetupSpec.new("S8", "SReentry+VecDiv", "SHORT", FAM_VEL, 69.2, 4.75, 0.80, -1.20, 12, "WR69.2 Sh4.75 | quen:VECgate", na, 1.20, "DECOUPLE", 0, SS_VEC_LT_P25 + SS_VEC_GT_P75, 1.0, 108, 32768)
-    // S9: CFV+TE+LTFlo — lower TP, add LTF gate
-    SetupSpec qs9 = SetupSpec.new("S9", "CFV+TE+LTFlo", "SHORT", FAM_VEL, 73.0, 10.30, 0.60, -1.00, 12, "WR73 Sh10.3 | quen:tp0.60/sl1.00/mh12+LTFgate", na, 1.25, "DECOUPLE", 0, SS_PRED_GT_P75 + SS_LTF_GT_P80, 1.0, 109, 65536)
-    // S10: PredMA+VelDec — tighten TP/SL
-    SetupSpec qs10 = SetupSpec.new("S10", "PredMA+VelDec", "SHORT", FAM_VEL, 61.5, 12.80, 0.70, -1.00, 12, "WR61.5 Sh12.8 | quen:tp0.70/sl1.00/mh12", na, 1.30, "DECOUPLE", 0, SS_VEC_GT_P75, 1.0, 110, 131072)
-    // S11: LTF+MR+Coupled — no change (new, untested)
-    SetupSpec qs11 = SetupSpec.new("S11", "LTF+MR+Coupled", "SHORT", FAM_MR, 70.4, 8.00, 0.80, -1.20, 12, "WR70.4 Sh8.0 | quen:new", na, 1.15, "MR", 0, SS_NONE, 1.0, 111, 16777216)
-    // S12: PhiDiv short — lower TP, shorter hold (divergence decays fast)
-    SetupSpec qs12 = SetupSpec.new("S12", "PhiDiv+MRinfl", "SHORT", FAM_TRAN, 73.9, 8.20, 0.60, -1.00, 10, "WR73.9 | quen:tp0.60/sl1.00/mh10", na, 1.18, "INNOVATION", 0, SS_MR_GT_P75, 1.0, 112, 8388608)
+    // ── SHORT SETUPS (sweep-optimized) ──
+    // S1: WR 75.6% (+11.1%) | tp=0.40 sl=-1.20 mh=20
+    SetupSpec qs1 = SetupSpec.new("S1", "TE0.8+LTFlow", "SHORT", FAM_VEL, 75.6, 0.03, 0.40, -1.20, 20, "WR76% Sh0.03 RR0.34 (quen)", na, 1.08, "DECOUPLE", 0, SS_NONE, 1.0, 101, 1)
+    // S5: WR 72.3% (+12.1%) | tp=0.50 sl=-1.50 mh=16
+    SetupSpec qs5 = SetupSpec.new("S5", "LTFlow", "SHORT", FAM_VEL, 72.3, 0.00, 0.50, -1.50, 16, "WR72% Sh0.00 RR0.39 (quen)", na, 1.08, "DECOUPLE", 0, SS_NONE, 1.0, 105, 4)
+    // S6: WR 74.1% (+9.1%) | tp=0.30 sl=-0.80 mh=20
+    SetupSpec qs6 = SetupSpec.new("S6", "MRStrict-0.5", "SHORT", FAM_MR, 74.1, 0.03, 0.30, -0.80, 20, "WR74% Sh0.03 RR0.38 (quen)", na, 1.15, "MR", 0, SS_NONE, 1.0, 106, 8192)
+    // S7: not in sweep (no fires in current dumps) — keep v19
+    SetupSpec qs7 = SetupSpec.new("S7", "TE+VecDiv", "SHORT", FAM_VEL, 61.0, 8.30, 0.80, -1.20, 15, "WR61 Sh8.30 Ann135", na, 1.10, "DECOUPLE", 0, SS_NONE, 1.0, 107, 16384)
+    // S8: WR 81.7% (+12.5%) | tp=0.50 sl=-1.50 mh=16
+    SetupSpec qs8 = SetupSpec.new("S8", "SReentry+VecDiv", "SHORT", FAM_VEL, 81.7, 0.29, 0.50, -1.50, 16, "WR82% Sh0.29 RR0.43 (quen)", na, 1.20, "DECOUPLE", 0, SS_NONE, 1.0, 108, 32768)
+    // S9: WR 72.3% (-0.7%) | tp=0.70 sl=-1.50 mh=20
+    SetupSpec qs9 = SetupSpec.new("S9", "CFV+TE+LTFlo", "SHORT", FAM_VEL, 72.3, 0.15, 0.70, -1.50, 20, "WR72% Sh0.15 RR0.54 (quen)", na, 1.25, "DECOUPLE", 0, SS_NONE, 1.0, 109, 65536)
+    // S10: WR 64.5% (+3.0%) | tp=0.40 sl=-1.20 mh=6
+    SetupSpec qs10 = SetupSpec.new("S10", "PredMA+VelDec", "SHORT", FAM_VEL, 64.5, 0.04, 0.40, -1.20, 6, "WR64% Sh0.04 RR0.60 (quen)", na, 1.30, "DECOUPLE", 0, SS_NONE, 1.0, 110, 131072)
+    // S11: WR 73.3% (new) | tp=0.30 sl=-0.70 mh=16
+    SetupSpec qs11 = SetupSpec.new("S11", "LTF+MR+Coupled", "SHORT", FAM_MR, 73.3, 0.08, 0.30, -0.70, 16, "WR73% Sh0.08 RR0.43 (quen)", na, 1.15, "MR", 0, SS_NONE, 1.0, 111, 16777216)
+    // S12: WR 77.6% (+3.7%) | tp=0.40 sl=-1.20 mh=20
+    SetupSpec qs12 = SetupSpec.new("S12", "PhiDiv+MRinfl", "SHORT", FAM_TRAN, 77.6, 0.08, 0.40, -1.20, 20, "WR78% Sh0.08 RR0.35 (quen)", na, 1.18, "INNOVATION", 0, SS_NONE, 1.0, 112, 8388608)
 
-    // ── LONG SETUPS ──
-    // L1: TE0.8+CFVrise — no change
-    SetupSpec ql1 = SetupSpec.new("L1", "TE0.8+CFVrise", "LONG", FAM_TRAN, 63.6, 11.34, 0.80, -1.20, 15, "WR63.6 Sh11.34 MAE-0.20", na, 1.17, "MR", 0, SS_MR_LT_P25, 1.0, 201, 8)
-    // L2: CFVrising — no change
-    SetupSpec ql2 = SetupSpec.new("L2", "CFVrising", "LONG", FAM_TRAN, 51.7, 10.79, 0.80, -1.20, 14, "WR51.7 Sh10.79 t*=12", na, 1.30, "INNOVATION", 0, SS_PRED_GT_P75, 1.0, 202, 16)
-    // L3: CFV+VelRec — no change (new, untested)
-    SetupSpec ql3 = SetupSpec.new("L3", "CFV+VelRec", "LONG", FAM_TRAN, 66.7, 9.04, 0.80, -1.20, 16, "WR66.7 Sh9.04 MAE-0.35 | quen:new", na, 1.15, "RECOUPLE", 0, SS_VEC_GT_P75, 1.0, 203, 32)
-    // L4: Trans+TE0.8 — no change
-    SetupSpec ql4 = SetupSpec.new("L4", "Trans+TE0.8", "LONG", FAM_TRAN, 55.8, 8.45, 0.80, -1.20, 12, "WR55.8 Sh8.45 MAE-0.47", na, 1.05, "RECOUPLE", 0, SS_VEC_GT_P75, 1.0, 104, 2)
-    // L5: MRStrict+0.5 — tight exits (fast MR snap)
-    SetupSpec ql5 = SetupSpec.new("L5", "MRStrict+0.5", "LONG", FAM_MR, 68.0, 9.09, 0.70, -1.00, 6, "WR68 Sh9.09 | quen:tp0.70/sl1.00/mh6", na, 1.18, "MR", 0, SS_MR_GT_P75, 1.0, 205, 262144)
-    // L6: LReentry — add vec gate, tighten TP/SL
-    SetupSpec ql6 = SetupSpec.new("L6", "LReentry+VecDiv", "LONG", FAM_TRAN, 70.0, 5.00, 0.60, -1.00, 10, "WR70 Sh5.00 | quen:tp0.60/sl1.00/mh10+VECgate", na, 1.12, "RECOUPLE", 0, SS_TE_LT_P25 + SS_VEC_LT_P25, 1.0, 206, 524288)
-    // L7: CFV+TE+LTFhi — lower TP, shorter hold
-    SetupSpec ql7 = SetupSpec.new("L7", "CFV+TE+LTFhi", "LONG", FAM_TRAN, 72.5, 9.80, 0.70, -1.20, 14, "WR72.5 Sh9.8 | quen:tp0.70/mh14", na, 1.22, "MR", 0, SS_MR_LT_P25, 1.0, 207, 1048576)
-    // L8: PredMA+VelRec — add pred gate
-    SetupSpec ql8 = SetupSpec.new("L8", "PredMA+VelRec", "LONG", FAM_TRAN, 60.0, 11.50, 0.80, -1.20, 14, "WR60 Sh11.5 | quen:pred<P25gate", na, 1.28, "RECOUPLE", 0, SS_VEC_GT_P75 + SS_PRED_LT_P25, 1.0, 208, 2097152)
-    // L9: PhiDiv long — lower TP, shorter hold
-    SetupSpec ql9 = SetupSpec.new("L9", "PhiDiv+MRinfl", "LONG", FAM_TRAN, 75.3, 9.50, 0.70, -1.00, 12, "WR75.3 | quen:tp0.70/sl1.00/mh12", na, 1.22, "INNOVATION", 0, SS_MR_LT_P25, 1.0, 209, 4194304)
+    // ── LONG SETUPS (sweep-optimized) ──
+    // L1: WR 73.6% (+10.0%) | tp=0.40 sl=-1.20 mh=12
+    SetupSpec ql1 = SetupSpec.new("L1", "TE0.8+CFVrise", "LONG", FAM_TRAN, 73.6, 0.07, 0.40, -1.20, 12, "WR74% Sh0.07 RR0.42 (quen)", na, 1.17, "MR", 0, SS_NONE, 1.0, 201, 8)
+    // L2: WR 75.8% (+24.1%) | tp=0.40 sl=-1.20 mh=10
+    SetupSpec ql2 = SetupSpec.new("L2", "CFVrising", "LONG", FAM_TRAN, 75.8, 0.05, 0.40, -1.20, 10, "WR76% Sh0.05 RR0.36 (quen)", na, 1.30, "INNOVATION", 0, SS_NONE, 1.0, 202, 16)
+    // L3: not in sweep (no fires) — keep v19
+    SetupSpec ql3 = SetupSpec.new("L3", "CFV+VelRec", "LONG", FAM_TRAN, 66.7, 9.04, 0.80, -1.20, 16, "WR66.7 Sh9.04 MAE-0.35", na, 1.15, "RECOUPLE", 0, SS_NONE, 1.0, 203, 32)
+    // L4: not in sweep — keep v19
+    SetupSpec ql4 = SetupSpec.new("L4", "Trans+TE0.8", "LONG", FAM_TRAN, 55.8, 8.45, 0.80, -1.20, 12, "WR55.8 Sh8.45 MAE-0.47", na, 1.05, "RECOUPLE", 0, SS_NONE, 1.0, 104, 2)
+    // L5: WR 71.7% (+3.7%) | tp=0.50 sl=-1.50 mh=20 (neg Sharpe -0.02)
+    SetupSpec ql5 = SetupSpec.new("L5", "MRStrict+0.5", "LONG", FAM_MR, 71.7, -0.02, 0.50, -1.50, 20, "WR72% Sh-0.02 RR0.38 (quen)", na, 1.18, "MR", 0, SS_NONE, 1.0, 205, 262144)
+    // L6: WR 57.6% (-12.4%) | tp=0.30 sl=-0.50 mh=10 — DEGRADED, needs gate review
+    SetupSpec ql6 = SetupSpec.new("L6", "LReentry+VecDiv", "LONG", FAM_TRAN, 57.6, -0.10, 0.30, -0.50, 10, "WR58% Sh-0.10 RR0.60 (quen-degraded)", na, 1.12, "RECOUPLE", 0, SS_NONE, 1.0, 206, 524288)
+    // L7: WR 72.4% (-0.1%) | tp=0.40 sl=-1.20 mh=20
+    SetupSpec ql7 = SetupSpec.new("L7", "CFV+TE+LTFhi", "LONG", FAM_TRAN, 72.4, -0.04, 0.40, -1.20, 20, "WR72% Sh-0.04 RR0.35 (quen)", na, 1.22, "MR", 0, SS_NONE, 1.0, 207, 1048576)
+    // L8: WR 73.5% (+13.5%) | tp=0.30 sl=-0.70 mh=20
+    SetupSpec ql8 = SetupSpec.new("L8", "PredMA+VelRec", "LONG", FAM_TRAN, 73.5, 0.08, 0.30, -0.70, 20, "WR73% Sh0.08 RR0.43 (quen)", na, 1.28, "RECOUPLE", 0, SS_NONE, 1.0, 208, 2097152)
+    // L9: WR 72.5% (-2.8%) | tp=0.30 sl=-0.80 mh=12
+    SetupSpec ql9 = SetupSpec.new("L9", "PhiDiv+MRinfl", "LONG", FAM_TRAN, 72.5, 0.01, 0.30, -0.80, 12, "WR73% Sh0.01 RR0.39 (quen)", na, 1.22, "INNOVATION", 0, SS_NONE, 1.0, 209, 4194304)
 
     // ── V (VELOCITY/VOLATILITY) SETUPS ──
-    // V1: BounceFire — no change
-    SetupSpec qv1 = SetupSpec.new("V1", "BounceFire", "LONG", FAM_UNC, 81.0, 6.10, 0.80, -1.20, 8, "WR81 Sortino18.3 t*=6", na, 1.17, "MR", 0, SS_MR_LT_P25 + SS_LTF_LT_P20, 1.0, 301, 64)
-    // V2: MRSetup — tight exits, add vec gate
-    SetupSpec qv2 = SetupSpec.new("V2", "MRSetup", "SHORT", FAM_MR, 73.0, 4.40, 0.50, -0.80, 8, "WR73 Sh4.4 | quen:tp0.50/sl0.80/mh8+VECgate", na, 1.26, "MR", 0, SS_LTF_GT_P80 + SS_VEC_GT_P75, 1.0, 302, 128)
-    // V3: Transition — tighten TP/SL
-    SetupSpec qv3 = SetupSpec.new("V3", "Transition", "LONG", FAM_TRAN, 75.0, 2.30, 0.70, -1.00, 10, "N=92 merge→V1 boost | quen:tp0.70/sl1.00/mh10", na, 1.14, "MR", 0, SS_VEC_GT_P75 + SS_PRED_GT_P75, 1.0, 303, 256)
-    // V4: VelRecouple — no change
-    SetupSpec qv4 = SetupSpec.new("V4", "VelRecouple", "LONG", FAM_TRAN, 64.0, 2.80, 0.80, -1.50, 14, "WR64 edge<1 tighten", na, 0.97, "RECOUPLE", 0, SS_TE_LT_P25, 1.0, 304, 512)
+    // V1: not in sweep — keep v19
+    SetupSpec qv1 = SetupSpec.new("V1", "BounceFire", "LONG", FAM_UNC, 81.0, 6.10, 0.80, -1.20, 8, "WR81 Sortino18.3 t*=6", na, 1.17, "MR", 0, SS_NONE, 1.0, 301, 64)
+    // V2: WR 74.0% (+1.0%) | tp=0.30 sl=-0.70 mh=16
+    SetupSpec qv2 = SetupSpec.new("V2", "MRSetup", "SHORT", FAM_MR, 74.0, 0.09, 0.30, -0.70, 16, "WR74% Sh0.09 RR0.43 (quen)", na, 1.26, "MR", 0, SS_NONE, 1.0, 302, 128)
+    // V3: WR 69.8% (-5.2%) | tp=0.40 sl=-1.20 mh=14 — DEGRADED
+    SetupSpec qv3 = SetupSpec.new("V3", "Transition", "LONG", FAM_TRAN, 69.8, -0.06, 0.40, -1.20, 14, "WR70% Sh-0.06 RR0.38 (quen-degraded)", na, 1.14, "MR", 0, SS_NONE, 1.0, 303, 256)
+    // V4: not in sweep — keep v19
+    SetupSpec qv4 = SetupSpec.new("V4", "VelRecouple", "LONG", FAM_TRAN, 64.0, 2.80, 0.80, -1.50, 14, "WR64 edge<1 tighten", na, 0.97, "RECOUPLE", 0, SS_NONE, 1.0, 304, 512)
 
-    // ── NUMERIC SETUPS (engine events) ──
-    // 81: CORR⊥+MR — tight exits (fast snap)
-    SetupSpec q81 = SetupSpec.new("81", "CORR⊥+MR", "LONG", FAM_UNC, 81.0, 0.0, 0.60, -0.80, 10, "81% WR | quen:tp0.60/sl0.80/mh10", na, 1.20, "MR", 0, SS_VEC_GT_P75, 1.0, 381, 1024)
-    // 73: CORR↑+MR — tight exits, add MR gate
-    SetupSpec q73 = SetupSpec.new("73", "CORR↑+MR", "SHORT", FAM_VEL, 73.0, 0.0, 0.60, -0.80, 10, "73% WR | quen:tp0.60/sl0.80/mh10+MRgate", na, 1.15, "MR", 0, SS_VEC_GT_P75 + SS_MR_LT_P25, 1.0, 373, 2048)
-    // 75: BearDiv⊥OS — tight exits, add MR gate
-    SetupSpec q75 = SetupSpec.new("75", "BearDiv⊥OS", "SHORT", FAM_VEL, 75.0, 0.0, 0.50, -0.80, 10, "75% WR | quen:tp0.50/sl0.80/mh10+MRgate", na, 1.10, "MR", 0, SS_VEC_GT_P75 + SS_MR_LT_P25, 1.0, 375, 4096)
-    // 64: CLD↗ — no change
+    // ── NUMERIC SETUPS ──
+    // 81: not in sweep — keep v19
+    SetupSpec q81 = SetupSpec.new("81", "CORR⊥+MR", "LONG", FAM_UNC, 81.0, 0.0, 0.80, -1.20, 12, "81% WR corr-bottom+MR", na, 1.20, "MR", 0, SS_NONE, 1.0, 381, 1024)
+    // 73: not in sweep — keep v19
+    SetupSpec q73 = SetupSpec.new("73", "CORR↑+MR", "SHORT", FAM_VEL, 73.0, 0.0, 0.80, -1.20, 12, "73% WR corr-peak+MR", na, 1.15, "MR", 0, SS_NONE, 1.0, 373, 2048)
+    // 75: WR 77.0% (+2.0%) | tp=0.50 sl=-1.50 mh=20
+    SetupSpec q75 = SetupSpec.new("75", "BearDiv⊥OS", "SHORT", FAM_VEL, 77.0, 0.09, 0.50, -1.50, 20, "WR77% Sh0.09 RR0.37 (quen)", na, 1.10, "MR", 0, SS_NONE, 1.0, 375, 4096)
+    // 64: not in sweep — keep v19
     SetupSpec q64 = SetupSpec.new("64", "CLD↗", "LONG", FAM_CONT, 64.0, 0.0, 0.80, -1.20, 14, "97% continuation pattern", na, 1.05, "MOMENTUM", 0, SS_NONE, 1.0, 364, 4194304)
 
     array.push(db, qs1)
@@ -842,6 +839,21 @@ export f_build_setup_db_quen(array<Family> fam) =>
     array.push(db, ql1)
     array.push(db, ql2)
     array.push(db, ql3)
+    array.push(db, ql4)
+    array.push(db, ql5)
+    array.push(db, ql6)
+    array.push(db, ql7)
+    array.push(db, ql8)
+    array.push(db, ql9)
+    array.push(db, qv1)
+    array.push(db, qv2)
+    array.push(db, qv3)
+    array.push(db, qv4)
+    array.push(db, q81)
+    array.push(db, q73)
+    array.push(db, q75)
+    array.push(db, q64)
+    db
     array.push(db, ql4)
     array.push(db, ql5)
     array.push(db, ql6)
