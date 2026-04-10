@@ -30,10 +30,10 @@ export evaluate_all(
  ) =>
     array<SetupConfig> active = array.new<SetupConfig>()
     
-    // Compiler satisfaction: use all params
-    bool _valid = not na(phiTotal) and not na(innU) and not na(z3L) and not na(squeezeBull) and not na(baseMA) and not na(predVecMA) and not na(cyclicFV)
-    if not _valid
-        active
+    // Global validity gate: reject if critical oscillators are NA
+    bool valid_data = not na(phiTotal) and not na(innU) and not na(z3L) and not na(squeezeBull) and not na(baseMA) and not na(predVecMA) and not na(cyclicFV)
+    if not valid_data
+        active  // Return empty array if data invalid
 
     // =================================================================
     // 1. SHORT SETUPS (Scalping Profile: TP=2.5%, SL=0.8%, H=5)
@@ -41,17 +41,17 @@ export evaluate_all(
     // =================================================================
 
     // 1. SS_TE_lt_4_Only: Volume leader (No burst filters needed here)
-    bool ss_te = (entryCtx == 1200) and (te < 4.0)
+    bool ss_te = valid_data and (entryCtx == 1200) and (te < 4.0)
     if ss_te
         active.push(SetupConfig.new("SS_TE", "SS_TE_Base", "SHORT", 0.025, 0.008, 5, 48.0, 0.077, true))
 
     // 2. S1_Base_1200: Raw breakout (Filter out Decoupled only)
-    bool s1 = (entryCtx == 1200) and not (basket < 30)
+    bool s1 = valid_data and (entryCtx == 1200) and not (basket < 30)
     if s1
         active.push(SetupConfig.new("S1", "S1_Breakout", "SHORT", 0.025, 0.008, 5, 46.5, 0.058, true))
 
     // 3. S8_BURST: Momentum short
-    bool s8 = (burst != 0) and (mr < -0.3)
+    bool s8 = valid_data and (burst != 0) and (mr < -0.3)
     if s8
         active.push(SetupConfig.new("S8", "S8_BURST", "SHORT", 0.025, 0.008, 5, 46.4, 0.099, true))
 
@@ -60,12 +60,12 @@ export evaluate_all(
     // =================================================================
 
     // 4. L9_Combo_Rare: Deep Band Proximity Bounce
-    bool l9 = ((entryCtx == 1000) or (entryCtx == 1100)) and (close_price <= innL) and (close_price < phiTotal) and not (((close_price - z3L) / close_price) < 0.02)
+    bool l9 = valid_data and ((entryCtx == 1000) or (entryCtx == 1100)) and (close_price <= innL) and (close_price < phiTotal) and not (((close_price - z3L) / close_price) < 0.02)
     if l9
         active.push(SetupConfig.new("L9", "L9_Deep_Band", "LONG", 0.025, 0.010, 3, 52.3, 0.237, true))
 
     // 5. L7_BURST_Optimized: Momentum Long
-    bool l7 = (burst != 0) and (mr > 0.5) and (vec < -6.0) and (entryCtx == 1000) and not vwapShortActive
+    bool l7 = valid_data and (burst != 0) and (mr > 0.5) and (vec < -6.0) and (entryCtx == 1000) and not vwapShortActive
     if l7
         active.push(SetupConfig.new("L7", "L7_BURST_Opt", "LONG", 0.025, 0.010, 3, 48.3, 0.038, true))
 
