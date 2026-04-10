@@ -9,7 +9,7 @@ import cybermediaboy/TAUtilityLib/53 as TAUtilityLib
 import cybermediaboy/kNNLib/15 as kNNLib
 import cybermediaboy/BandsLib/5 as BandsLib
 import cybermediaboy/BasketLib/3 as BasketLib
-import cybermediaboy/setupsDBGem/2 as SetupsDB
+import cybermediaboy/setupsDBGem/3 as SetupsDB
 // To switch to scalping profile, change to: import cybermediaboy/setupsDBQuen/1 as SetupsDB
 indicator("Combined Vector Bands v20 setupsDB", shorttitle="CVB v20", overlay=true, max_boxes_count=500, max_labels_count=500, max_lines_count=500, dynamic_requests=true, max_bars_back=5000)
 
