@@ -2911,78 +2911,60 @@ bool setup_s1 = (enable_normalization ? (te_effective > te_setup_thresh and math
 if setup_s1
     last_s1_bar := bar_index
 
-bool setup_s6_raw = mr_short_sweet and mr_for_setups < nz(mr_for_setups[1]) and not is_falling_knife and math.abs(z0) > 0.8 and coupling_gate_strict and not coupling_just_flipped
-bool setup_s6 = setup_s6_raw and bar_index - last_s6_bar > setup_min_gap
+bool setup_s6 = mr_short_sweet and mr_for_setups < nz(mr_for_setups[1]) and not is_falling_knife and math.abs(z0) > 0.8 and coupling_gate_strict and not coupling_just_flipped and bar_index - last_s6_bar > setup_min_gap
 if setup_s6
     last_s6_bar := bar_index
 
-bool setup_s7_raw = (enable_normalization ? te_effective > te_setup_thresh : te_osc > te_setup_thresh) and basket_vec_z < -0.3 and est_trend > 0.05 and corr_damping > 0.5 and not is_falling_knife and coupling_gate and not coupling_just_flipped
-bool setup_s7 = setup_s7_raw and bar_index - last_s7_bar > setup_min_gap
+bool setup_s7 = (enable_normalization ? te_effective > te_setup_thresh : te_osc > te_setup_thresh) and basket_vec_z < -0.3 and est_trend > 0.05 and corr_damping > 0.5 and not is_falling_knife and coupling_gate and not coupling_just_flipped and bar_index - last_s7_bar > setup_min_gap
 if setup_s7
     last_s7_bar := bar_index
 
-bool setup_s8_raw = bar_index - last_pred_short_bar < 20 and bar_index - last_pred_short_bar > 5 and basket_vec_z < -0.2 and est_trend > 0 and mr_short_sweet and not is_falling_knife and coupling_gate_strict and not coupling_just_flipped
-bool setup_s8 = setup_s8_raw and bar_index - last_s8_bar > setup_min_gap
+bool setup_s8 = bar_index - last_pred_short_bar < 20 and bar_index - last_pred_short_bar > 5 and basket_vec_z < -0.2 and est_trend > 0 and mr_short_sweet and not is_falling_knife and coupling_gate_strict and not coupling_just_flipped and bar_index - last_s8_bar > setup_min_gap
 if setup_s8
     last_s8_bar := bar_index
 
-bool setup_s9_raw = (not cfv_rising and not cfv_rising[1]) and (enable_normalization ? te_effective > te_setup_thresh : te_osc > te_setup_thresh) and math.abs(ltf_corr_ema) < (enable_normalization ? ltf_decouple_adaptive : ltf_decouple_thresh) and not is_falling_knife
-bool setup_s9 = setup_s9_raw and bar_index - last_s9_bar > setup_min_gap
+bool setup_s9 = (not cfv_rising and not cfv_rising[1]) and (enable_normalization ? te_effective > te_setup_thresh : te_osc > te_setup_thresh) and math.abs(ltf_corr_ema) < (enable_normalization ? ltf_decouple_adaptive : ltf_decouple_thresh) and not is_falling_knife and bar_index - last_s9_bar > setup_min_gap
 if setup_s9
     last_s9_bar := bar_index
 
-bool setup_s10_raw = pred_round_short and est_trend > 0 and est_trend < nz(est_trend[1]) and math.abs(ma_slope) < vert_dev0 * pred_round_pivot_range and not is_falling_knife and coupling_gate and not coupling_just_flipped
-bool setup_s10 = setup_s10_raw and bar_index - last_s10_bar > setup_min_gap
+bool setup_s10 = pred_round_short and est_trend > 0 and est_trend < nz(est_trend[1]) and math.abs(ma_slope) < vert_dev0 * pred_round_pivot_range and not is_falling_knife and coupling_gate and not coupling_just_flipped and bar_index - last_s10_bar > setup_min_gap
 if setup_s10
     last_s10_bar := bar_index
 
 // S11: LTF BEAR + MR > 0.3 + COUPLED SHORT
-bool s11_ltf_bear = ltf_enabled and ltf_is_decoupled
-bool s11_mr_overbought = mr_for_setups > 0.3
-bool s11_htf_coupled = is_attached
-bool setup_s11_raw = s11_ltf_bear and s11_mr_overbought and s11_htf_coupled and not is_falling_knife and not coupling_just_flipped
-bool setup_s11 = setup_s11_raw and bar_index - last_s11_bar > setup_min_gap
+bool setup_s11 = ltf_enabled and ltf_is_decoupled and mr_for_setups > 0.3 and is_attached and not is_falling_knife and not coupling_just_flipped and bar_index - last_s11_bar > setup_min_gap
 if setup_s11
     last_s11_bar := bar_index
 
 // S12: PHI LATCH DIVERGENCE SHORT (PhiTotal < PhiLatch, new bearish peer info)
-bool mr_inflect_down = mr_for_setups > 0.3 and mr_for_setups < nz(mr_for_setups[1])
-bool setup_s12_raw = phi_div_z < -phi_div_thresh and mr_for_setups > 0 and mr_inflect_down and not is_falling_knife
-bool setup_s12 = setup_s12_raw and bar_index - last_s12_bar > setup_min_gap
+bool setup_s12 = phi_div_z < -phi_div_thresh and mr_for_setups > 0 and (mr_for_setups > 0.3 and mr_for_setups < nz(mr_for_setups[1])) and not is_falling_knife and bar_index - last_s12_bar > setup_min_gap
 if setup_s12
     last_s12_bar := bar_index
 
-bool setup_l5_raw = mr_for_setups > 0.5 and mr_for_setups > nz(mr_for_setups[1]) and not is_falling_knife and math.abs(z0) > 0.8
-bool setup_l5 = setup_l5_raw and bar_index - last_l5_bar > setup_min_gap
+bool setup_l5 = mr_for_setups > 0.5 and mr_for_setups > nz(mr_for_setups[1]) and not is_falling_knife and math.abs(z0) > 0.8 and bar_index - last_l5_bar > setup_min_gap
 if setup_l5
     last_l5_bar := bar_index
 
-bool setup_l6_raw = bar_index - last_pred_long_bar < 20 and bar_index - last_pred_long_bar > 5 and basket_vec_z > 0.2 and est_trend < 0 and mr_long_sweet and not is_falling_knife and coupling_gate and not coupling_just_flipped
-bool setup_l6 = setup_l6_raw and bar_index - last_l6_bar > setup_min_gap
+bool setup_l6 = bar_index - last_pred_long_bar < 20 and bar_index - last_pred_long_bar > 5 and basket_vec_z > 0.2 and est_trend < 0 and mr_long_sweet and not is_falling_knife and coupling_gate and not coupling_just_flipped and bar_index - last_l6_bar > setup_min_gap
 if setup_l6
     last_l6_bar := bar_index
 
-bool setup_l7_raw = cfv_rising and (enable_normalization ? te_effective > te_setup_thresh : te_osc > te_setup_thresh) and math.abs(ltf_corr_ema) > (enable_normalization ? ltf_recouple_adaptive : ltf_recouple_thresh)
-bool setup_l7 = setup_l7_raw and bar_index - last_l7_bar > setup_min_gap
+bool setup_l7 = cfv_rising and (enable_normalization ? te_effective > te_setup_thresh : te_osc > te_setup_thresh) and math.abs(ltf_corr_ema) > (enable_normalization ? ltf_recouple_adaptive : ltf_recouple_thresh) and bar_index - last_l7_bar > setup_min_gap
 if setup_l7
     last_l7_bar := bar_index
 
-bool setup_l8_raw = pred_round_long and est_trend < 0 and est_trend > nz(est_trend[1]) and math.abs(ma_slope) < vert_dev0 * pred_round_pivot_range and not is_falling_knife
-bool setup_l8 = setup_l8_raw and bar_index - last_l8_bar > setup_min_gap
+bool setup_l8 = pred_round_long and est_trend < 0 and est_trend > nz(est_trend[1]) and math.abs(ma_slope) < vert_dev0 * pred_round_pivot_range and not is_falling_knife and bar_index - last_l8_bar > setup_min_gap
 if setup_l8
     last_l8_bar := bar_index
 
 // L9: PHI LATCH DIVERGENCE LONG (PhiTotal > PhiLatch, new bullish peer info)
-bool mr_inflect_up = mr_for_setups < -0.3 and mr_for_setups > nz(mr_for_setups[1])
-bool setup_l9_raw = phi_div_z > phi_div_thresh and mr_for_setups < 0 and mr_inflect_up and not is_falling_knife
-bool setup_l9 = setup_l9_raw and bar_index - last_l9_bar > setup_min_gap
+bool setup_l9 = phi_div_z > phi_div_thresh and mr_for_setups < 0 and (mr_for_setups < -0.3 and mr_for_setups > nz(mr_for_setups[1])) and not is_falling_knife and bar_index - last_l9_bar > setup_min_gap
 if setup_l9
     last_l9_bar := bar_index
 
 bool setup_s5 = enable_normalization ? (math.abs(ltf_corr_ema) < ltf_decouple_adaptive and math.abs(ltf_corr_ema[1]) >= ltf_decouple_adaptive) : (math.abs(ltf_corr_ema) < ltf_decouple_thresh and math.abs(ltf_corr_ema[1]) >= ltf_decouple_thresh)
 
-bool setup_l1_raw = enable_normalization ? (te_effective > te_setup_thresh and cfv_rising) : (te_osc > te_setup_thresh and cfv_rising)
-bool setup_l1 = setup_l1_raw and (bar_index - last_l1_bar >= setup_min_gap)
+bool setup_l1 = (enable_normalization ? (te_effective > te_setup_thresh and cfv_rising) : (te_osc > te_setup_thresh and cfv_rising)) and (bar_index - last_l1_bar >= setup_min_gap)
 if setup_l1
     last_l1_bar := bar_index
 bool setup_l2 = cfv_rising and not cfv_rising[1]
