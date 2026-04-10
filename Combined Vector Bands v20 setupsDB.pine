@@ -3226,12 +3226,12 @@ triggered_setups := SetupsDB.evaluate_all(
     nz(mr_for_setups),
     nz(basket_vec_z),
     nz(basket_vec_z),
-    nz(burst_pct_high),  // Correct variable name
+    burst_pct_high ? 1.0 : 0.0,  // Convert bool to float
     nz(te_osc),
     close,
     nz(fv_cyclic_kalman),
     nz(ma0),
-    nz(pred_ma),  // Correct variable name
+    nz(pred_ma),
     nz(PhiTotal_orth),
     nz(innov_band_lower),
     nz(innov_band_upper),
@@ -3240,7 +3240,7 @@ triggered_setups := SetupsDB.evaluate_all(
     nz(z3_dn),
     false,  // vwap_short_rej (defined later at line ~3447)
     false,  // vwap_long_rej (defined later at line ~3447)
-    nz(squeeze_bull),
+    squeeze_bull ? 1.0 : 0.0,  // Convert bool to float
     nz(mc_knn_confidence)
 )
 
