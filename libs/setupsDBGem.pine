@@ -83,4 +83,19 @@ export evaluate_all(
     if l_inn
         active.push(SetupConfig.new("L_Exp", "L_Inn_Expansion", "LONG", 0.08, 0.015, 24, 63.4, 0.459, true))
 
+    // =================================================================
+    // 3. NEUTRAL ZONE SETUPS (entryCtx == 1100, z0 ∈ [-0.5, 0.5])
+    // Trend-following and TE-driven setups for balanced market
+    // =================================================================
+
+    // 9. N_TE_Short: Transfer Entropy driven short in neutral zone
+    bool n_te_short = valid_data and (entryCtx == 1100) and (te > 4.0) and (basket > 50) and (burst > 1.0) and not vwapShortActive
+    if n_te_short
+        active.push(SetupConfig.new("N_TE_S", "N_TE_Short", "SHORT", 0.04, 0.012, 12, 52.0, 0.15, true))
+
+    // 10. N_TE_Long: Transfer Entropy driven long in neutral zone  
+    bool n_te_long = valid_data and (entryCtx == 1100) and (te > 4.0) and (basket > 50) and (burst < -1.0) and not vwapLongActive
+    if n_te_long
+        active.push(SetupConfig.new("N_TE_L", "N_TE_Long", "LONG", 0.04, 0.012, 12, 52.0, 0.15, true))
+
     active

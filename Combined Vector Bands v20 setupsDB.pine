@@ -3232,8 +3232,8 @@ float innov_width_med = ta.median(innov_width, 50)
 
 var array<SetupsDB.SetupConfig> triggered_setups = na
 // Map z0 to discrete entry context codes: 1000 (LONG zone), 1100 (neutral), 1200 (SHORT zone)
-// Widened thresholds: 0.3 instead of 0.5 to reduce neutral zone and allow more setups
-int entry_context_code = z0 < -0.3 ? 1000 : z0 > 0.3 ? 1200 : 1100
+// Strict thresholds: ±0.5 to properly separate mean-reversion from neutral/trend regimes
+int entry_context_code = z0 < -0.5 ? 1000 : z0 > 0.5 ? 1200 : 1100
 
 triggered_setups := SetupsDB.evaluate_all(
     entry_context_code,  // Entry context: 1000=LONG zone, 1100=neutral, 1200=SHORT zone
@@ -4152,7 +4152,7 @@ if barstate.islast
             last_triggered_ids += c.id + (i < math.min(triggered_size - 1, 2) ? "," : "")
     
     // Show current entry context (must match thresholds at line 3236)
-    int current_entry_ctx = z0 < -0.3 ? 1000 : z0 > 0.3 ? 1200 : 1100
+    int current_entry_ctx = z0 < -0.5 ? 1000 : z0 > 0.5 ? 1200 : 1100
     
     string diag_text = "setupsDB Diagnostic:\n" + 
                        "bt_setups: " + str.tostring(bt_size) + "\n" +
