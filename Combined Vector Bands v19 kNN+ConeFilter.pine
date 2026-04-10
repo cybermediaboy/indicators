@@ -1367,8 +1367,8 @@ float phase_mr_wsum = phase_mr_w1 + phase_mr_w2 + phase_mr_w3 + phase_mr_w4
 float PhiTotalorthPhase = phase_mr_wsum > 0.01 ? (phase_mr_a1 * phase_mr_w1 + phase_mr_a2 * phase_mr_w2 + phase_mr_a3 * phase_mr_w3 + phase_mr_a4 * phase_mr_w4) / phase_mr_wsum : 0.0
 
 // === STRUCTURAL MR LATCH ===
-// Detect synchronous collapse: peer spreads carry no cross-sectional info
-float spread_rms = math.sqrt((sp1 * sp1 + sp2 * sp2 + sp3 * sp3 + sp4 * sp4) / 4.0)
+// Detect synchronous collapse: peer spreads carry no cross-sectional info (sp1-sp4 inlined)
+float spread_rms = math.sqrt(((z0 - rho1 * z1_raw) * math.abs(rho1) * (z0 - rho1 * z1_raw) * math.abs(rho1) + (z0 - rho2 * z2_raw) * math.abs(rho2) * (z0 - rho2 * z2_raw) * math.abs(rho2) + (z0 - rho3 * z3_raw) * math.abs(rho3) * (z0 - rho3 * z3_raw) * math.abs(rho3) + (z0 - rho4 * z4_raw) * math.abs(rho4) * (z0 - rho4 * z4_raw) * math.abs(rho4)) / 4.0)
 float spread_rms_avg = ta.ema(spread_rms, 100)
 bool phi_informative = spread_rms > spread_rms_avg * 0.4
 
@@ -3861,6 +3861,8 @@ f_detect_te_pit(float _te_osc, int _lookback, float _drop_sigma, float _abs_floo
     float _dstdev = ta.stdev(_delta, _lookback)
     bool _drop = not na(_delta) and ((not na(_dmean) and not na(_dstdev) and _delta < _dmean - _drop_sigma * _dstdev) or _delta < _abs_floor)
     int _sig = 0
+    float _conf_rec = na
+    int _conf_bars = na
     if _drop and not _armed
         _armed := true
         _start_bar := bar_index
@@ -3875,6 +3877,8 @@ f_detect_te_pit(float _te_osc, int _lookback, float _drop_sigma, float _abs_floo
         float _rec = not na(_bottom) ? _te_osc - _bottom : 0.0
         if _bspit <= _window and ((_bsbot >= 2 and _rec >= _rec2) or (_bsbot >= 3 and _rec >= _rec3))
             _sig := 1
+            _conf_rec := _rec
+            _conf_bars := _bsbot
             _armed := false
             _start_bar := na
             _bottom := na
@@ -3885,9 +3889,9 @@ f_detect_te_pit(float _te_osc, int _lookback, float _drop_sigma, float _abs_floo
             _start_bar := na
             _bottom := na
             _bottom_bar := na
-    [_sig, _armed, _bottom_bar, _delta, _dmean, _dstdev]
+    [_sig, _armed, _bottom_bar, _delta, _dmean, _dstdev, _conf_rec, _conf_bars]
 
-[_te_pit_sig, _te_pit_armed, _te_pit_bbar, te_delta, te_delta_mean, te_delta_stdev] = f_detect_te_pit(te_osc, te_pit_delta_lookback, te_pit_drop_sigma, te_pit_abs_floor, te_pit_window, te_pit_recovery_2, te_pit_recovery_3)
+[_te_pit_sig, _te_pit_armed, _te_pit_bbar, te_delta, te_delta_mean, te_delta_stdev, te_pit_confirm_recovery, te_pit_confirm_bars] = f_detect_te_pit(te_osc, te_pit_delta_lookback, te_pit_drop_sigma, te_pit_abs_floor, te_pit_window, te_pit_recovery_2, te_pit_recovery_3)
 bool te_pit_recovery = _te_pit_sig == 1
 bool te_pit_pending = _te_pit_armed and not te_pit_recovery
 bool te_pit_at_bottom = _te_pit_armed and bar_index == _te_pit_bbar
@@ -4155,7 +4159,7 @@ f_render_info_table(table info_tbl) =>
     bool knife_state = is_falling_knife
     bool strong_bull_state = is_strong_bull_mr
     bool strong_bear_state = is_strong_bear_mr
-    string basket_auto_status = basket_scan_ready ? basket_mode_label + " |ρ| " + str.tostring(nz((auto_score_1 + auto_score_2 + auto_score_3 + auto_score_4) / 4.0, 0.0), "#.2f") : basket_mode_label + " " + str.tostring(bar_index) + "/" + str.tostring(basket_scan_history)
+    string basket_auto_status = basket_scan_ready ? basket_mode_label + " |ρ| " + str.tostring(nz((auto_score_1 + auto_score_2 + auto_score_3 + auto_score_4) / 4.0, 0.0), "#.2f") : basket_mode_label + " " + str.tostring(bar_index) + "/" + str.tostring(math.max(fit_eval_len * 3, len_z * 3))
     table.cell(info_tbl, 0, 0, "Vec Context", text_color=color.black, text_size=size.small, tooltip=vec_tooltip)
     table.cell(info_tbl, 1, 0, vec_context, text_color=vec_context_col, text_size=size.small)
     table.cell(info_tbl, 0, 1, "Vector Sens", text_color=color.black, text_size=size.small, tooltip="Noticeably low or high innovation pivots at bands or median are good entry points, but only after a peak on MR oscillator, confirmed by the predictive line color")
