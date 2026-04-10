@@ -2736,13 +2736,7 @@ if bt_phase == 2
     bt_phase := 3  // Done (stays at 3, no reset to 0)
 
 var int last_setup_trigger_bar = 0
-var string armed_setup_id = na
-var int armed_bar = na
-var string armed_direction = na
-var string armed_tooltip = na
-var string armed_size_info = na
-var float armed_conditions_mr = na
-var float armed_conditions_z0 = na
+// Armed setup variables removed - obsolete with setupsDB architecture
 
 // ── BT FEATURE EXPORT FOR METRIC LEARNING ──
 // Fires once after BT summary completes. Paste output into CSV.
@@ -2890,214 +2884,48 @@ bool allow_short = not is_falling_knife
 int entry_ctx = z0  // Using z0 as entry context proxy (1000/1100/1200 mapping needed)
 float innov_width = innov_band_upper - innov_band_lower
 float innov_width_med = ta.median(innov_width, 50)
-// Regime-switched setup conditions with hybrid TE threshold and debounce
-bool setup_s1 = (enable_normalization ? (te_effective > te_setup_thresh and math.abs(ltf_corr_ema) < ltf_decouple_adaptive) : (te_osc > te_setup_thresh and math.abs(ltf_corr_ema) < ltf_decouple_thresh)) and (bar_index - last_s1_bar >= setup_min_gap)
-if setup_s1
-    last_s1_bar := bar_index
+// OLD HARDCODED SETUPS REMOVED - Now using setupsDB architecture
 
-bool setup_s6 = mr_short_sweet and mr_for_setups < nz(mr_for_setups[1]) and not is_falling_knife and math.abs(z0) > 0.8 and coupling_gate_strict and not coupling_just_flipped and bar_index - last_s6_bar > setup_min_gap
-if setup_s6
-    last_s6_bar := bar_index
+// Call setupsDB to evaluate all active setups this bar
+var array<SetupsDB.SetupConfig> triggered_setups = na
+triggered_setups := SetupsDB.evaluate_all(
+    int(z0 * 1200),
+    nz(mr_for_setups),
+    nz(basket_vec_z),
+    nz(basket_vec_z),
+    nz(burst_pct_val),
+    nz(te_osc),
+    close,
+    nz(fv_cyclic_kalman),
+    nz(ma0),
+    nz(pred_vec_ma),
+    nz(PhiTotal_orth),
+    nz(innov_band_lower),
+    nz(innov_band_upper),
+    innov_width,
+    innov_width_med,
+    nz(z3_dn),
+    vwap_short_rej_active,
+    vwap_long_rej_active,
+    nz(squeeze_bull),
+    nz(mc_knn_confidence)
+)
 
-bool setup_s7 = (enable_normalization ? te_effective > te_setup_thresh : te_osc > te_setup_thresh) and basket_vec_z < -0.3 and est_trend > 0.05 and corr_damping > 0.5 and not is_falling_knife and coupling_gate and not coupling_just_flipped and bar_index - last_s7_bar > setup_min_gap
-if setup_s7
-    last_s7_bar := bar_index
-
-bool setup_s8 = bar_index - last_pred_short_bar < 20 and bar_index - last_pred_short_bar > 5 and basket_vec_z < -0.2 and est_trend > 0 and mr_short_sweet and not is_falling_knife and coupling_gate_strict and not coupling_just_flipped and bar_index - last_s8_bar > setup_min_gap
-if setup_s8
-    last_s8_bar := bar_index
-
-bool setup_s9 = (not cfv_rising and not cfv_rising[1]) and (enable_normalization ? te_effective > te_setup_thresh : te_osc > te_setup_thresh) and math.abs(ltf_corr_ema) < (enable_normalization ? ltf_decouple_adaptive : ltf_decouple_thresh) and not is_falling_knife and bar_index - last_s9_bar > setup_min_gap
-if setup_s9
-    last_s9_bar := bar_index
-
-bool setup_s10 = pred_round_short and est_trend > 0 and est_trend < nz(est_trend[1]) and math.abs(ma_slope) < vert_dev0 * pred_round_pivot_range and not is_falling_knife and coupling_gate and not coupling_just_flipped and bar_index - last_s10_bar > setup_min_gap
-if setup_s10
-    last_s10_bar := bar_index
-
-// S11: LTF BEAR + MR > 0.3 + COUPLED SHORT
-bool setup_s11 = ltf_enabled and ltf_is_decoupled and mr_for_setups > 0.3 and is_attached and not is_falling_knife and not coupling_just_flipped and bar_index - last_s11_bar > setup_min_gap
-if setup_s11
-    last_s11_bar := bar_index
-
-// S12: PHI LATCH DIVERGENCE SHORT (PhiTotal < PhiLatch, new bearish peer info)
-bool setup_s12 = phi_div_z < -phi_div_thresh and mr_for_setups > 0 and (mr_for_setups > 0.3 and mr_for_setups < nz(mr_for_setups[1])) and not is_falling_knife and bar_index - last_s12_bar > setup_min_gap
-if setup_s12
-    last_s12_bar := bar_index
-
-bool setup_l5 = mr_for_setups > 0.5 and mr_for_setups > nz(mr_for_setups[1]) and not is_falling_knife and math.abs(z0) > 0.8 and bar_index - last_l5_bar > setup_min_gap
-if setup_l5
-    last_l5_bar := bar_index
-
-bool setup_l6 = bar_index - last_pred_long_bar < 20 and bar_index - last_pred_long_bar > 5 and basket_vec_z > 0.2 and est_trend < 0 and mr_long_sweet and not is_falling_knife and coupling_gate and not coupling_just_flipped and bar_index - last_l6_bar > setup_min_gap
-if setup_l6
-    last_l6_bar := bar_index
-
-bool setup_l7 = cfv_rising and (enable_normalization ? te_effective > te_setup_thresh : te_osc > te_setup_thresh) and math.abs(ltf_corr_ema) > (enable_normalization ? ltf_recouple_adaptive : ltf_recouple_thresh) and bar_index - last_l7_bar > setup_min_gap
-if setup_l7
-    last_l7_bar := bar_index
-
-bool setup_l8 = pred_round_long and est_trend < 0 and est_trend > nz(est_trend[1]) and math.abs(ma_slope) < vert_dev0 * pred_round_pivot_range and not is_falling_knife and bar_index - last_l8_bar > setup_min_gap
-if setup_l8
-    last_l8_bar := bar_index
-
-// L9: PHI LATCH DIVERGENCE LONG (PhiTotal > PhiLatch, new bullish peer info)
-bool setup_l9 = phi_div_z > phi_div_thresh and mr_for_setups < 0 and (mr_for_setups < -0.3 and mr_for_setups > nz(mr_for_setups[1])) and not is_falling_knife and bar_index - last_l9_bar > setup_min_gap
-if setup_l9
-    last_l9_bar := bar_index
-
-bool setup_s5 = enable_normalization ? (math.abs(ltf_corr_ema) < ltf_decouple_adaptive and math.abs(ltf_corr_ema[1]) >= ltf_decouple_adaptive) : (math.abs(ltf_corr_ema) < ltf_decouple_thresh and math.abs(ltf_corr_ema[1]) >= ltf_decouple_thresh)
-
-bool setup_l1 = (enable_normalization ? (te_effective > te_setup_thresh and cfv_rising) : (te_osc > te_setup_thresh and cfv_rising)) and (bar_index - last_l1_bar >= setup_min_gap)
-if setup_l1
-    last_l1_bar := bar_index
-bool setup_l2 = cfv_rising and not cfv_rising[1]
-bool setup_l3 = cfv_rising and vel_recouple
-bool setup_v1 = bounce_event
-bool setup_v2 = mr_event
-bool setup_v3 = transition_event
-bool setup_v4 = vel_recouple
-
-if pred_round_delay_active and not na(armed_setup_id)
-    int bars_waiting = bar_index - armed_bar
-    bool armed_showstopper = armed_direction == "LONG" ? pred_round_ss_long : pred_round_ss_short
-    if armed_showstopper or bars_waiting > pred_round_max_wait
-        label.new(bar_index, close, "✕", style=label.style_label_down, color=color.new(color.gray, 75), textcolor=color.gray, size=size.tiny, force_overlay=true)
-        armed_setup_id := na
-        armed_bar := na
-        armed_direction := na
-        armed_tooltip := na
-        armed_size_info := na
-        armed_conditions_mr := na
-        armed_conditions_z0 := na
-    else if (armed_direction == "LONG" ? pred_round_long : pred_round_short)
-        [armed_pos, armed_last_trigger_bar, armed_mae, armed_mfe, armed_entry_ctx, armed_fire_code] = f_fire_setup_by_id(armed_setup_id, armed_tooltip, armed_size_info, last_setup_trigger_bar)
-        if armed_fire_code != 0
-            actualfiresignal := armed_fire_code
-        // DEBUG REMOVED: entry_context_bitfield assignment
-        if show_setup_labels
-            label.new(bar_index, close, armed_setup_id, style=armed_direction == "LONG" ? label.style_label_up : label.style_label_down, color=color.new(color.purple, 20), textcolor=color.white, size=size.small, tooltip=armed_tooltip, force_overlay=true)
-        pos := armed_pos
-        last_setup_trigger_bar := armed_last_trigger_bar
-        if armed_direction == "LONG"
-            last_pred_long_bar := bar_index
-        else if armed_direction == "SHORT"
-            last_pred_short_bar := bar_index
-        if not na(armed_mae)
-            mae_viz_price := armed_mae
-        if not na(armed_mfe)
-            mfe_viz_price := armed_mfe
-        armed_setup_id := na
-        armed_bar := na
-        armed_direction := na
-        armed_tooltip := na
-        armed_size_info := na
-        armed_conditions_mr := na
-        armed_conditions_z0 := na
-
-int pred_fv_segment_dir = bounce_signal ? 1 : (est_trend > 0.05 ? 1 : (est_trend < -0.05 ? -1 : 0))
-var int pred_fv_segment_dir_prev = 0
-var bool fv_long_entry_fired_in_segment = false
-if pred_fv_segment_dir != pred_fv_segment_dir_prev
-    fv_long_entry_fired_in_segment := false
-    pred_fv_segment_dir_prev := pred_fv_segment_dir
-
-bool allow_fv_long_entry = pred_fv_segment_dir == 1 and not fv_long_entry_fired_in_segment and allow_long
-bool fire_l1 = allow_fv_long_entry and setup_l1
-bool fire_l3 = allow_fv_long_entry and not fire_l1 and setup_l3
-bool fire_l2 = allow_fv_long_entry and not fire_l1 and not fire_l3 and setup_l2
-if fire_l1 or fire_l2 or fire_l3
-    fv_long_entry_fired_in_segment := true
-if setup_v4
-    last_v4_bar := bar_index
-
-// Setup #1: CORR_BOTTOM + MR_CONFIRM → LONG (81% WR, n=17)
-// Setup #1 CORR_BOTTOM + MR_CONFIRM — inline intermediates (saves 3 vars)
-bool setup_corr_bottom_mr_confirm = (not na(rho) and rho < 0.3 and rho > rho[1] and rho[1] <= rho[2]) and (mr_for_setups < -0.5 and mr_for_setups < nz(mr_for_setups[1])) and not is_falling_knife and bar_index - last_setup1_bar > cooldown_bars
-
-// Setup #2 CORR_PEAK + MR_CONFIRM — inline intermediates (saves 3 vars)
-bool setup_corr_peak_mr_confirm = (not na(rho) and rho > 0.7 and rho < rho[1] and rho[1] >= rho[2]) and (mr_for_setups > 0.5 and mr_for_setups > nz(mr_for_setups[1])) and not is_falling_knife and bar_index - last_setup2_bar > cooldown_bars
-
-// Setup #3 BEAR_DIV in OVERSOLD — inline intermediates (saves 4 vars)
-bool setup_bear_div_oversold = (mr_for_setups < -0.8) and (mr_for_setups > nz(mr_for_setups[1])) and (innov_chg_5 < -0.3 and innov_z_score < -0.5) and bar_index - last_setup3_bar > cooldown_bars
-
-if pred_round_delay_active
-    if setup_s5 and pred_round_short and allow_short and f_setup_cooldown_ok("S5", "SHORT", last_pred_short_bar)
-        armed_setup_id := "S5"
-        armed_bar := bar_index
-        armed_direction := "SHORT"
-        armed_tooltip := "The asset suddenly lost its micro-correlation (velocity decouple) and is no longer keeping up with the basket's momentum.\nMean Reversion (Short): Fading local weakness as internal momentum breaks; shorting for a return to structural balance."
-        armed_size_info := "S5 WR60%"
-        armed_conditions_mr := mr_osc
-        armed_conditions_z0 := z0
-        label.new(bar_index, close, "💤 S5", style=label.style_label_down, color=color.new(color.gray, 70), textcolor=color.gray, size=size.tiny, tooltip=armed_tooltip, force_overlay=true)
-    if fire_l2 and pred_round_long and f_setup_cooldown_ok("L2", "LONG", last_pred_long_bar)
-        armed_setup_id := "L2"
-        armed_bar := bar_index
-        armed_direction := "LONG"
-        armed_tooltip := "The asset's internal Cyclic Fair Value is steadily expanding upwards, ignoring external market noise.\nPure Trend (Long): Buying the asset's own independent bullish momentum without relying on the basket's direction."
-        armed_size_info := "L2 WR52%"
-        armed_conditions_mr := mr_osc
-        armed_conditions_z0 := z0
-        label.new(bar_index, close, "💤 L2", style=label.style_label_up, color=color.new(color.gray, 70), textcolor=color.gray, size=size.tiny, tooltip=armed_tooltip, force_overlay=true)
-    if setup_v1 and pred_round_long and allow_long and f_setup_cooldown_ok("V1", "LONG", last_pred_long_bar)
-        armed_setup_id := "V1"
-        armed_bar := bar_index
-        armed_direction := "LONG"
-        armed_tooltip := "Price retraced to the dynamic median (Survival Band) and successfully rejected it while the basket held its structure.\nTrend Bounce (Long): A classic 'buy the dip' setup to safely rejoin the primary established trend."
-        armed_size_info := "V1 WR81%"
-        armed_conditions_mr := mr_osc
-        armed_conditions_z0 := z0
-        label.new(bar_index, close, "💤 V1", style=label.style_label_up, color=color.new(color.gray, 70), textcolor=color.gray, size=size.tiny, tooltip=armed_tooltip, force_overlay=true)
-    if setup_v2 and pred_round_short and allow_short and f_setup_cooldown_ok("V2", "SHORT", last_pred_short_bar)
-        armed_setup_id := "V2"
-        armed_bar := bar_index
-        armed_direction := "SHORT"
-        armed_tooltip := "The asset aggressively decoupled from its fair value, breaching extreme outer survival zones (Z2/Z3).\nStrict Mean Reversion (Short): A counter-trend play fading a structural anomaly, expecting a violent snap-back to equilibrium."
-        armed_size_info := "V2 WR73%"
-        armed_conditions_mr := mr_osc
-        armed_conditions_z0 := z0
-        label.new(bar_index, close, "💤 V2", style=label.style_label_down, color=color.new(color.gray, 70), textcolor=color.gray, size=size.tiny, tooltip=armed_tooltip, force_overlay=true)
-    if setup_v4 and pred_round_long and allow_long and f_setup_cooldown_ok("V4", "LONG", last_pred_long_bar)
-        armed_setup_id := "V4"
-        armed_bar := bar_index
-        armed_direction := "LONG"
-        armed_tooltip := "The asset was lagging or drifting independently but suddenly spiked to catch up with the basket's velocity.\nMomentum Catch-up (Long): An impulse entry to ride the sudden burst of speed as the asset closes the gap with its peers."
-        armed_size_info := "V4 WR64%"
-        armed_conditions_mr := mr_osc
-        armed_conditions_z0 := z0
-        label.new(bar_index, close, "💤 V4", style=label.style_label_up, color=color.new(color.gray, 70), textcolor=color.gray, size=size.tiny, tooltip=armed_tooltip, force_overlay=true)
-
-// Setup #4: CLD FALL-RISE after UP (64% WR, improved from 47%)
-bool setup_cld_fall_rise_up_raw = cld_continuation and cld_move_up
-bool setup_cld_fall_rise_up = setup_cld_fall_rise_up_raw and bar_index - last_setup4_bar > cooldown_bars
-
+// Process triggered setups from setupsDB
 array<SetupsLib.SetupEvent> engine_events = array.new<SetupsLib.SetupEvent>()
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, setup_s6 and allow_short and f_setup_cooldown_ok("S6", "SHORT", last_pred_short_bar), "S6", "S6 WR65")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, setup_s7 and allow_short and f_setup_cooldown_ok("S7", "SHORT", last_pred_short_bar), "S7", "S7 WR61")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, setup_s8 and allow_short and f_setup_cooldown_ok("S8", "SHORT", last_pred_short_bar), "S8", "S8 WR69")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, setup_s9 and allow_short and f_setup_cooldown_ok("S9", "SHORT", last_pred_short_bar), "S9", "S9 WR73")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, setup_s10 and allow_short and (not pred_round_delay_active or pred_round_short) and f_setup_cooldown_ok("S10", "SHORT", last_pred_short_bar), "S10", "S10 WR62")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, setup_s11 and allow_short and f_setup_cooldown_ok("S11", "SHORT", last_pred_short_bar), "S11", "S11 WR70")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, setup_s12 and allow_short and f_setup_cooldown_ok("S12", "SHORT", last_pred_short_bar), "S12", "S12 WR74")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, setup_s1 and allow_short and f_setup_cooldown_ok("S1", "SHORT", last_pred_short_bar), "S1", "S1 WR65%")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, setup_s5 and allow_short and (not pred_round_delay_active or (pred_round_short and f_setup_cooldown_ok("S5", "SHORT", last_pred_short_bar))), "S5", "S5 WR60%")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, fire_l1 and f_setup_cooldown_ok("L1", "LONG", last_pred_long_bar), "L1", "L1 WR64%")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, fire_l2 and (not pred_round_delay_active or (pred_round_long and f_setup_cooldown_ok("L2", "LONG", last_pred_long_bar))), "L2", "L2 WR52%")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, fire_l3 and f_setup_cooldown_ok("L3", "LONG", last_pred_long_bar), "L3", "L3 WR67%")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, setup_v1 and allow_long and (not pred_round_delay_active or (pred_round_long and f_setup_cooldown_ok("V1", "LONG", last_pred_long_bar))), "V1", "V1 WR81%")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, setup_v2 and allow_short and (not pred_round_delay_active or (pred_round_short and f_setup_cooldown_ok("V2", "SHORT", last_pred_short_bar))), "V2", "V2 WR73%")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, setup_v3 and allow_long and (not pred_round_delay_active or (pred_round_long and f_setup_cooldown_ok("V3", "LONG", last_pred_long_bar))), "V3", "V3 WR75%")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, setup_v4 and allow_long and (not pred_round_delay_active or (pred_round_long and f_setup_cooldown_ok("V4", "LONG", last_pred_long_bar))), "V4", "V4 WR64%")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, setup_l5 and allow_long and f_setup_cooldown_ok("L5", "LONG", last_pred_long_bar), "L5", "L5 WR68")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, setup_l6 and allow_long and f_setup_cooldown_ok("L6", "LONG", last_pred_long_bar), "L6", "L6 WR70")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, setup_l7 and allow_long and f_setup_cooldown_ok("L7", "LONG", last_pred_long_bar), "L7", "L7 WR73")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, setup_l8 and allow_long and (not pred_round_delay_active or pred_round_long) and f_setup_cooldown_ok("L8", "LONG", last_pred_long_bar), "L8", "L8 WR60")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, setup_l9 and allow_long and f_setup_cooldown_ok("L9", "LONG", last_pred_long_bar), "L9", "L9 WR75")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, setup_corr_bottom_mr_confirm, "81", "81 WR81%")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, setup_corr_peak_mr_confirm, "73", "73 WR73%")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, setup_bear_div_oversold, "75", "75 WR75%")
-SetupsLib.f_register_event_auto(engine_events, SETUP_DB, setup_cld_fall_rise_up, "64", "64 WR64%")
+if array.size(triggered_setups) > 0
+    for i = 0 to array.size(triggered_setups) - 1
+        SetupsDB.SetupConfig cfg = array.get(triggered_setups, i)
+        
+        // Direction-based cooldown check
+        int last_bar = cfg.dir == "SHORT" ? last_pred_short_bar : last_pred_long_bar
+        bool is_dir_allowed = (cfg.dir == "SHORT" and allow_short) or (cfg.dir == "LONG" and allow_long)
+        bool cooldown_ok = f_setup_cooldown_ok(cfg.id, cfg.dir, last_bar)
+        
+        if is_dir_allowed and cooldown_ok
+            // Register setup event
+            string tooltip_data = cfg.name + " | WR: " + str.tostring(cfg.wr, "#.#") + "% | Sharpe: " + str.tostring(cfg.sharpe, "#.###")
+            SetupsLib.f_register_event_auto(engine_events, SETUP_DB, true, cfg.id, tooltip_data)
 
 // DEBUG REMOVED: setup_debug_code, setup_debug_mask
 
@@ -3114,26 +2942,19 @@ if engine_event_count > 0
             actualfiresignal := next_fire_code
         pos := next_pos
         last_setup_trigger_bar := next_last_trigger_bar
-        // DEBUG REMOVED: entry_context_bitfield assignment
-        // Update global visualization variables (only for current bar)
+        // Update global visualization variables
         if not na(next_mae)
             mae_viz_price := next_mae
         if not na(next_mfe)
             mfe_viz_price := next_mfe
-        if setup_event.id == "81"
-            last_setup1_bar := bar_index
-        else if setup_event.id == "73"
-            last_setup2_bar := bar_index
-        else if setup_event.id == "75"
-            last_setup3_bar := bar_index
-        else if setup_event.id == "64"
-            last_setup4_bar := bar_index
-        else if setup_event.id == "V3"
-            last_pred_long_bar := bar_index
-        else if setup_event.id == "L2" or setup_event.id == "V1" or setup_event.id == "V4" or setup_event.id == "L1" or setup_event.id == "L3" or setup_event.id == "L5" or setup_event.id == "L6" or setup_event.id == "L7" or setup_event.id == "L8"
-            last_pred_long_bar := bar_index
-        else if setup_event.id == "S5" or setup_event.id == "V2" or setup_event.id == "S1" or setup_event.id == "S6" or setup_event.id == "S7" or setup_event.id == "S8" or setup_event.id == "S9" or setup_event.id == "S10" or setup_event.id == "S11"
+        
+        // Update direction-based cooldown trackers (setupsDB IDs)
+        // SHORT setups: S11, S3, S_Inn, S_Trap, S8, S4
+        // LONG setups: L6, L_Exp
+        if setup_event.id == "S11" or setup_event.id == "S3" or setup_event.id == "S_Inn" or setup_event.id == "S_Trap" or setup_event.id == "S8" or setup_event.id == "S4" or setup_event.id == "SS_TE" or setup_event.id == "S1" or setup_event.id == "L7"
             last_pred_short_bar := bar_index
+        else if setup_event.id == "L6" or setup_event.id == "L_Exp" or setup_event.id == "L9"
+            last_pred_long_bar := bar_index
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PREDFLIP + BREAKEVEN EXIT STRATEGY

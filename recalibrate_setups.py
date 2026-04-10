@@ -82,12 +82,21 @@ def extract_setup_fires(bars):
     return fires_by_id
 
 
+# Commission rate (per side, market order taker fee)
+# Bybit: 0.055% per side, Binance: 0.04-0.05% per side
+# Using 0.05% per side (0.10% round trip) as conservative baseline
+COMMISSION_PCT = 0.05  # per side, in percent
+
 def simulate_trade(bars, entry_idx, direction, tp_pct, sl_pct, max_hold):
-    """Simulate trade from entry bar."""
+    """Simulate trade from entry bar, deducting commission on entry+exit."""
     if entry_idx >= len(bars) - 1:
         return 0.0, 0.0, 0.0, 'NO_DATA'
 
     ep = bars[entry_idx]['close']
+    # Commission cost: paid on entry (full position) + exit (full position)
+    # Total commission = 2 * COMMISSION_PCT% of position value
+    commission_cost = 2 * COMMISSION_PCT
+
     mfe = 0.0
     mae = 0.0
     limit = min(entry_idx + max_hold + 1, len(bars))
@@ -99,30 +108,37 @@ def simulate_trade(bars, entry_idx, direction, tp_pct, sl_pct, max_hold):
         if direction == 'SHORT':
             favorable = (ep - lo) / ep * 100
             adverse = (ep - hi) / ep * 100
+            pnl_raw = (ep - cl) / ep * 100
             mfe = max(mfe, favorable)
             mae = min(mae, adverse)
             tp_price = ep * (1 - tp_pct / 100)
             sl_price = ep * (1 - sl_pct / 100)
             if lo <= tp_price:
-                return (ep - tp_price) / ep * 100, mfe, mae, 'TP'
+                pnl_net = (ep - tp_price) / ep * 100 - commission_cost
+                return pnl_net, mfe, mae, 'TP'
             if hi >= sl_price:
-                return (ep - sl_price) / ep * 100, mfe, mae, 'SL'
+                pnl_net = (ep - sl_price) / ep * 100 - commission_cost
+                return pnl_net, mfe, mae, 'SL'
         else:
             favorable = (hi - ep) / ep * 100
             adverse = (lo - ep) / ep * 100
+            pnl_raw = (cl - ep) / ep * 100
             mfe = max(mfe, favorable)
             mae = min(mae, adverse)
             tp_price = ep * (1 + tp_pct / 100)
             sl_price = ep * (1 + sl_pct / 100)
             if hi >= tp_price:
-                return (tp_price - ep) / ep * 100, mfe, mae, 'TP'
+                pnl_net = (tp_price - ep) / ep * 100 - commission_cost
+                return pnl_net, mfe, mae, 'TP'
             if lo <= sl_price:
-                return (sl_price - ep) / ep * 100, mfe, mae, 'SL'
+                pnl_net = (sl_price - ep) / ep * 100 - commission_cost
+                return pnl_net, mfe, mae, 'SL'
 
     last_bar = bars[min(entry_idx + max_hold, len(bars) - 1)]
     cl = last_bar['close']
-    pnl = (cl - ep) / ep * 100 if direction == 'LONG' else (ep - cl) / ep * 100
-    return pnl, mfe, mae, 'MAXHOLD'
+    pnl_raw = (cl - ep) / ep * 100 if direction == 'LONG' else (ep - cl) / ep * 100
+    pnl_net = pnl_raw - commission_cost
+    return pnl_net, mfe, mae, 'MAXHOLD'
 
 
 def compute_metrics(pnl_list):
