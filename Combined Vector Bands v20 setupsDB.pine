@@ -9,7 +9,7 @@ import cybermediaboy/TAUtilityLib/53 as TAUtilityLib
 import cybermediaboy/kNNLib/15 as kNNLib
 import cybermediaboy/BandsLib/5 as BandsLib
 import cybermediaboy/BasketLib/3 as BasketLib
-import cybermediaboy/setupsDBGem/1 as SetupsDB
+import cybermediaboy/setupsDBGem/2 as SetupsDB
 // To switch to scalping profile, change to: import cybermediaboy/setupsDBQuen/1 as SetupsDB
 indicator("Combined Vector Bands v20 setupsDB", shorttitle="CVB v20", overlay=true, max_boxes_count=500, max_labels_count=500, max_lines_count=500, dynamic_requests=true, max_bars_back=5000)
 
@@ -4154,6 +4154,9 @@ if barstate.islast
     // Show current entry context (must match thresholds at line 3236)
     int current_entry_ctx = z0 < -0.5 ? 1000 : z0 > 0.5 ? 1200 : 1100
     
+    // Show oscillator values for neutral setup debugging
+    float burst_val = burst_pct_high ? 1.0 : 0.0
+    
     string diag_text = "setupsDB Diagnostic:\n" + 
                        "bt_setups: " + str.tostring(bt_size) + "\n" +
                        "triggered_setups: " + str.tostring(triggered_size) + "\n" +
@@ -4161,9 +4164,9 @@ if barstate.islast
                        "setupsdb_cache: " + str.tostring(cache_size) + "\n" +
                        "setup_labels: " + str.tostring(label_count) + "\n" +
                        "entryCtx: " + str.tostring(current_entry_ctx) + " (z0=" + str.tostring(z0, "#.##") + ")\n" +
-                       "allow_short: " + str.tostring(allow_short) + "\n" +
-                       "allow_long: " + str.tostring(allow_long) + "\n" +
-                       "max_labels: 500"
+                       "te_osc: " + str.tostring(te_osc, "#.#") + " | basket: " + str.tostring(basket_vec_z, "#") + "\n" +
+                       "burst: " + str.tostring(burst_val, "#.#") + " | mr: " + str.tostring(mr_for_setups, "#.#") + "\n" +
+                       "allow_short: " + str.tostring(allow_short) + " | allow_long: " + str.tostring(allow_long)
     label.new(bar_index, high * 1.02, diag_text, color=color.new(color.blue, 80), 
               textcolor=color.white, style=label.style_label_down, size=size.normal)
 
