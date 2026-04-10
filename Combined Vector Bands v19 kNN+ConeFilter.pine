@@ -795,106 +795,67 @@ simple_basket_return := peer_count_active > 0 ? r_sum / peer_count_active : na
 // Create simple_basket_avg for compatibility with existing code
 simple_basket_avg := simple_basket_return
 
-// Endogenous foam suppression (OEP-style): isolate idiosyncratic shock from basket-linked move
-// Keep raw vert_dev0 for diagnostics and innovation, but derive a cleaner target-driving dev
-float basket_ret_mean_cvb = ta.sma(simple_basket_return, 50)
-float r0_mean_cvb = ta.sma(r0, 50)
-float ortho_cov_cvb = ta.sma((r0 - r0_mean_cvb) * (simple_basket_return - basket_ret_mean_cvb), 50)
-float basket_ret_var_cvb = ta.variance(simple_basket_return, 50)
-float ortho_beta_cvb = basket_ret_var_cvb > 1e-10 ? ortho_cov_cvb / basket_ret_var_cvb : 0.0
-float ortho_resid_cvb = r0 - ortho_beta_cvb * simple_basket_return
-float ortho_stdev_cvb = ta.stdev(ortho_resid_cvb, 100)
-float ortho_z_cvb = ortho_stdev_cvb > 1e-10 ? ortho_resid_cvb / ortho_stdev_cvb : 0.0
+// Endogenous foam suppression — wrapped in function (saves 12 vars from global scope)
+f_calc_clean_dev(float _r0, float _bret, float _vdev0, int _len) =>
+    float _brm = ta.sma(_bret, 50)
+    float _r0m = ta.sma(_r0, 50)
+    float _var = ta.variance(_bret, 50)
+    float _beta = _var > 1e-10 ? ta.sma((_r0 - _r0m) * (_bret - _brm), 50) / _var : 0.0
+    float _res = _r0 - _beta * _bret
+    float _std = ta.stdev(_res, 100)
+    float _z   = _std > 1e-10 ? _res / _std : 0.0
+    float _exc = math.abs(_z) > 1.5 ? math.sign(_z) * (math.abs(_z) - 1.5) * _std : 0.0
+    math.max(math.min(_vdev0, ta.stdev(_r0 - _exc, _len)), syminfo.mintick)
 
-float foam_limit = 1.5
-float excess_endo = math.abs(ortho_z_cvb) > foam_limit ? math.sign(ortho_z_cvb) * (math.abs(ortho_z_cvb) - foam_limit) * ortho_stdev_cvb : 0.0
-float clean_ret = r0 - excess_endo
-float clean_dev_raw = ta.stdev(clean_ret, basis_len)
-float vert_dev0_clean = math.max(math.min(vert_dev0, clean_dev_raw), syminfo.mintick)
+float vert_dev0_clean = f_calc_clean_dev(r0, simple_basket_return, vert_dev0, basis_len)
 
 // ══════════════════════════════════════════════════════════════
 // V13: 3-LEVEL MR ORTHOGONALIZATION
 // Removes double-counting from correlated basket peers
 // ══════════════════════════════════════════════════════════════
 
-// LEVEL 1: Pairwise Phase-Aware Spread (conditional expectation residual)
-// Fixed formula: residual = actual_z0 - expected_z0_given_peer
-// expected_z0 = rho * z_peer (works for both direct and inverse peers)
-float sp1 = (z0 - rho1 * z1_raw) * math.abs(rho1)  // weighted by |rho| for noise control
-float sp2 = (z0 - rho2 * z2_raw) * math.abs(rho2)
-float sp3 = (z0 - rho3 * z3_raw) * math.abs(rho3)
-float sp4 = (z0 - rho4 * z4_raw) * math.abs(rho4)
-
-// LEVEL 2: Exponential Accumulators (decay λ=0.80)
-// More reactive accumulators for stronger MR amplitude (T½ ≈ 3 bars vs 8 bars)
+// LEVEL 1+2: Pairwise spread inlined into EMA accumulators (saves sp1-4 + lam = 5 vars)
 var float a1 = 0.0, var float a2 = 0.0
 var float a3 = 0.0, var float a4 = 0.0
-float lam = 0.80
-a1 := a1 * lam + nz(sp1, 0.0) * (1.0 - lam)
-a2 := a2 * lam + nz(sp2, 0.0) * (1.0 - lam)
-a3 := a3 * lam + nz(sp3, 0.0) * (1.0 - lam)
-a4 := a4 * lam + nz(sp4, 0.0) * (1.0 - lam)
+a1 := a1 * 0.80 + nz((z0 - rho1 * z1_raw) * math.abs(rho1), 0.0) * 0.20
+a2 := a2 * 0.80 + nz((z0 - rho2 * z2_raw) * math.abs(rho2), 0.0) * 0.20
+a3 := a3 * 0.80 + nz((z0 - rho3 * z3_raw) * math.abs(rho3), 0.0) * 0.20
+a4 := a4 * 0.80 + nz((z0 - rho4 * z4_raw) * math.abs(rho4), 0.0) * 0.20
 
-// LEVEL 3: Gram-Schmidt Orthogonalization (simplified Cholesky)
-// LEVEL 3: Replace ta.correlation with manual β = cov/var (numerically stable)
-// β(a2|a1) = cov(a1,a2) / var(a1)
-// Modern Quant Practice: Use numerically stable covariance calculation
-float mean1 = ta.sma(a1, 50)
-float mean2 = ta.sma(a2, 50)
-float cov12 = ta.sma((a1 - mean1) * (a2 - mean2), 50)  // Stable covariance
-float var1  = ta.variance(a1, 50)
-float beta12 = var1 > 1e-10 ? cov12 / var1 : 0.0
+// LEVEL 3: Gram-Schmidt Orthogonalization — wrapped in function (saves 34 vars from global scope)
+f_gram_schmidt_orth(float _a1, float _a2, float _a3, float _a4, bool _s1, bool _s2, bool _s3, bool _s4) =>
+    float _m1  = ta.sma(_a1, 50)
+    float _v1  = ta.variance(_a1, 50)
+    float _m2  = ta.sma(_a2, 50)
+    float _b12 = _v1 > 1e-10 ? ta.sma((_a1 - _m1) * (_a2 - _m2), 50) / _v1 : 0.0
+    float _m3  = ta.sma(_a3, 50)
+    float _b13 = _v1 > 1e-10 ? ta.sma((_a1 - _m1) * (_a3 - _m3), 50) / _v1 : 0.0
+    float _m4  = ta.sma(_a4, 50)
+    float _b14 = _v1 > 1e-10 ? ta.sma((_a1 - _m1) * (_a4 - _m4), 50) / _v1 : 0.0
+    float _a2r = _a2 - _b12 * _a1
+    float _a3r = _a3 - _b13 * _a1
+    float _a4r = _a4 - _b14 * _a1
+    float _m2r = ta.sma(_a2r, 50)
+    float _v2r = ta.variance(_a2r, 50)
+    float _m3r = ta.sma(_a3r, 50)
+    float _b23 = _v2r > 1e-10 ? ta.sma((_a2r - _m2r) * (_a3r - _m3r), 50) / _v2r : 0.0
+    float _m4r = ta.sma(_a4r, 50)
+    float _b24 = _v2r > 1e-10 ? ta.sma((_a2r - _m2r) * (_a4r - _m4r), 50) / _v2r : 0.0
+    float _a3r2 = _a3r - _b23 * _a2r
+    float _a4r2 = _a4r - _b24 * _a2r
+    float _v3r  = ta.variance(_a3r2, 50)
+    float _m3r2 = ta.sma(_a3r2, 50)
+    float _m4r2 = ta.sma(_a4r2, 50)
+    float _b34  = _v3r > 1e-10 ? ta.sma((_a3r2 - _m3r2) * (_a4r2 - _m4r2), 50) / _v3r : 0.0
+    float _o4   = _a4r2 - _b34 * _a3r2
+    float _o1c  = math.max(-3.0, math.min(_a1,   3.0))
+    float _o2c  = math.max(-3.0, math.min(_a2r,  3.0))
+    float _o3c  = math.max(-3.0, math.min(_a3r2, 3.0))
+    float _o4c  = math.max(-3.0, math.min(_o4,   3.0))
+    float _ap   = (_s1 ? 0.0 : 1.0) + (_s2 ? 0.0 : 1.0) + (_s3 ? 0.0 : 1.0) + (_s4 ? 0.0 : 1.0)
+    _ap > 0.0 ? (_o1c + _o2c + _o3c + _o4c) / _ap : 0.0
 
-float mean3 = ta.sma(a3, 50)
-float cov13 = ta.sma((a1 - mean1) * (a3 - mean3), 50)  // Stable covariance
-float beta13 = var1 > 1e-10 ? cov13 / var1 : 0.0
-
-float mean4 = ta.sma(a4, 50)
-float cov14 = ta.sma((a1 - mean1) * (a4 - mean4), 50)  // Stable covariance
-float beta14 = var1 > 1e-10 ? cov14 / var1 : 0.0
-
-float a2res = a2 - beta12 * a1    // TRUE orthogonal
-float a3res = a3 - beta13 * a1
-float a4res = a4 - beta14 * a1
-
-// Second order: β(a3res|a2res)
-float var2r  = ta.variance(a2res, 50)
-float mean2r = ta.sma(a2res, 50)
-float mean3r = ta.sma(a3res, 50)
-float cov23r = ta.sma((a2res - mean2r) * (a3res - mean3r), 50)  // Stable covariance
-float beta23r = var2r > 1e-10 ? cov23r / var2r : 0.0
-
-float mean4r = ta.sma(a4res, 50)
-float cov24r = ta.sma((a2res - mean2r) * (a4res - mean4r), 50)  // Stable covariance
-float beta24r = var2r > 1e-10 ? cov24r / var2r : 0.0
-
-// Residual after removing a1 + a2res components
-float a3_res2 = a3res - beta23r * a2res
-float a4_res2 = a4res - beta24r * a2res
-
-// Third order: β(a4res2|a3res2)
-float var3r  = ta.variance(a3_res2, 50)
-float mean3r2 = ta.sma(a3_res2, 50)
-float mean4r2 = ta.sma(a4_res2, 50)
-float cov34r = ta.sma((a3_res2 - mean3r2) * (a4_res2 - mean4r2), 50)  // Stable covariance
-float beta34r = var3r > 1e-10 ? cov34r / var3r : 0.0
-
-// Final orthogonalized components
-float o1 = a1
-float o2 = a2res
-float o3 = a3_res2
-float o4 = a4_res2 - beta34r * a3_res2
-
-// After computing o1..o4: clamp to ±3 sigma and normalize by active peers
-float phi_clamp = 3.0  // max ±3 sigma equivalent
-float o1c = math.max(-phi_clamp, math.min(o1, phi_clamp))
-float o2c = math.max(-phi_clamp, math.min(o2, phi_clamp))
-float o3c = math.max(-phi_clamp, math.min(o3, phi_clamp))
-float o4c = math.max(-phi_clamp, math.min(o4, phi_clamp))
-
-// Normalize by number of active peers (exclude self-references)
-float active_peers = (is_self1 ? 0.0 : 1.0) + (is_self2 ? 0.0 : 1.0) + (is_self3 ? 0.0 : 1.0) + (is_self4 ? 0.0 : 1.0)
-float PhiTotal_orth = active_peers > 0 ? (o1c + o2c + o3c + o4c) / active_peers : 0.0
+float PhiTotal_orth = f_gram_schmidt_orth(a1, a2, a3, a4, is_self1, is_self2, is_self3, is_self4)
 
 // LEVEL 4: Raw Aggregate (no correlation normalization for stronger amplitude)
 // Use raw sum instead of weighted average for maximum MR signal strength
