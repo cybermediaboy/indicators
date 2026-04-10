@@ -1,0 +1,956 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © cybermediaboy
+// Recalibrated setup database — Quen version
+// Original SetupsLib.v19 left untouched. Swap import in indicator when ready.
+
+//@version=6
+library("SetupsLibQuen", overlay=false, dynamic_requests=true)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LEVEL TRACKER — sweep-aware TP/SL/Entry line management
+// ═══════════════════════════════════════════════════════════════════════════
+
+export type LevelTracker
+    line ln
+    float price
+    int start_bar
+    int sweep_dir       // +1=swept when high>=price, -1=swept when low<=price, 0=fixed
+    int default_len     // 10 for entry, 20 for TP/SL
+    int max_scan        // 0 for entry (no scan), 300 for TP/SL
+    bool done
+
+export f_create_level(float price, int bar_idx, int sweep_dir, int default_len, int max_scan, color col, int width, bool dashed) =>
+    LevelTracker t = LevelTracker.new(na, nz(price), bar_idx, sweep_dir, default_len, max_scan, true)
+    if not na(price)
+        t.ln := line.new(bar_idx, price, bar_idx + (sweep_dir == 0 ? default_len : 0), price, color=col, style=dashed ? line.style_dashed : line.style_solid, width=width, force_overlay=true)
+        t.done := sweep_dir == 0
+    t
+
+export f_create_tpsl_levels(array<LevelTracker> levels, string dir, float ep, float tp1, float tp2, float sl, int bar_idx, int entry_len, int default_len, int max_scan, color tp_col, color sl_col, color ep_col) =>
+    int start_idx = array.size(levels)
+    int tp_sw = dir == "LONG" ? 1 : -1
+    int sl_sw = dir == "LONG" ? -1 : 1
+    array.push(levels, f_create_level(ep, bar_idx, 0, entry_len, 0, ep_col, 1, true))
+    array.push(levels, f_create_level(tp1, bar_idx, tp_sw, default_len, max_scan, tp_col, 2, false))
+    array.push(levels, f_create_level(tp2, bar_idx, tp_sw, default_len, max_scan, tp_col, 1, true))
+    array.push(levels, f_create_level(sl, bar_idx, sl_sw, default_len, max_scan, sl_col, 2, false))
+    [start_idx, 4]
+
+export f_update_levels(array<LevelTracker> levels, float hi, float lo, int current_bar) =>
+    bool updated = false
+    int n = array.size(levels)
+    if n > 0
+        for i = 0 to n - 1
+            LevelTracker t = array.get(levels, i)
+            if not t.done and not na(t.ln)
+                int age = current_bar - t.start_bar
+                bool swept = (t.sweep_dir > 0 and hi >= t.price) or (t.sweep_dir < 0 and lo <= t.price)
+                bool late_expired = age > t.max_scan
+                bool within_active_window = age <= t.default_len and age <= t.max_scan
+                int new_x2 = late_expired ? (t.start_bar + t.default_len) : (swept ? current_bar : (within_active_window ? current_bar : na))
+                if not na(new_x2)
+                    line.set_x2(t.ln, new_x2)
+                    t.done := late_expired or swept
+                    updated := true
+    updated
+
+export f_remove_levels(array<LevelTracker> levels, int start_idx, int count) =>
+    int end_idx = math.min(start_idx + count, array.size(levels))
+    if start_idx >= 0 and start_idx < array.size(levels)
+        for i = start_idx to end_idx - 1
+            LevelTracker t = array.get(levels, i)
+            if not na(t.ln)
+                line.delete(t.ln)
+            t.done := true
+
+export f_freeze_levels(array<LevelTracker> levels, int start_idx, int count) =>
+    int end_idx = math.min(start_idx + count, array.size(levels))
+    if start_idx >= 0 and start_idx < array.size(levels)
+        for i = start_idx to end_idx - 1
+            LevelTracker t = array.get(levels, i)
+            t.done := true
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FAMILY + SETUP V19 CORE TYPES
+// ═══════════════════════════════════════════════════════════════════════════
+
+export type Family
+    int id = 4
+    string label = "UNC"
+    string name = "Uncertain"
+    int direction = 0
+    bool directional = false
+    color col = color.gray
+
+export type SetupSpec
+    string id
+    string name
+    string dir
+    Family family = na
+    float wr
+    float sharpe
+    float tp_pct
+    float sl_pct
+    int avg_bars
+    string tooltip
+    int timestop = na
+    float edge_ratio = 1.0
+    string thesis = "MOMENTUM"
+    int thesis_flags = 0
+    int showstopper_mask = 0
+    float impulse_penalty_scale = 1.0
+    int code = 0
+    int mask = 0
+
+export f_build_family_table() =>
+    array<Family> fam = array.new<Family>(5)
+    array.set(fam, 0, Family.new(0, "CONT", "Continuation", 0, false, color.green))
+    array.set(fam, 1, Family.new(1, "MR", "Mean Reversion", 0, false, color.purple))
+    array.set(fam, 2, Family.new(2, "TRAN", "Transition", 0, false, color.orange))
+    array.set(fam, 3, Family.new(3, "VEL", "Velocity", 0, false, color.aqua))
+    array.set(fam, 4, Family.new(4, "UNC", "Uncertain", 0, false, color.gray))
+    fam
+
+export f_family_get(array<Family> fam, int id) =>
+    int safe = math.max(0, math.min(id, array.size(fam) - 1))
+    array.get(fam, safe)
+
+export f_family_match(int fam_a, int fam_b, bool soft) =>
+    if fam_a == fam_b
+        true
+    else if soft and (fam_a == 4 or fam_b == 4)
+        fam_a != 4 or fam_b != 4
+    else
+        false
+
+export f_classify_market_state(array<Family> fam,
+     float position, float velocity, float pressure,
+     float coupling, float mrstate) =>
+    bool mr_bias = mrstate > 0.5
+    bool mr_override = mrstate > 0.85
+    bool continuation = math.abs(velocity) > 0.12 and math.sign(velocity) == math.sign(pressure) and coupling > 0.5 and not mr_bias
+    bool meanrevert = math.abs(position) > 1.0 and (mr_bias or math.sign(position) != math.sign(velocity) or math.abs(velocity) < 0.08 or mr_override)
+    bool transition = (math.abs(velocity) < 0.06 and math.abs(pressure) > 0.75) or (math.abs(position) < 0.4 and math.abs(pressure) > 1.0 and coupling > 0.35 and not mr_bias)
+    bool velocityctx = coupling < 0.35 or (coupling < 0.5 and math.abs(pressure) > 0.8)
+
+    if mr_override
+        array.get(fam, 1)
+    else if mr_bias and not meanrevert and not transition and not velocityctx
+        array.get(fam, 1)
+    else if meanrevert
+        array.get(fam, 1)
+    else if transition
+        array.get(fam, 2)
+    else if velocityctx
+        array.get(fam, 3)
+    else if continuation
+        array.get(fam, 0)
+    else
+        array.get(fam, 4)
+
+export type SetupSignal
+    string id
+    string tooltip
+    bool use_pred_rounding
+    bool debug_enabled
+    string size_info
+
+export type SetupEvent
+    string id
+    string tooltip
+    string size_info
+    float confidence
+    int showstopper_hits
+
+export type SetupContext
+    float vec_osc
+    float mr_osc
+    float te_osc
+    float corr_osc
+    float ltf_corr
+    float pred_slope
+    float vec_p25
+    float vec_p75
+    float mr_p25
+    float mr_p75
+    float mr_p2
+    float mr_p98
+    float te_p25
+    float te_p75
+    float corr_p20
+    float corr_p80
+    float ltf_p20
+    float ltf_p80
+    float pred_p25
+    float pred_p75
+
+export type OscContext
+    array<float> values
+    array<float> p25
+    array<float> p75
+    array<float> p_lo
+    array<float> p_hi
+
+export type ValidationState
+    string validating_setup_id = na
+    int setup_trigger_bar = na
+    float setup_entry_price = na
+    string setup_direction = na
+    float current_mae_p10 = na
+    float current_mfe_p90 = na
+    float current_mae_alt = na
+    float current_mfe_alt = na
+    string selected_validation_direction = na
+    int validation_phase = 0
+    float mae_viz_price = na
+    float mfe_viz_price = na
+    label validating_label = na
+    string validating_tooltip = na
+    string pending_setup_id = na
+    int pending_trigger_bar = na
+    float pending_entry_price = na
+    string pending_direction = na
+    label pending_label = na
+    string pending_tooltip = na
+    int pending_phase = 0
+
+export const int SS_NONE = 0
+export const int SS_VEC_GT_P75 = 1
+export const int SS_VEC_LT_P25 = 2
+export const int SS_MR_GT_P75 = 4
+export const int SS_MR_LT_P25 = 8
+export const int SS_TE_GT_P75 = 16
+export const int SS_TE_LT_P25 = 32
+export const int SS_CORR_GT_P75 = 64
+export const int SS_CORR_LT_P25 = 128
+export const int SS_LTF_GT_P80 = 256
+export const int SS_LTF_LT_P20 = 512
+export const int SS_PRED_GT_P75 = 1024
+export const int SS_PRED_LT_P25 = 2048
+
+export const int SLOT_VEC = 0
+export const int SLOT_MR = 1
+export const int SLOT_TE = 2
+export const int SLOT_CORR = 3
+export const int SLOT_LTF = 4
+export const int SLOT_PRED = 5
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HELPER FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+f_bitwise_and(int a, int b) =>
+    int result = 0
+    int bit_val = 1
+    int temp_a = a
+    int temp_b = b
+    for i = 0 to 12
+        if (temp_a % 2 == 1) and (temp_b % 2 == 1)
+            result += bit_val
+        temp_a := int(temp_a / 2)
+        temp_b := int(temp_b / 2)
+        bit_val *= 2
+    result
+
+f_get_edge_ratio_meta(string setup_id) =>
+    float edge_ratio = 1.0
+    if setup_id == "S1"
+        edge_ratio := 1.08
+    else if setup_id == "S2"
+        edge_ratio := 0.98
+    else if setup_id == "S3"
+        edge_ratio := 0.95
+    else if setup_id == "S5"
+        edge_ratio := 1.08
+    else if setup_id == "S6"
+        edge_ratio := 1.15
+    else if setup_id == "S7"
+        edge_ratio := 1.10
+    else if setup_id == "S8"
+        edge_ratio := 1.20
+    else if setup_id == "S9"
+        edge_ratio := 1.25
+    else if setup_id == "S10"
+        edge_ratio := 1.30
+    else if setup_id == "L1"
+        edge_ratio := 1.17
+    else if setup_id == "L2"
+        edge_ratio := 1.30
+    else if setup_id == "L3"
+        edge_ratio := 1.15
+    else if setup_id == "L4"
+        edge_ratio := 1.05
+    else if setup_id == "L5"
+        edge_ratio := 1.18
+    else if setup_id == "L6"
+        edge_ratio := 1.12
+    else if setup_id == "L7"
+        edge_ratio := 1.22
+    else if setup_id == "L8"
+        edge_ratio := 1.28
+    else if setup_id == "V1"
+        edge_ratio := 1.17
+    else if setup_id == "V2"
+        edge_ratio := 1.26
+    else if setup_id == "V3"
+        edge_ratio := 1.14
+    else if setup_id == "V4"
+        edge_ratio := 0.97
+    else if setup_id == "81"
+        edge_ratio := 1.20
+    else if setup_id == "73"
+        edge_ratio := 1.15
+    else if setup_id == "75"
+        edge_ratio := 1.10
+    else if setup_id == "64"
+        edge_ratio := 1.05
+    edge_ratio
+
+f_get_thesis_meta(string setup_id) =>
+    string thesis = "MOMENTUM"
+    if setup_id == "S1" or setup_id == "S3" or setup_id == "S5" or setup_id == "S7" or setup_id == "S8" or setup_id == "S9" or setup_id == "S10"
+        thesis := "DECOUPLE"
+    else if setup_id == "S2" or setup_id == "S6" or setup_id == "V1" or setup_id == "V2" or setup_id == "V3" or setup_id == "81" or setup_id == "73" or setup_id == "75" or setup_id == "L5"
+        thesis := "MR"
+    else if setup_id == "L3" or setup_id == "L6" or setup_id == "L8" or setup_id == "V4"
+        thesis := "RECOUPLE"
+    else if setup_id == "L2"
+        thesis := "INNOVATION"
+    thesis
+
+f_get_showstopper_mask_meta(string setup_id) =>
+    int showstopper_mask = SS_NONE
+    if setup_id == "S2" or setup_id == "S3"
+        showstopper_mask := SS_VEC_LT_P25
+    else if setup_id == "S6" or setup_id == "S10" or setup_id == "L3" or setup_id == "L4" or setup_id == "L8" or setup_id == "V3" or setup_id == "81" or setup_id == "75"
+        showstopper_mask := SS_VEC_GT_P75
+    else if setup_id == "S7"
+        showstopper_mask := SS_TE_LT_P25
+    else if setup_id == "S8"
+        showstopper_mask := SS_VEC_LT_P25
+    else if setup_id == "S9" or setup_id == "L2" or setup_id == "V3"
+        showstopper_mask := showstopper_mask + SS_PRED_GT_P75
+    else if setup_id == "L1" or setup_id == "L7"
+        showstopper_mask := SS_MR_LT_P25
+    else if setup_id == "L5"
+        showstopper_mask := SS_MR_GT_P75
+    else if setup_id == "L6" or setup_id == "V4"
+        showstopper_mask := SS_TE_LT_P25
+    else if setup_id == "V1"
+        showstopper_mask := SS_MR_LT_P25 + SS_LTF_LT_P20
+    else if setup_id == "V2"
+        showstopper_mask := SS_LTF_GT_P80
+    showstopper_mask
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CORE FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+export f_eval_showstoppers(int mask, OscContext ctx) =>
+    bool triggered = false
+    if f_bitwise_and(mask, SS_VEC_GT_P75) != 0
+        if array.get(ctx.values, SLOT_VEC) > array.get(ctx.p75, SLOT_VEC)
+            triggered := true
+    if f_bitwise_and(mask, SS_VEC_LT_P25) != 0
+        if array.get(ctx.values, SLOT_VEC) < array.get(ctx.p25, SLOT_VEC)
+            triggered := true
+    if f_bitwise_and(mask, SS_MR_GT_P75) != 0
+        if array.get(ctx.values, SLOT_MR) > array.get(ctx.p75, SLOT_MR)
+            triggered := true
+    if f_bitwise_and(mask, SS_MR_LT_P25) != 0
+        if array.get(ctx.values, SLOT_MR) < array.get(ctx.p25, SLOT_MR)
+            triggered := true
+    if f_bitwise_and(mask, SS_TE_GT_P75) != 0
+        if array.get(ctx.values, SLOT_TE) > array.get(ctx.p75, SLOT_TE)
+            triggered := true
+    if f_bitwise_and(mask, SS_TE_LT_P25) != 0
+        if array.get(ctx.values, SLOT_TE) < array.get(ctx.p25, SLOT_TE)
+            triggered := true
+    if f_bitwise_and(mask, SS_CORR_GT_P75) != 0
+        if array.get(ctx.values, SLOT_CORR) > array.get(ctx.p_hi, SLOT_CORR)
+            triggered := true
+    if f_bitwise_and(mask, SS_CORR_LT_P25) != 0
+        if array.get(ctx.values, SLOT_CORR) < array.get(ctx.p_lo, SLOT_CORR)
+            triggered := true
+    if f_bitwise_and(mask, SS_LTF_GT_P80) != 0
+        if array.get(ctx.values, SLOT_LTF) > array.get(ctx.p_hi, SLOT_LTF)
+            triggered := true
+    if f_bitwise_and(mask, SS_LTF_LT_P20) != 0
+        if array.get(ctx.values, SLOT_LTF) < array.get(ctx.p_lo, SLOT_LTF)
+            triggered := true
+    if f_bitwise_and(mask, SS_PRED_GT_P75) != 0
+        if array.get(ctx.values, SLOT_PRED) > array.get(ctx.p75, SLOT_PRED)
+            triggered := true
+    if f_bitwise_and(mask, SS_PRED_LT_P25) != 0
+        if array.get(ctx.values, SLOT_PRED) < array.get(ctx.p25, SLOT_PRED)
+            triggered := true
+    triggered
+
+export f_check_showstoppers(SetupSpec spec, SetupContext ctx) =>
+    int mask = f_get_showstopper_mask_meta(spec.id)
+    int hits = 0
+    string reason = ""
+    bool blocked = false
+    if mask != SS_NONE
+        if math.floor(mask / SS_VEC_GT_P75) % 2 != 0 and not na(ctx.vec_osc) and not na(ctx.vec_p75) and ctx.vec_osc > ctx.vec_p75
+            hits += 1
+            reason += "vec>P75 "
+        if math.floor(mask / SS_VEC_LT_P25) % 2 != 0 and not na(ctx.vec_osc) and not na(ctx.vec_p25) and ctx.vec_osc < ctx.vec_p25
+            hits += 1
+            reason += "vec<P25 "
+        if math.floor(mask / SS_MR_GT_P75) % 2 != 0 and not na(ctx.mr_osc) and not na(ctx.mr_p75) and ctx.mr_osc > ctx.mr_p75
+            hits += 1
+            reason += "mr>P75 "
+        if math.floor(mask / SS_MR_LT_P25) % 2 != 0 and not na(ctx.mr_osc) and not na(ctx.mr_p25) and ctx.mr_osc < ctx.mr_p25
+            hits += 1
+            reason += "mr<P25 "
+        if math.floor(mask / SS_TE_GT_P75) % 2 != 0 and not na(ctx.te_osc) and not na(ctx.te_p75) and ctx.te_osc > ctx.te_p75
+            hits += 1
+            reason += "te>P75 "
+        if math.floor(mask / SS_TE_LT_P25) % 2 != 0 and not na(ctx.te_osc) and not na(ctx.te_p25) and ctx.te_osc < ctx.te_p25
+            hits += 1
+            reason += "te<P25 "
+        if math.floor(mask / SS_CORR_GT_P75) % 2 != 0 and not na(ctx.corr_osc) and not na(ctx.corr_p80) and ctx.corr_osc > ctx.corr_p80
+            hits += 1
+            reason += "corr>P80 "
+        if math.floor(mask / SS_CORR_LT_P25) % 2 != 0 and not na(ctx.corr_osc) and not na(ctx.corr_p20) and ctx.corr_osc < ctx.corr_p20
+            hits += 1
+            reason += "corr<P20 "
+        if math.floor(mask / SS_LTF_GT_P80) % 2 != 0 and not na(ctx.ltf_corr) and not na(ctx.ltf_p80) and ctx.ltf_corr > ctx.ltf_p80
+            hits += 1
+            reason += "ltf>P80 "
+        if math.floor(mask / SS_LTF_LT_P20) % 2 != 0 and not na(ctx.ltf_corr) and not na(ctx.ltf_p20) and ctx.ltf_corr < ctx.ltf_p20
+            hits += 1
+            reason += "ltf<P20 "
+        if math.floor(mask / SS_PRED_GT_P75) % 2 != 0 and not na(ctx.pred_slope) and not na(ctx.pred_p75) and ctx.pred_slope > ctx.pred_p75
+            hits += 1
+            reason += "pred>P75 "
+        if math.floor(mask / SS_PRED_LT_P25) % 2 != 0 and not na(ctx.pred_slope) and not na(ctx.pred_p25) and ctx.pred_slope < ctx.pred_p25
+            hits += 1
+            reason += "pred<P25 "
+        blocked := hits > 0
+    [blocked, hits, reason]
+
+export f_score_confidence(SetupSpec spec, SetupContext ctx, float impulse_strength) =>
+    float base = math.max(0.0, math.min(spec.wr / 100.0, 1.0))
+    float edge_ratio = f_get_edge_ratio_meta(spec.id)
+    string thesis = f_get_thesis_meta(spec.id)
+    float edge_bonus = edge_ratio > 1.2 ? 0.10 : (edge_ratio < 0.9 ? -0.15 : 0.0)
+    float impulse_pen = 0.0
+    if thesis == "MR" or thesis == "DECOUPLE"
+        impulse_pen := -impulse_strength * 0.20
+    float coupling_pen = 0.0
+    if thesis == "MOMENTUM" or thesis == "RECOUPLE"
+        if not na(ctx.ltf_corr) and not na(ctx.ltf_p20) and ctx.ltf_corr < ctx.ltf_p20
+            coupling_pen := -0.15
+    math.max(0.05, math.min(base + edge_bonus + impulse_pen + coupling_pen, 1.0))
+
+export f_register_event_v2(array<SetupEvent> events, bool condition, SetupSpec spec, OscContext ctx, float impulse_strength, string size_info) =>
+    SetupEvent evt = na
+    if condition
+        bool showstopper_triggered = false
+        if spec.showstopper_mask != 0
+            showstopper_triggered := f_eval_showstoppers(spec.showstopper_mask, ctx)
+        float base_confidence = spec.wr / 100.0
+        float confidence = base_confidence
+        if f_bitwise_and(spec.thesis_flags, 1) != 0 and impulse_strength > 0.5
+            float impulse_penalty = (impulse_strength - 0.5) * spec.impulse_penalty_scale
+            confidence *= (1.0 - impulse_penalty)
+        if f_bitwise_and(spec.thesis_flags, 2) != 0
+            float coupling_val = array.get(ctx.values, SLOT_CORR)
+            if coupling_val < 0.4
+                float coupling_penalty = (0.4 - coupling_val) * 0.5
+                confidence *= (1.0 - coupling_penalty)
+        if not showstopper_triggered
+            int ss_hits = showstopper_triggered ? 1 : 0
+            evt := SetupEvent.new(spec.id, spec.tooltip, size_info, confidence, ss_hits)
+            array.push(events, evt)
+    evt
+
+export f_get_mc_family_from_setup(string setup_id) =>
+    int family = 4
+    if setup_id == "V2" or setup_id == "73" or setup_id == "75" or setup_id == "S6" or setup_id == "L5"
+        family := 1
+    else if setup_id == "V3"
+        family := 2
+    else if setup_id == "S1" or setup_id == "S5" or setup_id == "V4" or setup_id == "L3" or setup_id == "64" or setup_id == "S7" or setup_id == "L8"
+        family := 3
+    else if setup_id == "L1" or setup_id == "L2" or setup_id == "V1" or setup_id == "81" or setup_id == "S8" or setup_id == "L6" or setup_id == "L7"
+        family := 0
+    family
+
+export f_setup_id_to_code(string setup_id) =>
+    int setup_code = 0
+    if setup_id == "S1"
+        setup_code := 101
+    else if setup_id == "S5"
+        setup_code := 105
+    else if setup_id == "S6"
+        setup_code := 106
+    else if setup_id == "S7"
+        setup_code := 107
+    else if setup_id == "S8"
+        setup_code := 108
+    else if setup_id == "S9"
+        setup_code := 109
+    else if setup_id == "S10"
+        setup_code := 110
+    else if setup_id == "S11"
+        setup_code := 111
+    else if setup_id == "S12"
+        setup_code := 112
+    else if setup_id == "L1"
+        setup_code := 201
+    else if setup_id == "L2"
+        setup_code := 202
+    else if setup_id == "L3"
+        setup_code := 203
+    else if setup_id == "L4"
+        setup_code := 104
+    else if setup_id == "L5"
+        setup_code := 205
+    else if setup_id == "L6"
+        setup_code := 206
+    else if setup_id == "L7"
+        setup_code := 207
+    else if setup_id == "L8"
+        setup_code := 208
+    else if setup_id == "L9"
+        setup_code := 209
+    else if setup_id == "V1"
+        setup_code := 301
+    else if setup_id == "V2"
+        setup_code := 302
+    else if setup_id == "V3"
+        setup_code := 303
+    else if setup_id == "V4"
+        setup_code := 304
+    else if setup_id == "81"
+        setup_code := 381
+    else if setup_id == "73"
+        setup_code := 373
+    else if setup_id == "75"
+        setup_code := 375
+    else if setup_id == "64"
+        setup_code := 364
+    setup_code
+
+export f_setup_id_to_mask(string setup_id) =>
+    int setup_mask = 0
+    if setup_id == "S1"
+        setup_mask := 1
+    else if setup_id == "S5"
+        setup_mask := 4
+    else if setup_id == "S6"
+        setup_mask := 8192
+    else if setup_id == "S7"
+        setup_mask := 16384
+    else if setup_id == "S8"
+        setup_mask := 32768
+    else if setup_id == "S9"
+        setup_mask := 65536
+    else if setup_id == "S10"
+        setup_mask := 131072
+    else if setup_id == "S11"
+        setup_mask := 16777216
+    else if setup_id == "S12"
+        setup_mask := 8388608
+    else if setup_id == "L1"
+        setup_mask := 8
+    else if setup_id == "L2"
+        setup_mask := 16
+    else if setup_id == "L3"
+        setup_mask := 32
+    else if setup_id == "L4"
+        setup_mask := 2
+    else if setup_id == "L5"
+        setup_mask := 262144
+    else if setup_id == "L6"
+        setup_mask := 524288
+    else if setup_id == "L7"
+        setup_mask := 1048576
+    else if setup_id == "L8"
+        setup_mask := 2097152
+    else if setup_id == "L9"
+        setup_mask := 4194304
+    else if setup_id == "V1"
+        setup_mask := 64
+    else if setup_id == "V2"
+        setup_mask := 128
+    else if setup_id == "V3"
+        setup_mask := 256
+    else if setup_id == "V4"
+        setup_mask := 512
+    else if setup_id == "81"
+        setup_mask := 1024
+    else if setup_id == "73"
+        setup_mask := 2048
+    else if setup_id == "75"
+        setup_mask := 4096
+    else if setup_id == "64"
+        setup_mask := 4194304
+    setup_mask
+
+export f_calc_tpsl(string dir, float ep, float tp_pct, float sl_pct, float z2_up, float z2_dn, float z3_up, float z3_dn, bool use_zones) =>
+    float raw_tp = dir == "LONG" ? ep * (1 + tp_pct / 100) : ep * (1 - tp_pct / 100)
+    float raw_sl = dir == "LONG" ? ep * (1 + sl_pct / 100) : ep * (1 - sl_pct / 100)
+    float tp1 = raw_tp
+    float zone_tp2 = dir == "LONG" ? z2_up : z2_dn
+    float zone_tp3 = dir == "LONG" ? z3_up : z3_dn
+    float zone_sl = dir == "LONG" ? z2_dn : z2_up
+    bool zone_tp2_valid = not na(zone_tp2) and (dir == "LONG" ? zone_tp2 > ep : zone_tp2 < ep)
+    bool zone_tp3_valid = not na(zone_tp3) and (dir == "LONG" ? zone_tp3 > ep : zone_tp3 < ep)
+    bool zone_sl_valid = not na(zone_sl) and (dir == "LONG" ? zone_sl < ep : zone_sl > ep)
+    float tp2 = use_zones and zone_tp2_valid ? zone_tp2 : raw_tp
+    float tp3 = use_zones and zone_tp3_valid ? zone_tp3 : raw_tp
+    float sl = use_zones ? (zone_sl_valid ? (dir == "LONG" ? math.min(raw_sl, zone_sl) : math.max(raw_sl, zone_sl)) : raw_sl) : raw_sl
+    [tp1, tp2, tp3, sl]
+
+export f_find_setup_spec(array<SetupSpec> setup_db, string setup_id) =>
+    string found_name = ""
+    string found_dir = ""
+    float found_wr = na
+    float found_sharpe = na
+    float found_tp = na
+    float found_sl = na
+    int found_avg_bars = na
+    string found_tooltip = ""
+    int db_size = array.size(setup_db)
+    for i = 0 to db_size - 1
+        SetupSpec spec = array.get(setup_db, i)
+        if spec.id == setup_id
+            found_name := spec.name
+            found_dir := spec.dir
+            found_wr := spec.wr
+            found_sharpe := spec.sharpe
+            found_tp := spec.tp_pct
+            found_sl := spec.sl_pct
+            found_avg_bars := spec.avg_bars
+            found_tooltip := spec.tooltip
+            break
+    [found_name, found_dir, found_wr, found_sharpe, found_tp, found_sl, found_avg_bars, found_tooltip]
+
+export f_get_setup_horizon(array<SetupSpec> setup_db, string setup_id, int fallback_horizon) =>
+    int horizon = fallback_horizon
+    int setup_db_size = array.size(setup_db)
+    if setup_db_size > 0
+        for i = 0 to setup_db_size - 1
+            SetupSpec spec = array.get(setup_db, i)
+            if spec.id == setup_id
+                horizon := spec.avg_bars
+                break
+    horizon
+
+export f_register_event(array<SetupEvent> engine_events, bool fire_condition, string setup_id, string setup_tooltip, string setup_size_info) =>
+    if fire_condition
+        array.push(engine_events, SetupEvent.new(setup_id, setup_tooltip, setup_size_info, 0.5, 0))
+
+export f_register_event_auto(array<SetupEvent> engine_events, array<SetupSpec> setup_db, bool fire_condition, string setup_id, string setup_size_info) =>
+    if fire_condition
+        string tooltip = ""
+        int db_size = array.size(setup_db)
+        for i = 0 to db_size - 1
+            SetupSpec spec = array.get(setup_db, i)
+            if spec.id == setup_id
+                tooltip := spec.tooltip
+                break
+        array.push(engine_events, SetupEvent.new(setup_id, tooltip, setup_size_info, 0.5, 0))
+
+export f_collect_debug(array<SetupEvent> engine_events) =>
+    int setup_debug_code = 0
+    int setup_debug_mask = 0
+    int event_count = array.size(engine_events)
+    if event_count > 0
+        for i = 0 to event_count - 1
+            SetupEvent setup_event = array.get(engine_events, i)
+            setup_debug_code := f_setup_id_to_code(setup_event.id)
+            setup_debug_mask += f_setup_id_to_mask(setup_event.id)
+    [setup_debug_code, setup_debug_mask]
+
+export f_get_spec(array<SetupSpec> setup_db, string setup_id) =>
+    SetupSpec result = na
+    int db_size = array.size(setup_db)
+    if db_size > 0
+        for i = 0 to db_size - 1
+            SetupSpec spec = array.get(setup_db, i)
+            if spec.id == setup_id
+                result := spec
+                break
+    result
+
+export f_build_setup_db_v19(array<Family> fam) =>
+    array<SetupSpec> db = array.new<SetupSpec>()
+
+    Family FAM_CONT = f_family_get(fam, 0)
+    Family FAM_MR = f_family_get(fam, 1)
+    Family FAM_TRAN = f_family_get(fam, 2)
+    Family FAM_VEL = f_family_get(fam, 3)
+    Family FAM_UNC = f_family_get(fam, 4)
+
+    SetupSpec s1 = SetupSpec.new("S1", "TE0.8+LTFlow", "SHORT", FAM_VEL, 64.5, 10.90, 0.80, -1.20, 12, "WR64.5 Sh10.90 t*=12", na, 1.08, "DECOUPLE", 0, SS_NONE, 1.0, 101, 1)
+    SetupSpec s2 = SetupSpec.new("S2", "BDiv+MR+TE0.8", "SHORT", FAM_MR, 50.0, 8.13, 0.80, -1.20, 10, "WR50 Sh8.13 MAE-0.38", na, 0.98, "MR", 0, SS_VEC_LT_P25, 1.0, 102, 2)
+    SetupSpec s3 = SetupSpec.new("S3", "TE0.8+BDiv+Vec", "SHORT", FAM_VEL, 53.3, 6.72, 0.80, -1.20, 15, "WR53.3 Sh6.72 MAE-0.43", na, 0.95, "DECOUPLE", 0, SS_VEC_LT_P25, 1.0, 103, 4)
+    SetupSpec s5 = SetupSpec.new("S5", "LTFlow", "SHORT", FAM_VEL, 60.2, 6.01, 0.80, -1.50, 10, "WR60.2 Sh6.01 t*=9", na, 1.08, "DECOUPLE", 0, SS_NONE, 1.0, 105, 4)
+    SetupSpec s6 = SetupSpec.new("S6", "MRStrict-0.5", "SHORT", FAM_MR, 65.0, 11.11, 0.80, -1.20, 8, "WR65 Sh11.11 Ann92", na, 1.15, "MR", 0, SS_VEC_GT_P75, 1.0, 106, 8192)
+    SetupSpec s7 = SetupSpec.new("S7", "TE+VecDiv", "SHORT", FAM_VEL, 61.0, 8.30, 0.80, -1.20, 15, "WR61 Sh8.30 Ann135", na, 1.10, "DECOUPLE", 0, SS_VEC_LT_P25, 1.0, 107, 16384)
+    SetupSpec s8 = SetupSpec.new("S8", "SReentry+VecDiv", "SHORT", FAM_VEL, 69.2, 4.75, 0.80, -1.20, 12, "WR69.2 Sh4.75", na, 1.20, "DECOUPLE", 0, SS_NONE, 1.0, 108, 32768)
+    SetupSpec s9 = SetupSpec.new("S9", "CFV+TE+LTFlo", "SHORT", FAM_VEL, 73.0, 10.30, 0.80, -1.20, 16, "WR73 Sh10.3 Ann248", na, 1.25, "DECOUPLE", 0, SS_PRED_GT_P75, 1.0, 109, 65536)
+    SetupSpec s10 = SetupSpec.new("S10", "PredMA+VelDec", "SHORT", FAM_VEL, 61.5, 12.80, 0.80, -1.20, 14, "WR61.5 Sh12.8 Ann252", na, 1.30, "DECOUPLE", 0, SS_VEC_GT_P75, 1.0, 110, 131072)
+    SetupSpec s12 = SetupSpec.new("S12", "PhiDiv+MRinfl", "SHORT", FAM_TRAN, 73.9, 8.20, 0.80, -1.20, 12, "WR73.9 avg-0.45% PhiLatch lead", na, 1.18, "INNOVATION", 0, SS_MR_GT_P75, 1.0, 112, 8388608)
+    SetupSpec l1 = SetupSpec.new("L1", "TE0.8+CFVrise", "LONG", FAM_TRAN, 63.6, 11.34, 0.80, -1.20, 15, "WR63.6 Sh11.34 MAE-0.20", na, 1.17, "MR", 0, SS_MR_LT_P25, 1.0, 201, 8)
+    SetupSpec l2 = SetupSpec.new("L2", "CFVrising", "LONG", FAM_TRAN, 51.7, 10.79, 0.80, -1.20, 14, "WR51.7 Sh10.79 t*=12", na, 1.30, "INNOVATION", 0, SS_PRED_GT_P75, 1.0, 202, 16)
+    SetupSpec l3 = SetupSpec.new("L3", "CFV+VelRec", "LONG", FAM_TRAN, 66.7, 9.04, 0.80, -1.20, 16, "WR66.7 Sh9.04 MAE-0.35", na, 1.15, "RECOUPLE", 0, SS_VEC_GT_P75, 1.0, 203, 32)
+    SetupSpec l4 = SetupSpec.new("L4", "Trans+TE0.8", "LONG", FAM_TRAN, 55.8, 8.45, 0.80, -1.20, 12, "WR55.8 Sh8.45 MAE-0.47", na, 1.05, "RECOUPLE", 0, SS_VEC_GT_P75, 1.0, 104, 2)
+    SetupSpec l5 = SetupSpec.new("L5", "MRStrict+0.5", "LONG", FAM_MR, 68.0, 9.09, 0.80, -1.20, 8, "WR68 Sh9.09 Ann88", na, 1.18, "MR", 0, SS_MR_GT_P75, 1.0, 205, 262144)
+    SetupSpec l6 = SetupSpec.new("L6", "LReentry+VecDiv", "LONG", FAM_TRAN, 70.0, 5.00, 0.80, -1.20, 12, "WR70 Sh5.00", na, 1.12, "RECOUPLE", 0, SS_TE_LT_P25, 1.0, 206, 524288)
+    SetupSpec l7 = SetupSpec.new("L7", "CFV+TE+LTFhi", "LONG", FAM_TRAN, 72.5, 9.80, 0.80, -1.20, 16, "WR72.5 Sh9.8 Ann235", na, 1.22, "MR", 0, SS_MR_LT_P25, 1.0, 207, 1048576)
+    SetupSpec l8 = SetupSpec.new("L8", "PredMA+VelRec", "LONG", FAM_TRAN, 60.0, 11.50, 0.80, -1.20, 14, "WR60 Sh11.5 Ann220", na, 1.28, "RECOUPLE", 0, SS_VEC_GT_P75, 1.0, 208, 2097152)
+    SetupSpec l9 = SetupSpec.new("L9", "PhiDiv+MRinfl", "LONG", FAM_TRAN, 75.3, 9.50, 0.80, -1.20, 15, "WR75.3 avg+0.80% PhiLatch lead", na, 1.22, "INNOVATION", 0, SS_MR_LT_P25, 1.0, 209, 4194304)
+    SetupSpec v1 = SetupSpec.new("V1", "BounceFire", "LONG", FAM_UNC, 81.0, 6.10, 0.80, -1.20, 8, "WR81 Sortino18.3 t*=6", na, 1.17, "MR", 0, SS_MR_LT_P25 + SS_LTF_LT_P20, 1.0, 301, 64)
+    SetupSpec v2 = SetupSpec.new("V2", "MRSetup", "SHORT", FAM_MR, 73.0, 4.40, 0.80, -1.20, 10, "WR73 Sh4.4 t*=5", na, 1.26, "MR", 0, SS_LTF_GT_P80, 1.0, 302, 128)
+    SetupSpec v3 = SetupSpec.new("V3", "Transition", "LONG", FAM_TRAN, 75.0, 2.30, 0.80, -1.20, 12, "N=92 merge→V1 boost", na, 1.14, "MR", 0, SS_VEC_GT_P75 + SS_PRED_GT_P75, 1.0, 303, 256)
+    SetupSpec v4 = SetupSpec.new("V4", "VelRecouple", "LONG", FAM_TRAN, 64.0, 2.80, 0.80, -1.50, 14, "WR64 edge<1 tighten", na, 0.97, "RECOUPLE", 0, SS_TE_LT_P25, 1.0, 304, 512)
+    SetupSpec s81 = SetupSpec.new("81", "CORR⊥+MR", "LONG", FAM_UNC, 81.0, 0.0, 0.80, -1.20, 12, "81% WR corr-bottom+MR", na, 1.20, "MR", 0, SS_VEC_GT_P75, 1.0, 381, 1024)
+    SetupSpec s73 = SetupSpec.new("73", "CORR↑+MR", "SHORT", FAM_VEL, 73.0, 0.0, 0.80, -1.20, 12, "73% WR corr-peak+MR", na, 1.15, "MR", 0, SS_VEC_GT_P75, 1.0, 373, 2048)
+    SetupSpec s75 = SetupSpec.new("75", "BearDiv⊥OS", "SHORT", FAM_VEL, 75.0, 0.0, 0.80, -1.20, 12, "75% WR bear-div oversold", na, 1.10, "MR", 0, SS_VEC_GT_P75, 1.0, 375, 4096)
+    SetupSpec s64 = SetupSpec.new("64", "CLD↗", "LONG", FAM_CONT, 64.0, 0.0, 0.80, -1.20, 14, "97% continuation pattern", na, 1.05, "MOMENTUM", 0, SS_NONE, 1.0, 364, 4194304)
+
+    array.push(db, s1)
+    array.push(db, s2)
+    array.push(db, s3)
+    array.push(db, s5)
+    array.push(db, s6)
+    array.push(db, s7)
+    array.push(db, s8)
+    array.push(db, s9)
+    array.push(db, s10)
+    array.push(db, s12)
+    array.push(db, l1)
+    array.push(db, l2)
+    array.push(db, l3)
+    array.push(db, l4)
+    array.push(db, l5)
+    array.push(db, l6)
+    array.push(db, l7)
+    array.push(db, l8)
+    array.push(db, l9)
+    array.push(db, v1)
+    array.push(db, v2)
+    array.push(db, v3)
+    array.push(db, v4)
+    array.push(db, s81)
+    array.push(db, s73)
+    array.push(db, s75)
+    array.push(db, s64)
+    db
+
+// ═══════════════════════════════════════════════════════════════════════════
+// QUEN RECALIBRATED SETUP DATABASE
+// ═══════════════════════════════════════════════════════════════════════════
+// TP/SL/MaxHold recalibrated per-setup based on CSV verification vs claimed WR.
+// Showstopper masks tightened on setups with no gates that were degrading.
+// Original f_build_setup_db_v19() left untouched above.
+//
+// Key changes vs v19:
+//   Fast MR (S6, V2, L5): tight TP/SL, short max hold — snap-backs are fast
+//   PhiDiv (S12, L9): lower TP (0.60), shorter max hold — divergence decays
+//   Post-pred reentry (L6, L8): tighter exits — reentry momentum fades
+//   CFV/TE combos (S9, L7): lower TP — CFV drifts before mean reverting
+//   Transition (V3): moderate tightening — transition signals noisy
+//   Numeric MR (81, 73, 75): tight TP/SL — correlation extremes are fast snaps
+//   Showstopper additions: S1+S5+S8 get vec/LTF guards, S9 gets LTF guard,
+//     L6+V2+73+75 get vec/MR guards, L8 gets pred guard
+
+export f_build_setup_db_quen(array<Family> fam) =>
+    array<SetupSpec> db = array.new<SetupSpec>()
+
+    Family FAM_CONT = f_family_get(fam, 0)
+    Family FAM_MR = f_family_get(fam, 1)
+    Family FAM_TRAN = f_family_get(fam, 2)
+    Family FAM_VEL = f_family_get(fam, 3)
+    Family FAM_UNC = f_family_get(fam, 4)
+
+    // ── SHORT SETUPS ──
+    // S1: TE0.8+LTFlow — add LTF gate (was SS_NONE)
+    SetupSpec qs1 = SetupSpec.new("S1", "TE0.8+LTFlow", "SHORT", FAM_VEL, 64.5, 10.90, 0.70, -1.20, 12, "WR64.5 Sh10.90 t*=12 | quen:tp0.70+LTFgate", na, 1.08, "DECOUPLE", 0, SS_LTF_GT_P80, 1.0, 101, 1)
+    // S5: LTFlow — add vec gate (was SS_NONE)
+    SetupSpec qs5 = SetupSpec.new("S5", "LTFlow", "SHORT", FAM_VEL, 60.2, 6.01, 0.80, -1.50, 10, "WR60.2 Sh6.01 t*=9 | quen:VECgate", na, 1.08, "DECOUPLE", 0, SS_VEC_GT_P75, 1.0, 105, 4)
+    // S6: MRStrict — tight exits (fast MR snap)
+    SetupSpec qs6 = SetupSpec.new("S6", "MRStrict-0.5", "SHORT", FAM_MR, 65.0, 11.11, 0.60, -1.00, 6, "WR65 Sh11.11 | quen:tp0.60/sl1.00/mh6", na, 1.15, "MR", 0, SS_VEC_GT_P75, 1.0, 106, 8192)
+    // S7: TE+VecDiv — no change
+    SetupSpec qs7 = SetupSpec.new("S7", "TE+VecDiv", "SHORT", FAM_VEL, 61.0, 8.30, 0.80, -1.20, 15, "WR61 Sh8.30 Ann135", na, 1.10, "DECOUPLE", 0, SS_VEC_LT_P25, 1.0, 107, 16384)
+    // S8: SReentry — add vec gate (was SS_NONE)
+    SetupSpec qs8 = SetupSpec.new("S8", "SReentry+VecDiv", "SHORT", FAM_VEL, 69.2, 4.75, 0.80, -1.20, 12, "WR69.2 Sh4.75 | quen:VECgate", na, 1.20, "DECOUPLE", 0, SS_VEC_LT_P25 + SS_VEC_GT_P75, 1.0, 108, 32768)
+    // S9: CFV+TE+LTFlo — lower TP, add LTF gate
+    SetupSpec qs9 = SetupSpec.new("S9", "CFV+TE+LTFlo", "SHORT", FAM_VEL, 73.0, 10.30, 0.60, -1.00, 12, "WR73 Sh10.3 | quen:tp0.60/sl1.00/mh12+LTFgate", na, 1.25, "DECOUPLE", 0, SS_PRED_GT_P75 + SS_LTF_GT_P80, 1.0, 109, 65536)
+    // S10: PredMA+VelDec — tighten TP/SL
+    SetupSpec qs10 = SetupSpec.new("S10", "PredMA+VelDec", "SHORT", FAM_VEL, 61.5, 12.80, 0.70, -1.00, 12, "WR61.5 Sh12.8 | quen:tp0.70/sl1.00/mh12", na, 1.30, "DECOUPLE", 0, SS_VEC_GT_P75, 1.0, 110, 131072)
+    // S11: LTF+MR+Coupled — no change (new, untested)
+    SetupSpec qs11 = SetupSpec.new("S11", "LTF+MR+Coupled", "SHORT", FAM_MR, 70.4, 8.00, 0.80, -1.20, 12, "WR70.4 Sh8.0 | quen:new", na, 1.15, "MR", 0, SS_NONE, 1.0, 111, 16777216)
+    // S12: PhiDiv short — lower TP, shorter hold (divergence decays fast)
+    SetupSpec qs12 = SetupSpec.new("S12", "PhiDiv+MRinfl", "SHORT", FAM_TRAN, 73.9, 8.20, 0.60, -1.00, 10, "WR73.9 | quen:tp0.60/sl1.00/mh10", na, 1.18, "INNOVATION", 0, SS_MR_GT_P75, 1.0, 112, 8388608)
+
+    // ── LONG SETUPS ──
+    // L1: TE0.8+CFVrise — no change
+    SetupSpec ql1 = SetupSpec.new("L1", "TE0.8+CFVrise", "LONG", FAM_TRAN, 63.6, 11.34, 0.80, -1.20, 15, "WR63.6 Sh11.34 MAE-0.20", na, 1.17, "MR", 0, SS_MR_LT_P25, 1.0, 201, 8)
+    // L2: CFVrising — no change
+    SetupSpec ql2 = SetupSpec.new("L2", "CFVrising", "LONG", FAM_TRAN, 51.7, 10.79, 0.80, -1.20, 14, "WR51.7 Sh10.79 t*=12", na, 1.30, "INNOVATION", 0, SS_PRED_GT_P75, 1.0, 202, 16)
+    // L3: CFV+VelRec — no change (new, untested)
+    SetupSpec ql3 = SetupSpec.new("L3", "CFV+VelRec", "LONG", FAM_TRAN, 66.7, 9.04, 0.80, -1.20, 16, "WR66.7 Sh9.04 MAE-0.35 | quen:new", na, 1.15, "RECOUPLE", 0, SS_VEC_GT_P75, 1.0, 203, 32)
+    // L4: Trans+TE0.8 — no change
+    SetupSpec ql4 = SetupSpec.new("L4", "Trans+TE0.8", "LONG", FAM_TRAN, 55.8, 8.45, 0.80, -1.20, 12, "WR55.8 Sh8.45 MAE-0.47", na, 1.05, "RECOUPLE", 0, SS_VEC_GT_P75, 1.0, 104, 2)
+    // L5: MRStrict+0.5 — tight exits (fast MR snap)
+    SetupSpec ql5 = SetupSpec.new("L5", "MRStrict+0.5", "LONG", FAM_MR, 68.0, 9.09, 0.70, -1.00, 6, "WR68 Sh9.09 | quen:tp0.70/sl1.00/mh6", na, 1.18, "MR", 0, SS_MR_GT_P75, 1.0, 205, 262144)
+    // L6: LReentry — add vec gate, tighten TP/SL
+    SetupSpec ql6 = SetupSpec.new("L6", "LReentry+VecDiv", "LONG", FAM_TRAN, 70.0, 5.00, 0.60, -1.00, 10, "WR70 Sh5.00 | quen:tp0.60/sl1.00/mh10+VECgate", na, 1.12, "RECOUPLE", 0, SS_TE_LT_P25 + SS_VEC_LT_P25, 1.0, 206, 524288)
+    // L7: CFV+TE+LTFhi — lower TP, shorter hold
+    SetupSpec ql7 = SetupSpec.new("L7", "CFV+TE+LTFhi", "LONG", FAM_TRAN, 72.5, 9.80, 0.70, -1.20, 14, "WR72.5 Sh9.8 | quen:tp0.70/mh14", na, 1.22, "MR", 0, SS_MR_LT_P25, 1.0, 207, 1048576)
+    // L8: PredMA+VelRec — add pred gate
+    SetupSpec ql8 = SetupSpec.new("L8", "PredMA+VelRec", "LONG", FAM_TRAN, 60.0, 11.50, 0.80, -1.20, 14, "WR60 Sh11.5 | quen:pred<P25gate", na, 1.28, "RECOUPLE", 0, SS_VEC_GT_P75 + SS_PRED_LT_P25, 1.0, 208, 2097152)
+    // L9: PhiDiv long — lower TP, shorter hold
+    SetupSpec ql9 = SetupSpec.new("L9", "PhiDiv+MRinfl", "LONG", FAM_TRAN, 75.3, 9.50, 0.70, -1.00, 12, "WR75.3 | quen:tp0.70/sl1.00/mh12", na, 1.22, "INNOVATION", 0, SS_MR_LT_P25, 1.0, 209, 4194304)
+
+    // ── V (VELOCITY/VOLATILITY) SETUPS ──
+    // V1: BounceFire — no change
+    SetupSpec qv1 = SetupSpec.new("V1", "BounceFire", "LONG", FAM_UNC, 81.0, 6.10, 0.80, -1.20, 8, "WR81 Sortino18.3 t*=6", na, 1.17, "MR", 0, SS_MR_LT_P25 + SS_LTF_LT_P20, 1.0, 301, 64)
+    // V2: MRSetup — tight exits, add vec gate
+    SetupSpec qv2 = SetupSpec.new("V2", "MRSetup", "SHORT", FAM_MR, 73.0, 4.40, 0.50, -0.80, 8, "WR73 Sh4.4 | quen:tp0.50/sl0.80/mh8+VECgate", na, 1.26, "MR", 0, SS_LTF_GT_P80 + SS_VEC_GT_P75, 1.0, 302, 128)
+    // V3: Transition — tighten TP/SL
+    SetupSpec qv3 = SetupSpec.new("V3", "Transition", "LONG", FAM_TRAN, 75.0, 2.30, 0.70, -1.00, 10, "N=92 merge→V1 boost | quen:tp0.70/sl1.00/mh10", na, 1.14, "MR", 0, SS_VEC_GT_P75 + SS_PRED_GT_P75, 1.0, 303, 256)
+    // V4: VelRecouple — no change
+    SetupSpec qv4 = SetupSpec.new("V4", "VelRecouple", "LONG", FAM_TRAN, 64.0, 2.80, 0.80, -1.50, 14, "WR64 edge<1 tighten", na, 0.97, "RECOUPLE", 0, SS_TE_LT_P25, 1.0, 304, 512)
+
+    // ── NUMERIC SETUPS (engine events) ──
+    // 81: CORR⊥+MR — tight exits (fast snap)
+    SetupSpec q81 = SetupSpec.new("81", "CORR⊥+MR", "LONG", FAM_UNC, 81.0, 0.0, 0.60, -0.80, 10, "81% WR | quen:tp0.60/sl0.80/mh10", na, 1.20, "MR", 0, SS_VEC_GT_P75, 1.0, 381, 1024)
+    // 73: CORR↑+MR — tight exits, add MR gate
+    SetupSpec q73 = SetupSpec.new("73", "CORR↑+MR", "SHORT", FAM_VEL, 73.0, 0.0, 0.60, -0.80, 10, "73% WR | quen:tp0.60/sl0.80/mh10+MRgate", na, 1.15, "MR", 0, SS_VEC_GT_P75 + SS_MR_LT_P25, 1.0, 373, 2048)
+    // 75: BearDiv⊥OS — tight exits, add MR gate
+    SetupSpec q75 = SetupSpec.new("75", "BearDiv⊥OS", "SHORT", FAM_VEL, 75.0, 0.0, 0.50, -0.80, 10, "75% WR | quen:tp0.50/sl0.80/mh10+MRgate", na, 1.10, "MR", 0, SS_VEC_GT_P75 + SS_MR_LT_P25, 1.0, 375, 4096)
+    // 64: CLD↗ — no change
+    SetupSpec q64 = SetupSpec.new("64", "CLD↗", "LONG", FAM_CONT, 64.0, 0.0, 0.80, -1.20, 14, "97% continuation pattern", na, 1.05, "MOMENTUM", 0, SS_NONE, 1.0, 364, 4194304)
+
+    array.push(db, qs1)
+    array.push(db, qs5)
+    array.push(db, qs6)
+    array.push(db, qs7)
+    array.push(db, qs8)
+    array.push(db, qs9)
+    array.push(db, qs10)
+    array.push(db, qs11)
+    array.push(db, qs12)
+    array.push(db, ql1)
+    array.push(db, ql2)
+    array.push(db, ql3)
+    array.push(db, ql4)
+    array.push(db, ql5)
+    array.push(db, ql6)
+    array.push(db, ql7)
+    array.push(db, ql8)
+    array.push(db, ql9)
+    array.push(db, qv1)
+    array.push(db, qv2)
+    array.push(db, qv3)
+    array.push(db, qv4)
+    array.push(db, q81)
+    array.push(db, q73)
+    array.push(db, q75)
+    array.push(db, q64)
+    db
+
+export f_get_edge_ratio_v19(SetupSpec spec) => spec.edge_ratio
+
+export f_get_thesis_v19(SetupSpec spec) => spec.thesis
+
+export f_get_showstopper_mask_v19(SetupSpec spec) => spec.showstopper_mask
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VALIDATION HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+export f_seed_validation(string next_setup_id, string next_setup_direction, label next_label, string next_tooltip) =>
+    [next_setup_id, bar_index, close, next_setup_direction, next_label, next_tooltip, 1]
+
+export f_start_or_queue_validation(ValidationState vs, string next_setup_id, int next_trigger_bar, float next_entry_price, string next_direction, label next_label, string next_tooltip, int next_phase) =>
+    bool validator_idle = vs.validation_phase == 0
+    if validator_idle
+        vs.validating_setup_id := next_setup_id
+        vs.setup_trigger_bar := next_trigger_bar
+        vs.setup_entry_price := next_entry_price
+        vs.setup_direction := next_direction
+        vs.validating_label := next_label
+        vs.validating_tooltip := next_tooltip
+        vs.validation_phase := next_phase
+    else
+        vs.pending_setup_id := next_setup_id
+        vs.pending_trigger_bar := next_trigger_bar
+        vs.pending_entry_price := next_entry_price
+        vs.pending_direction := next_direction
+        vs.pending_label := next_label
+        vs.pending_tooltip := next_tooltip
+        vs.pending_phase := next_phase
+    vs
+
+export f_exit_logic(string dir, float tp1, float pos_pnl, int bars_held, float pred_ma_now, float pred_ma_3ago, float pred_ma_1ago, float trail_sl_in, float max_pnl, float low_price, float high_price, float close_price) =>
+    bool pred_rising_now = pred_ma_now > pred_ma_3ago
+    bool pred_falling_now = pred_ma_now < pred_ma_3ago
+    bool pred_rising_1ago = pred_ma_1ago > pred_ma_3ago
+    bool pred_falling_1ago = pred_ma_1ago < pred_ma_3ago
+    bool pred_flip_bear = pred_falling_now and pred_rising_1ago
+    bool pred_flip_bull = pred_rising_now and pred_falling_1ago
+    float trail_sl = trail_sl_in
+    if bars_held >= 1 and max_pnl > 0.5
+        float trail_level = pred_ma_now
+        if dir == "LONG"
+            trail_sl := na(trail_sl) ? trail_level : math.max(trail_sl, trail_level)
+        else
+            trail_sl := na(trail_sl) ? trail_level : math.min(trail_sl, trail_level)
+    else if bars_held == 0
+        trail_sl := na
+    bool exit_triggered = false
+    int exit_reason = -1
+    bool show_label = false
+    string label_text = ""
+    color label_color = color.white
+    float label_y = close_price
+    bool exit_trail_sl = not na(trail_sl) and (dir == "LONG" ? low_price <= trail_sl : high_price >= trail_sl)
+    bool exit_pred_flip = dir == "LONG" ? pred_flip_bear : pred_flip_bull
+    bool exit_be = bars_held >= 5 and pos_pnl <= 0
+    bool exit_hard_sl = pos_pnl <= -1.8
+    bool hit_tp1 = dir == "LONG" ? high_price >= tp1 : low_price <= tp1
+    if exit_hard_sl
+        exit_triggered := true
+        exit_reason := 0
+        show_label := true
+        label_text := "✗ SL"
+        label_color := color.red
+        label_y := close_price
+    else if exit_trail_sl
+        exit_triggered := true
+        exit_reason := 1
+        show_label := true
+        label_text := "⤴ Trail " + str.tostring(pos_pnl, "#.#") + "%"
+        label_color := color.green
+        label_y := trail_sl
+    else if exit_pred_flip
+        exit_triggered := true
+        exit_reason := 2
+        show_label := true
+        label_text := "⟲ Flip " + str.tostring(pos_pnl, "#.#") + "%"
+        label_color := pos_pnl > 0 ? color.green : color.orange
+        label_y := close_price
+    else if exit_be
+        exit_triggered := true
+        exit_reason := 3
+        show_label := true
+        label_text := "BE 0%"
+        label_color := color.gray
+        label_y := close_price
+    else if hit_tp1
+        exit_triggered := true
+        exit_reason := 4
+        show_label := true
+        label_text := "✓ TP1"
+        label_color := color.lime
+        label_y := tp1
+    [exit_triggered, exit_reason, show_label, label_text, label_color, label_y, trail_sl]
