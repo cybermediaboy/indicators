@@ -9,7 +9,7 @@ import cybermediaboy/TAUtilityLib/53 as TAUtilityLib
 import cybermediaboy/kNNLib/15 as kNNLib
 import cybermediaboy/BandsLib/5 as BandsLib
 import cybermediaboy/BasketLib/3 as BasketLib
-import cybermediaboy/setupsDBGem/3 as SetupsDB
+import cybermediaboy/setupsDBGem/4 as SetupsDB
 // To switch to scalping profile, change to: import cybermediaboy/setupsDBQuen/1 as SetupsDB
 indicator("Combined Vector Bands v20 setupsDB", shorttitle="CVB v20", overlay=true, max_boxes_count=500, max_labels_count=500, max_lines_count=500, dynamic_requests=true, max_bars_back=5000)
 
@@ -2781,8 +2781,8 @@ f_fire_setup_by_id(string fire_setup_id, string fire_tooltip, string fire_size_i
         // Setup not found in cache - skip
         [pos, out_last_trigger_bar, out_mae, out_mfe, out_entry_ctx, out_fire_code]
     else
-        // Freshness check: skip if too close to previous setup
-        bool is_stale = (bar_index - last_trigger_bar) < 3
+        // Freshness check: direction-aware — a LONG won't be blocked by a recent SHORT
+        bool is_stale = cfg.dir == "LONG" ? (bar_index - last_pred_long_bar < 3) : (bar_index - last_pred_short_bar < 3)
         // MC Cone direction filter: suppress if cone disagrees with setup direction
         bool cone_conflict = mc_opt_score >= 0.6 and mc_opt_dir != "" and ((cfg.dir == "LONG" and mc_opt_dir == "BEAR") or (cfg.dir == "SHORT" and mc_opt_dir == "BULL"))
         if is_stale or cone_conflict
@@ -3304,13 +3304,12 @@ if engine_event_count > 0
         if not na(next_mfe)
             mfe_viz_price := next_mfe
         
-        // Update direction-based cooldown trackers (setupsDB IDs)
-        // SHORT setups: S11, S3, S_Inn, S_Trap, S8, S4, SS_TE, S1
-        // LONG setups: L6, L_Exp, L9, L7
-        if setup_event.id == "S11" or setup_event.id == "S3" or setup_event.id == "S_Inn" or setup_event.id == "S_Trap" or setup_event.id == "S8" or setup_event.id == "S4" or setup_event.id == "SS_TE" or setup_event.id == "S1"
-            last_pred_short_bar := bar_index
-        else if setup_event.id == "L6" or setup_event.id == "L_Exp" or setup_event.id == "L9" or setup_event.id == "L7"
-            last_pred_long_bar := bar_index
+        // Update direction-based cooldown trackers — ONLY when setup actually fired
+        if next_fire_code != 0
+            if setup_event.id == "S11" or setup_event.id == "S3" or setup_event.id == "S_Inn" or setup_event.id == "S_Trap" or setup_event.id == "S8" or setup_event.id == "S4" or setup_event.id == "SS_TE" or setup_event.id == "S1" or setup_event.id == "N_TE_S"
+                last_pred_short_bar := bar_index
+            else if setup_event.id == "L6" or setup_event.id == "L_Exp" or setup_event.id == "L9" or setup_event.id == "L7" or setup_event.id == "N_TE_L"
+                last_pred_long_bar := bar_index
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MAHALANOBIS SQUEEZE CACHE (covariance matrix for 4D structural features)
@@ -4165,7 +4164,8 @@ if barstate.islast
                        "basket_latched: " + str.tostring(basket_latched) + " | peers: " + str.tostring(peer_count_active, "#") + " | stable: " + str.tostring(basket_stable) + "\n" +
                        "basket_vec_z: " + str.tostring(basket_vec_z, "#.##") + " | basket_fit: " + str.tostring(basket_fit, "#.#") + "\n" +
                        "te_osc: " + str.tostring(te_osc, "#.##") + " | mr: " + str.tostring(mr_for_setups, "#.##") + "\n" +
-                       "f7_burst: " + str.tostring(f7_burst_raw, "#.##") + " | allow_s/l: " + str.tostring(allow_short) + "/" + str.tostring(allow_long)
+                       "f7_burst: " + str.tostring(f7_burst_raw, "#.##") + " | allow_s/l: " + str.tostring(allow_short) + "/" + str.tostring(allow_long) + "\n" +
+                       "lastShort: " + str.tostring(last_pred_short_bar) + " | lastLong: " + str.tostring(last_pred_long_bar) + " | lastTrig: " + str.tostring(last_setup_trigger_bar)
     label.new(bar_index, high * 1.02, diag_text, color=color.new(color.blue, 80), 
               textcolor=color.white, style=label.style_label_down, size=size.normal)
 
