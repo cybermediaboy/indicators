@@ -3687,7 +3687,7 @@ plot(_ov(1), "TE", color=_oc(1, te_osc), linewidth=2, display=simple_mode ? disp
 plot(_ov(2), "VEC", color=_oc(2, vector_osc_z), linewidth=2, display=simple_mode ? display.all : display.all)
 plot(_ov(3), "CORR", color=_oc(3, rho_z), linewidth=2, display=simple_mode ? display.none : display.all)
 plot(_ov(4), "LTF", color=_oc(4, ltf_rho_z), linewidth=2, display=simple_mode ? display.none : display.all)
-plot(_ov(5), "BURST", color=_oc(5, burst_osc_z), linewidth=2, display=simple_mode ? display.none : display.all)
+plot(_ov(5), "BURST", color=_oc(5, burst_osc_z), linewidth=2, display=simple_mode ? display.all : display.all)
 
 // kNN Confidence is event-level data (computed only in State 4 on realtime bars)
 // Display via Info Table or Label, not as time-series plot()
