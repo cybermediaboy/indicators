@@ -3083,7 +3083,7 @@ else
 // corr_damping is sigmoid-compressed into [0.5,1.0] for most crypto → invert to spread range
 // LTF correlation: higher |ema| = more coupled = more opaque → also invert
 float _transp_raw = pred_ma_transparency_src == "LTF Correlation" ? (1.0 - math.abs(nz(ltf_corr_ema))) : (1.0 - nz(corr_damping, 0.5))
-float _transp_pctile = TAUtilityLib.f_percentile_rank_fisher(_transp_raw, 200)
+float _transp_pctile = nz(TAUtilityLib.f_percentile_rank_fisher(_transp_raw, 200), 0.5)  // Default 0.5 if na (early bars)
 // FIX: Cap max transparency at 60% so pred MA line is always ≥40% opaque and visible
 int transparency = int(10 + (_transp_pctile * 50))  // 10% base (coupled→10%), 60% ceiling (decoupled→60%)
 col_ma = color.new(col_ma_base, transparency)
