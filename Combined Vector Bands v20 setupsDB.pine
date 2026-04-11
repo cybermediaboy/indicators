@@ -1860,7 +1860,7 @@ varip float bt_avg_agree = na
 varip bool bt_table_ready = false
 varip int bt_first_bar = na  // First validated setup bar_idx
 varip int bt_last_bar = na   // Last validated setup bar_idx
-var table bt_summary_tbl = table.new(position.top_right, 3, 10, border_width=1)
+var table bt_summary_tbl = table.new(position.top_right, 3, 11, border_width=1)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // --- EXECUTION CONTEXT NORMALIZATION (Stage 7) ---
@@ -3960,7 +3960,7 @@ if enable_knn and enable_mc and show_mc_cone and mc_has_results and cone_fresh a
 // Backtest summary table render function (inline, 3-column layout with progress)
 f_render_bt_summary_table(table tbl) =>
     if not bt_table_ready or not bt_show_table
-        table.clear(tbl, 0, 0, 2, 9)
+        table.clear(tbl, 0, 0, 2, 10)
     else
         color hdr_bg = color.new(color.gray, 30)
         color row_bg = color.new(color.black, 20)
@@ -4037,6 +4037,14 @@ f_render_bt_summary_table(table tbl) =>
             table.cell(tbl, 0, 9, "P3 Log", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
             table.cell(tbl, 1, 9, log_txt, bgcolor=row_bg, text_color=color.gray, text_size=size.tiny, text_halign=text.align_left)
             table.cell(tbl, 2, 9, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
+            
+            // Phase 3 Stage (current processing state)
+            bool p3_done = bt_phase3_idx >= bt_size and not bt_phase3_overflow
+            string stage_txt = bt_phase3_overflow ? "⚠ OVERFLOW" : p3_done ? "✓ Complete" : "⏳ Running"
+            color stage_color = bt_phase3_overflow ? color.orange : p3_done ? color.lime : color.yellow
+            table.cell(tbl, 0, 10, "P3 Stage", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
+            table.cell(tbl, 1, 10, stage_txt, bgcolor=row_bg, text_color=stage_color, text_size=size.tiny)
+            table.cell(tbl, 2, 10, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
 
 f_render_info_table(table info_tbl) =>
     string vec_context = macro_exhaustion ? "⚠️ EXHAUSTION" : (continuation_setup ? "✅ CONTINUATION" : (idiosyncratic_flow ? "🔀 IDIOSYNC" : "Neutral"))
@@ -4161,7 +4169,7 @@ if bt_enable and bt_show_table and (allow_chunking or is_history_edge or is_righ
     f_render_bt_summary_table(bt_summary_tbl)
 
 else if not bt_enable or not bt_show_table
-    table.clear(bt_summary_tbl, 0, 0, 2, 9)
+    table.clear(bt_summary_tbl, 0, 0, 2, 10)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // OSCILLATOR LABELS - Managed through OscMeta.lbl in 2-UDT system
