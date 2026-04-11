@@ -192,6 +192,8 @@ var int mc_result_bar = 0         // Bar index when last MC completed (for fresh
 varip int bt_chunk_idx = 0          // Current setup index being validated in bt_phase 1
 varip int bt_phase3_idx = 0         // Current label index being refreshed in bt_phase 3
 varip bool bt_phase3_overflow = false  // Phase 3 hit heavy calc limit
+varip string bt_phase3_log = ""     // Debug log for Phase 3 (circular buffer, last 8 lines)
+varip int bt_phase3_log_lines = 0   // Line counter for circular buffer
 
 // Persistent debug vars for stable table display (survive across ticks)
 var int dbg_total_iter = 0
@@ -1858,7 +1860,7 @@ varip float bt_avg_agree = na
 varip bool bt_table_ready = false
 varip int bt_first_bar = na  // First validated setup bar_idx
 varip int bt_last_bar = na   // Last validated setup bar_idx
-var table bt_summary_tbl = table.new(position.top_right, 3, 9, border_width=1)
+var table bt_summary_tbl = table.new(position.top_right, 3, 10, border_width=1)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // --- EXECUTION CONTEXT NORMALIZATION (Stage 7) ---
@@ -2773,10 +2775,25 @@ if bt_phase == 3
     int labels_this_tick = 0
     int start_idx = bt_phase3_idx
     
+    // Debug logging (circular buffer, last 8 lines)
+    if barstate.isrealtime and show_setupsdb_debug
+        string newline = "t" + str.tostring(bar_index) + " idx=" + str.tostring(start_idx) + "/" + str.tostring(bt_size) + " bgt=" + str.tostring(bt_heavy_budget)
+        int P3_MAX_LINES = 8
+        if bt_phase3_log_lines >= P3_MAX_LINES
+            // Trim first line (circular buffer)
+            int first_nl = str.pos(bt_phase3_log, "\n")
+            bt_phase3_log := first_nl >= 0 ? str.substring(bt_phase3_log, first_nl + 1) : ""
+        else
+            bt_phase3_log_lines += 1
+        bt_phase3_log := bt_phase3_log + newline + "\n"
+    
     // Process chunk of labels (respects bt_heavy_budget to avoid overflow)
     for j = start_idx to bt_size - 1
         if labels_this_tick >= bt_heavy_budget
             bt_phase3_overflow := true  // Hit budget limit, continue next tick
+            // Log overflow event
+            if barstate.isrealtime and show_setupsdb_debug and not str.contains(bt_phase3_log, "⚠OVF")
+                bt_phase3_log := bt_phase3_log + "⚠OVF at idx=" + str.tostring(j) + "\n"
             break
         
         HistoricalSetup rec = array.get(bt_setups, j)
@@ -3943,7 +3960,7 @@ if enable_knn and enable_mc and show_mc_cone and mc_has_results and cone_fresh a
 // Backtest summary table render function (inline, 3-column layout with progress)
 f_render_bt_summary_table(table tbl) =>
     if not bt_table_ready or not bt_show_table
-        table.clear(tbl, 0, 0, 2, 8)
+        table.clear(tbl, 0, 0, 2, 9)
     else
         color hdr_bg = color.new(color.gray, 30)
         color row_bg = color.new(color.black, 20)
@@ -4013,6 +4030,13 @@ f_render_bt_summary_table(table tbl) =>
         table.cell(tbl, 0, 8, "Scan Range", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
         table.cell(tbl, 1, 8, range_txt, bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
         table.cell(tbl, 2, 8, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
+        
+        // Phase 3 Debug Log (only if debug flag enabled)
+        if show_setupsdb_debug
+            string log_txt = bt_phase3_log != "" ? bt_phase3_log : "..."
+            table.cell(tbl, 0, 9, "P3 Log", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
+            table.cell(tbl, 1, 9, log_txt, bgcolor=row_bg, text_color=color.gray, text_size=size.tiny, text_halign=text.align_left)
+            table.cell(tbl, 2, 9, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
 
 f_render_info_table(table info_tbl) =>
     string vec_context = macro_exhaustion ? "⚠️ EXHAUSTION" : (continuation_setup ? "✅ CONTINUATION" : (idiosyncratic_flow ? "🔀 IDIOSYNC" : "Neutral"))
@@ -4137,7 +4161,7 @@ if bt_enable and bt_show_table and (allow_chunking or is_history_edge or is_righ
     f_render_bt_summary_table(bt_summary_tbl)
 
 else if not bt_enable or not bt_show_table
-    table.clear(bt_summary_tbl, 0, 0, 2, 8)
+    table.clear(bt_summary_tbl, 0, 0, 2, 9)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // OSCILLATOR LABELS - Managed through OscMeta.lbl in 2-UDT system
