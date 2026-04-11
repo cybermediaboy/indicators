@@ -2775,8 +2775,8 @@ if bt_phase == 3
     int labels_this_tick = 0
     int start_idx = bt_phase3_idx
     
-    // Dynamic budget: 1/40 of total setups per tick (min 3, max 15) - ultra-safe for 1000+ setups
-    int p3_budget = math.max(3, math.min(15, int(bt_size / 40)))
+    // Allow massive budget on history edge to finish instantly, increase realtime budget
+    int p3_budget = barstate.islastconfirmedhistory ? 3000 : math.max(50, math.min(250, int(bt_size / 10)))
     
     // Debug logging (circular buffer, last 8 lines) - always enabled
     if barstate.isrealtime
@@ -4040,8 +4040,8 @@ f_render_bt_summary_table(table tbl) =>
         
         // Phase 3 Stage (current processing state, always visible)
         bool p3_done = bt_phase3_idx >= bt_size and not bt_phase3_overflow
-        string stage_txt = bt_phase3_overflow ? "⚠ OVERFLOW" : p3_done ? "✓ Complete" : "⏳ Running"
-        color stage_color = bt_phase3_overflow ? color.orange : p3_done ? color.lime : color.yellow
+        string stage_txt = bt_phase3_overflow ? "⏳ Rendering..." : p3_done ? "✓ Complete" : "⏳ Running"
+        color stage_color = bt_phase3_overflow ? color.yellow : p3_done ? color.lime : color.gray
         table.cell(tbl, 0, 10, "P3 Stage", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
         table.cell(tbl, 1, 10, stage_txt, bgcolor=row_bg, text_color=stage_color, text_size=size.tiny)
         table.cell(tbl, 2, 10, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
