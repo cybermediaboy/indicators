@@ -4175,5 +4175,5 @@ if barstate.islast
                        "f7_burst: " + str.tostring(f7_burst_raw, "#.##") + " | allow_s/l: " + str.tostring(allow_short) + "/" + str.tostring(allow_long) + "\n" +
                        "lastShort: " + str.tostring(last_pred_short_bar) + " | lastLong: " + str.tostring(last_pred_long_bar) + " | lastTrig: " + str.tostring(last_setup_trigger_bar)
     label.new(bar_index, high * 1.02, diag_text, color=color.new(color.blue, 80), 
-              textcolor=color.white, style=label.style_label_down, size=size.normal)
+              textcolor=color.black, style=label.style_label_down, size=size.normal)
 
