@@ -3305,11 +3305,19 @@ if engine_event_count > 0
             mfe_viz_price := next_mfe
         
         // Update direction-based cooldown trackers — ONLY when setup actually fired
+        // Use cfg.dir lookup instead of hardcoded IDs — works for any future setup
         if next_fire_code != 0
-            if setup_event.id == "S11" or setup_event.id == "S3" or setup_event.id == "S_Inn" or setup_event.id == "S_Trap" or setup_event.id == "S8" or setup_event.id == "S4" or setup_event.id == "SS_TE" or setup_event.id == "S1" or setup_event.id == "N_TE_S"
-                last_pred_short_bar := bar_index
-            else if setup_event.id == "L6" or setup_event.id == "L_Exp" or setup_event.id == "L9" or setup_event.id == "L7" or setup_event.id == "N_TE_L"
-                last_pred_long_bar := bar_index
+            SetupsDB.SetupConfig fired_cfg = na
+            for j = 0 to array.size(setupsdb_cache) - 1
+                SetupsDB.SetupConfig jc = array.get(setupsdb_cache, j)
+                if jc.id == setup_event.id
+                    fired_cfg := jc
+                    break
+            if not na(fired_cfg)
+                if fired_cfg.dir == "SHORT"
+                    last_pred_short_bar := bar_index
+                else
+                    last_pred_long_bar := bar_index
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MAHALANOBIS SQUEEZE CACHE (covariance matrix for 4D structural features)
