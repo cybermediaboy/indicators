@@ -2819,10 +2819,8 @@ if bt_phase == 3
         
         bt_phase3_idx += 1
     
-    // Reset for next cycle (continuous refresh)
-    if bt_phase3_idx >= bt_size
-        bt_phase3_idx := 0
-        bt_phase3_overflow := false
+    // Phase 3 completes once (no reset - labels are already painted)
+    // Continuous refresh removed to prevent infinite loop and overflow
 
 var int last_setup_trigger_bar = 0
 // Armed setup variables removed - obsolete with setupsDB architecture
