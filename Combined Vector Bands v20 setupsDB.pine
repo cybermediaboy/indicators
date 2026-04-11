@@ -2775,9 +2775,12 @@ if bt_phase == 3
     int labels_this_tick = 0
     int start_idx = bt_phase3_idx
     
+    // Dynamic budget: 1/10 of total setups per tick (min 10, max 50)
+    int p3_budget = math.max(10, math.min(50, int(bt_size / 10)))
+    
     // Debug logging (circular buffer, last 8 lines)
     if barstate.isrealtime and show_setupsdb_debug
-        string newline = "t" + str.tostring(bar_index) + " idx=" + str.tostring(start_idx) + "/" + str.tostring(bt_size) + " bgt=" + str.tostring(bt_heavy_budget)
+        string newline = "t" + str.tostring(bar_index) + " idx=" + str.tostring(start_idx) + "/" + str.tostring(bt_size) + " bgt=" + str.tostring(p3_budget)
         int P3_MAX_LINES = 8
         if bt_phase3_log_lines >= P3_MAX_LINES
             // Trim first line (circular buffer)
@@ -2787,9 +2790,9 @@ if bt_phase == 3
             bt_phase3_log_lines += 1
         bt_phase3_log := bt_phase3_log + newline + "\n"
     
-    // Process chunk of labels (respects bt_heavy_budget to avoid overflow)
+    // Process chunk of labels (1/10 of total per tick to avoid overflow)
     for j = start_idx to bt_size - 1
-        if labels_this_tick >= bt_heavy_budget
+        if labels_this_tick >= p3_budget
             bt_phase3_overflow := true  // Hit budget limit, continue next tick
             // Log overflow event
             if barstate.isrealtime and show_setupsdb_debug and not str.contains(bt_phase3_log, "⚠OVF")
