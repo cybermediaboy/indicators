@@ -2775,8 +2775,8 @@ if bt_phase == 3
     int labels_this_tick = 0
     int start_idx = bt_phase3_idx
     
-    // Dynamic budget: 1/10 of total setups per tick (min 10, max 50)
-    int p3_budget = math.max(10, math.min(50, int(bt_size / 10)))
+    // Dynamic budget: 1/20 of total setups per tick (min 5, max 25) - conservative to avoid overflow
+    int p3_budget = math.max(5, math.min(25, int(bt_size / 20)))
     
     // Debug logging (circular buffer, last 8 lines)
     if barstate.isrealtime and show_setupsdb_debug
@@ -4034,19 +4034,19 @@ f_render_bt_summary_table(table tbl) =>
         table.cell(tbl, 1, 8, range_txt, bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
         table.cell(tbl, 2, 8, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
         
+        // Phase 3 Stage (always visible - shows overflow status)
+        bool p3_done = bt_phase3_idx >= bt_size and not bt_phase3_overflow
+        string stage_txt = bt_phase3_overflow ? "⚠ OVERFLOW" : p3_done ? "✓ Complete" : "⏳ Running"
+        color stage_color = bt_phase3_overflow ? color.orange : p3_done ? color.lime : color.yellow
+        table.cell(tbl, 0, 9, "P3 Stage", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
+        table.cell(tbl, 1, 9, stage_txt, bgcolor=row_bg, text_color=stage_color, text_size=size.tiny)
+        table.cell(tbl, 2, 9, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
+        
         // Phase 3 Debug Log (only if debug flag enabled)
         if show_setupsdb_debug
             string log_txt = bt_phase3_log != "" ? bt_phase3_log : "..."
-            table.cell(tbl, 0, 9, "P3 Log", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
-            table.cell(tbl, 1, 9, log_txt, bgcolor=row_bg, text_color=color.gray, text_size=size.tiny, text_halign=text.align_left)
-            table.cell(tbl, 2, 9, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
-            
-            // Phase 3 Stage (current processing state)
-            bool p3_done = bt_phase3_idx >= bt_size and not bt_phase3_overflow
-            string stage_txt = bt_phase3_overflow ? "⚠ OVERFLOW" : p3_done ? "✓ Complete" : "⏳ Running"
-            color stage_color = bt_phase3_overflow ? color.orange : p3_done ? color.lime : color.yellow
-            table.cell(tbl, 0, 10, "P3 Stage", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
-            table.cell(tbl, 1, 10, stage_txt, bgcolor=row_bg, text_color=stage_color, text_size=size.tiny)
+            table.cell(tbl, 0, 10, "P3 Log", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
+            table.cell(tbl, 1, 10, log_txt, bgcolor=row_bg, text_color=color.gray, text_size=size.tiny, text_halign=text.align_left)
             table.cell(tbl, 2, 10, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
 
 f_render_info_table(table info_tbl) =>
