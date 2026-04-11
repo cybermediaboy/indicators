@@ -276,12 +276,14 @@ export f_merge_tier(array<float> pool_dist, array<int> pool_id, array<int> targe
                 array.push(target_dist, dcut)
                 array.push(target_weights, dcut == 0.0 ? 1.0 : 1.0 / dcut)
 
-// @function Hierarchical 4-tier tournament selection for live execution
+// @function Hierarchical 4-tier tournament selection for live execution (domain-agnostic)
+// @param category_a Target category A (e.g., family/regime). Use -1 to disable filtering.
+// @param category_b Target category B (e.g., setup code). Use 0 to disable filtering.
 // @returns [ids, distances, weights, dbg_iter, dbg_hskip, dbg_nskip, dbg_cands]
-export f_hierarchical_tournament_live(int s_packed, float s_f1, float s_f2, float s_f3, float s_f4, float s_f5, float s_f6, float s_f7, int s_family,
+export f_hierarchical_tournament_live(int s_packed, float s_f1, float s_f2, float s_f3, float s_f4, float s_f5, float s_f6, float s_f7, int category_a,
                                       array<float> f1_history, array<float> f2_history, array<float> f3_history, array<float> f4_history, array<float> f5_history, array<float> f6_history, array<float> f7_history,
-                                      array<int> arr_packed_vec, array<int> arr_setup_id, array<int> arr_setup_family,
-                                      int current_setup_code, int oracle_horizon, int mc_horizon,
+                                      array<int> arr_packed_vec, array<int> arr_category_b_history, array<int> arr_category_a_history,
+                                      int target_category_b, int oracle_horizon, int mc_horizon,
                                       int knn_k, int hamming_thresh, int decluster_gap, int pool_max) =>
     array<int> t1_id = array.new<int>()
     array<float> t1_dist = array.new_float(0)
@@ -336,15 +338,15 @@ export f_hierarchical_tournament_live(int s_packed, float s_f1, float s_f2, floa
             if na(dist)
                 dbg_nskip += 1
                 continue
-            int hist_fam = i < array.size(arr_setup_family) ? array.get(arr_setup_family, i) : 4
-            int hist_setup = i < array.size(arr_setup_id) ? array.get(arr_setup_id, i) : 0
-            // C5 FIX: family=4 (Uncertain) soft-matches any known family into T3
-            bool is_same_fam = s_family != 4 ? (hist_fam == s_family) : (hist_fam != 4)
-            bool is_same_setup = current_setup_code != 0 and hist_setup == current_setup_code
+            int hist_cat_a = i < array.size(arr_category_a_history) ? array.get(arr_category_a_history, i) : -1
+            int hist_cat_b = i < array.size(arr_category_b_history) ? array.get(arr_category_b_history, i) : 0
+            // Category A filter: -1 = disabled, 4 = wildcard (matches any non-4)
+            bool match_cat_a = category_a != -1 ? (category_a != 4 ? (hist_cat_a == category_a) : (hist_cat_a != 4)) : true
+            bool match_cat_b = target_category_b != 0 and hist_cat_b == target_category_b
             bool oracle_triggered = false
-            if is_same_fam and i + oracle_horizon < array.size(arr_setup_id)
+            if match_cat_a and i + oracle_horizon < array.size(arr_category_b_history)
                 for f = 1 to oracle_horizon
-                    if array.get(arr_setup_id, i + f) != 0
+                    if array.get(arr_category_b_history, i + f) != 0
                         oracle_triggered := true
                         break
             // C2 FIX: Priority queue - replace worst if pool full and current is better
@@ -362,7 +364,7 @@ export f_hierarchical_tournament_live(int s_packed, float s_f1, float s_f2, floa
                     if worst_idx >= 0 and dist < worst_d
                         array.set(t1_dist, worst_idx, dist)
                         array.set(t1_id, worst_idx, i)
-            else if is_same_setup and is_same_fam
+            else if match_cat_b and match_cat_a
                 if array.size(t2_dist) < pool_max
                     array.push(t2_dist, dist)
                     array.push(t2_id, i)
@@ -376,7 +378,7 @@ export f_hierarchical_tournament_live(int s_packed, float s_f1, float s_f2, floa
                     if worst_idx >= 0 and dist < worst_d
                         array.set(t2_dist, worst_idx, dist)
                         array.set(t2_id, worst_idx, i)
-            else if is_same_fam
+            else if match_cat_a
                 if array.size(t3_dist) < pool_max
                     array.push(t3_dist, dist)
                     array.push(t3_id, i)
@@ -466,10 +468,12 @@ export f_sign_aware_filter(float s_f2, array<int> f1_history, array<float> f2_hi
     
     [f1_filtered, f2_filtered, f3_filtered, f4_filtered, f5_filtered, f6_filtered, f7_filtered, setup_id_filtered, family_filtered, packed_filtered]
 
-// @function Hierarchical 3-tier tournament selection for backtest execution
-export f_hierarchical_tournament_backtest(int s_packed, float s_f1, float s_f2, float s_f3, float s_f4, float s_f5, float s_f6, float s_f7, int s_family, int s_setup_code,
+// @function Hierarchical 3-tier tournament selection for backtest execution (domain-agnostic)
+// @param category_a Target category A. Use -1 to disable filtering.
+// @param category_b Target category B. Use 0 to disable filtering.
+export f_hierarchical_tournament_backtest(int s_packed, float s_f1, float s_f2, float s_f3, float s_f4, float s_f5, float s_f6, float s_f7, int category_a, int category_b,
                                           array<float> f1_history, array<float> f2_history, array<float> f3_history, array<float> f4_history, array<float> f5_history, array<float> f6_history, array<float> f7_history,
-                                          array<int> arr_packed_vec, array<int> arr_setup_id, array<int> arr_setup_family,
+                                          array<int> arr_packed_vec, array<int> arr_category_b_history, array<int> arr_category_a_history,
                                           int knn_limit, int knn_k, int hamming_thresh, int decluster_gap, int pool_max) =>
     array<int> t1_id = array.new<int>()
     array<float> t1_dist = array.new_float(0)
@@ -477,7 +481,7 @@ export f_hierarchical_tournament_backtest(int s_packed, float s_f1, float s_f2, 
     array<float> t2_dist = array.new_float(0)
     array<int> t3_id = array.new<int>()
     array<float> t3_dist = array.new_float(0)
-    int capped_limit = math.min(knn_limit, math.min(array.size(f1_history), array.size(arr_setup_id)))
+    int capped_limit = math.min(knn_limit, math.min(array.size(f1_history), array.size(arr_category_b_history)))
     for i = 7 to capped_limit - 1
         if i < array.size(arr_packed_vec)
             int hd = f_hamming_screen_7(s_packed, array.get(arr_packed_vec, i))
@@ -493,15 +497,15 @@ export f_hierarchical_tournament_backtest(int s_packed, float s_f1, float s_f2, 
         float dist = d1*d1 + d2*d2 + d3*d3 + d4*d4 + d5*d5 + d6*d6 + d7*d7
         if na(dist)
             continue
-        int hist_fam = i < array.size(arr_setup_family) ? array.get(arr_setup_family, i) : 4
-        int hist_setup = i < array.size(arr_setup_id) ? array.get(arr_setup_id, i) : 0
-        bool is_same_fam = hist_fam == s_family and s_family != 4
-        bool is_same_setup = s_setup_code != 0 and hist_setup == s_setup_code
-        if is_same_setup and is_same_fam
+        int hist_cat_a = i < array.size(arr_category_a_history) ? array.get(arr_category_a_history, i) : -1
+        int hist_cat_b = i < array.size(arr_category_b_history) ? array.get(arr_category_b_history, i) : 0
+        bool match_cat_a = hist_cat_a == category_a and category_a != -1
+        bool match_cat_b = category_b != 0 and hist_cat_b == category_b
+        if match_cat_b and match_cat_a
             if array.size(t1_dist) < pool_max
                 array.push(t1_dist, dist)
                 array.push(t1_id, i)
-        else if is_same_fam
+        else if match_cat_a
             if array.size(t2_dist) < pool_max
                 array.push(t2_dist, dist)
                 array.push(t2_id, i)
@@ -525,24 +529,30 @@ export f_hierarchical_tournament_backtest(int s_packed, float s_f1, float s_f2, 
 
 
 
-// @function Sign-aware hierarchical tournament for backtest with quantized F1
+// @function Sign-aware hierarchical tournament for backtest with quantized F1 (domain-agnostic)
+// @param category_a Target category A. Use -1 to disable filtering.
+// @param category_b Target category B. Use 0 to disable filtering.
 // @returns [ids, weights] for backtest MC validation
-export f_hierarchical_tournament_backtest_signaware(int s_packed, float s_f1, float s_f2, float s_f3, float s_f4, float s_f5, float s_f6, float s_f7, int s_family, int s_setup_code,
+export f_hierarchical_tournament_backtest_signaware(int s_packed, float s_f1, float s_f2, float s_f3, float s_f4, float s_f5, float s_f6, float s_f7, int category_a, int category_b,
                                                      array<int> f1_history, array<float> f2_history, array<float> f3_history, array<float> f4_history, array<float> f5_history, array<float> f6_history, array<float> f7_history,
-                                                     array<int> arr_setup_id, array<int> arr_setup_family, array<int> arr_packed_vec,
+                                                     array<int> arr_category_b_history, array<int> arr_category_a_history, array<int> arr_packed_vec,
                                                      int knn_limit, int knn_k, int hamming_thresh, int decluster_gap, int pool_max) =>
     // Apply sign-aware filtering first
-    [f1_filtered, f2_filtered, f3_filtered, f4_filtered, f5_filtered, f6_filtered, f7_filtered, setup_id_filtered, family_filtered, packed_filtered] = f_sign_aware_filter(s_f2, f1_history, f2_history, f3_history, f4_history, f5_history, f6_history, f7_history, arr_setup_id, arr_setup_family, arr_packed_vec, knn_limit)
+    [f1_filtered, f2_filtered, f3_filtered, f4_filtered, f5_filtered, f6_filtered, f7_filtered, catb_filtered, cata_filtered, packed_filtered] = f_sign_aware_filter(s_f2, f1_history, f2_history, f3_history, f4_history, f5_history, f6_history, f7_history, arr_category_b_history, arr_category_a_history, arr_packed_vec, knn_limit)
     
     // Convert quantized F1 back to float for compatibility with existing tournament logic
+    // Quantization formula: (f1_val + 1.0) * 7.5 => Inverse: quant_val / 7.5 - 1.0
+    // NOTE Bug #6: BT uses quantized F1 (4-bit precision), Live uses float F1 (full precision)
+    // This creates ~0.13 unit precision loss, causing neighbor set divergence between BT and Live.
+    // Trade-off: sign-aware filter requires int array, but loses precision vs live kNN.
     array<float> f1_filtered_float = array.new_float()
     for i = 0 to array.size(f1_filtered) - 1
         int quant_val = array.get(f1_filtered, i)
-        float dequant_val = quant_val * 0.25  // Simple dequantization (reverse of quantization)
+        float dequant_val = float(quant_val) / 7.5 - 1.0  // FIX: correct inverse of (f1 + 1.0) * 7.5
         array.push(f1_filtered_float, dequant_val)
     
     // Run standard tournament with filtered data
-    [ids, dists, weights, dbg_iter, dbg_hskip, dbg_nskip, final_count] = f_hierarchical_tournament_backtest(s_packed, s_f1, s_f2, s_f3, s_f4, s_f5, s_f6, s_f7, s_family, s_setup_code, f1_filtered_float, f2_filtered, f3_filtered, f4_filtered, f5_filtered, f6_filtered, f7_filtered, packed_filtered, setup_id_filtered, family_filtered, knn_limit, knn_k, hamming_thresh, decluster_gap, pool_max)
+    [ids, dists, weights, dbg_iter, dbg_hskip, dbg_nskip, final_count] = f_hierarchical_tournament_backtest(s_packed, s_f1, s_f2, s_f3, s_f4, s_f5, s_f6, s_f7, category_a, category_b, f1_filtered_float, f2_filtered, f3_filtered, f4_filtered, f5_filtered, f6_filtered, f7_filtered, packed_filtered, catb_filtered, cata_filtered, knn_limit, knn_k, hamming_thresh, decluster_gap, pool_max)
     [ids, dists, weights, dbg_iter, dbg_hskip, dbg_nskip, final_count]
 
 

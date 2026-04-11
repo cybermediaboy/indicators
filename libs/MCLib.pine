@@ -1,6 +1,19 @@
 //@version=6
 library("MCLib", overlay = false)
 
+// ═══════════════════════════════════════════════════════════════════════════
+// DETERMINISTIC PRNG (Phase 3: Architecture Refactor)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Deterministic pseudo-random number generator (0.0 to 1.0)
+// @param seed1 Primary seed (e.g., bar_index or iteration counter)
+// @param seed2 Secondary seed (e.g., run number or feature index)
+// @returns Uniform random float in [0.0, 1.0)
+// @note Deterministic - same seeds always produce same output (no time dependency)
+export f_prng(int seed1, int seed2) =>
+    float raw = math.sin(seed1 * 12.9898 + seed2 * 78.233) * 43758.5453
+    raw - math.floor(raw)
+
 // @type Monte Carlo physics parameters for generic simulation configuration
 // @field squeeze_intensity Squeeze intensity multiplier (0.0 = no amplitude prediction, per U10)
 // @field use_mean_reversion Enable mean reversion pull toward fair value
@@ -235,13 +248,12 @@ export f_get_mc_family(float f1_vec, float f2_corr, float f3_innov, float f4_te,
 // @param mc_progressive_p10 Output: 10th percentile path (mutated)
 // @param mc_progressive_p50 Output: 50th percentile path (mutated)
 // @param mc_progressive_p90 Output: 90th percentile path (mutated)
-// @param bar_idx Current bar index
-// @param time_val Current time value
+// @param bar_idx Current bar index (used for deterministic PRNG seed)
 // @returns [paths_up, total_paths, wMean, wM2, wCount] for further analysis
 export f_welford_knn_bootstrap(array<int> final_knn_ids, array<float> cumw, array<float> arr_close, array<float> arr_ATR, 
                                 int mc_horizon, int mc_runs, float mc_noise_scale, float current_close,
                                 array<int> pathsUpAtH, array<float> mc_progressive_p10, array<float> mc_progressive_p50, array<float> mc_progressive_p90,
-                                int bar_idx, int time_val) =>
+                                int bar_idx) =>
     
     int mc_runs_sync = math.min(mc_runs, 500)
     int close_size = array.size(arr_close)
@@ -262,10 +274,8 @@ export f_welford_knn_bootstrap(array<int> final_knn_ids, array<float> cumw, arra
     
     // MC loop with antithetic pairs
     for run = 0 to mc_runs_sync - 1
-        // Weighted neighbor selection (PRNG inline)
-        float seed_rw = run + 1.0
-        float raw_rw = math.sin((bar_idx + seed_rw) * 12.9898 + (time_val + seed_rw * 1000.0) * 78.233) * 43758.5453
-        float rw = raw_rw - math.floor(raw_rw)
+        // Weighted neighbor selection (deterministic PRNG)
+        float rw = f_prng(bar_idx + run + 1, run + 1)
         int chosen_idx = array.get(final_knn_ids, ksync - 1)
         for n = 0 to ksync - 1
             if rw <= array.get(cumw, n)
@@ -292,14 +302,9 @@ export f_welford_knn_bootstrap(array<int> final_knn_ids, array<float> cumw, arra
             float raw_close_prev = array.get(arr_close, future_bar - 1)
             float hist_return = not na(raw_close_cur) and not na(raw_close_prev) and raw_close_prev > 0 ? math.log(raw_close_cur / raw_close_prev) : 0.0
             
-            // Box-Muller transform for Gaussian noise (PRNG inline)
-            float seed_u1 = run * 997.0 + h * 61.0 + 11.0
-            float raw_u1 = math.sin((bar_idx + seed_u1) * 12.9898 + (time_val + seed_u1 * 1000.0) * 78.233) * 43758.5453
-            float u1 = math.max(1e-10, raw_u1 - math.floor(raw_u1))
-            
-            float seed_u2 = run * 991.0 + h * 67.0 + 17.0
-            float raw_u2 = math.sin((bar_idx + seed_u2) * 12.9898 + (time_val + seed_u2 * 1000.0) * 78.233) * 43758.5453
-            float u2 = raw_u2 - math.floor(raw_u2)
+            // Box-Muller transform for Gaussian noise (deterministic PRNG)
+            float u1 = math.max(1e-10, f_prng(bar_idx + run * 997 + h * 61, 11))
+            float u2 = f_prng(bar_idx + run * 991 + h * 67, 17)
             
             float z = math.sqrt(-2.0 * math.log(u1)) * math.cos(6.2831853 * u2)
             float noise = z * noise_scale
@@ -373,13 +378,12 @@ export f_welford_knn_bootstrap(array<int> final_knn_ids, array<float> cumw, arra
 // @param wCount Persistent Welford count accumulator (mutated)
 // @param pathsUp Persistent paths-up counter (mutated)
 // @param run_offset Starting run index for unique PRNG seeds
-// @param bar_idx Current bar index
-// @param time_val Current time value
+// @param bar_idx Current bar index (used for deterministic PRNG seed)
 // @returns int Number of paths executed (chunk_runs × 2 for antithetic)
 export f_welford_knn_chunk(array<int> knn_ids, array<float> cumw, array<float> arr_close, array<float> arr_ATR,
                             int mc_horizon, int chunk_runs, float mc_noise_scale, float current_close,
                             array<float> wMean, array<float> wM2, array<int> wCount, array<int> pathsUp,
-                            int run_offset, int bar_idx, int time_val) =>
+                            int run_offset, int bar_idx) =>
     
     int ksync = array.size(knn_ids)
     int close_size = array.size(arr_close)
@@ -389,10 +393,8 @@ export f_welford_knn_chunk(array<int> knn_ids, array<float> cumw, array<float> a
     for run = 0 to chunk_runs - 1
         int global_run = run_offset + run
         
-        // Weighted neighbor selection (O(1) with cumulative weights)
-        float seed_rw = global_run + 1.0
-        float raw_rw = math.sin((bar_idx + seed_rw) * 12.9898 + (time_val + seed_rw * 1000.0) * 78.233) * 43758.5453
-        float rw = raw_rw - math.floor(raw_rw)
+        // Weighted neighbor selection (O(1) with cumulative weights, deterministic)
+        float rw = f_prng(bar_idx + global_run + 1, global_run + 1)
         
         int chosen_idx = array.get(knn_ids, ksync - 1)
         for n = 0 to ksync - 1
@@ -421,14 +423,9 @@ export f_welford_knn_chunk(array<int> knn_ids, array<float> cumw, array<float> a
             float hist_return = not na(raw_close_cur) and not na(raw_close_prev) and raw_close_prev > 0 ? 
                                math.log(raw_close_cur / raw_close_prev) : 0.0
             
-            // Gaussian noise via Box-Muller (matches bootstrap path distribution)
-            float seed_u1 = global_run * 997.0 + h * 61.0 + 11.0
-            float raw_u1 = math.sin((bar_idx + seed_u1) * 12.9898 + (time_val + seed_u1 * 1000.0) * 78.233) * 43758.5453
-            float u1 = math.max(1e-10, raw_u1 - math.floor(raw_u1))
-            
-            float seed_u2 = global_run * 991.0 + h * 67.0 + 17.0
-            float raw_u2 = math.sin((bar_idx + seed_u2) * 12.9898 + (time_val + seed_u2 * 1000.0) * 78.233) * 43758.5453
-            float u2 = raw_u2 - math.floor(raw_u2)
+            // Gaussian noise via Box-Muller (deterministic, reproducible)
+            float u1 = math.max(1e-10, f_prng(bar_idx + global_run * 997 + h * 61, 11))
+            float u2 = f_prng(bar_idx + global_run * 991 + h * 67, 17)
             
             float z = math.sqrt(-2.0 * math.log(u1)) * math.cos(6.2831853 * u2)
             float noise = z * noise_scale

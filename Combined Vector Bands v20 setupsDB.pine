@@ -3,13 +3,13 @@
 
 //@version=6
 import cybermediaboy/CausalityLib/15 as CausalityLib
-import cybermediaboy/MCLib/10 as MCLib
-import cybermediaboy/SetupsLib/15 as SetupsLib
+import cybermediaboy/MCLib/12 as MCLib  // Phase 3: Deterministic PRNG export
+import cybermediaboy/SetupsLib/22 as SetupsLib
 import cybermediaboy/TAUtilityLib/53 as TAUtilityLib
-import cybermediaboy/kNNLib/15 as kNNLib
+import cybermediaboy/kNNLib/17 as kNNLib  // Phase 2: Domain-agnostic category parameters
 import cybermediaboy/BandsLib/5 as BandsLib
 import cybermediaboy/BasketLib/3 as BasketLib
-import cybermediaboy/setupsDBGem/4 as SetupsDB
+import cybermediaboy/setupsDBGem/9 as SetupsDB
 // To switch to scalping profile, change to: import cybermediaboy/setupsDBQuen/1 as SetupsDB
 indicator("Combined Vector Bands v20 setupsDB", shorttitle="CVB v20", overlay=true, max_boxes_count=500, max_labels_count=500, max_lines_count=500, dynamic_requests=true, max_bars_back=5000)
 
@@ -40,8 +40,6 @@ tpsl_max_hold = input.int(20, "Max Hold Bars", minval=5, maxval=50, group=grp_tp
 tpsl_enable_maxhold_tp = input.bool(true, "Enable MaxHold TP Exit", group=grp_tpsl, tooltip="When enabled, positions will exit at max hold duration even if TP/SL not hit. When disabled, positions can hold indefinitely until TP/SL is hit.")
 tpsl_level_scan = input.int(300, "Level Sweep Scan (bars)", minval=20, maxval=500, group=grp_tpsl, tooltip="Max bars to track late sweep of TP/SL levels. Lines extend to sweep point if hit hit within this window.")
 tpsl_use_zones = input.bool(true, "Snap TP to Survival Zones", group=grp_tpsl)
-tpsl_show_result = input.bool(true, "Show ✓/✗ Exit Markers", group=grp_tpsl)
-
 grp_basket = "Basket Settings"
 basket_preset = input.string("Auto Scan", "Basket Preset", options=["Auto Scan", "Custom", "Basket B (Memes)", "Basket C (DeFi + New L1)", "Basket D (Universal 5)", "Basket E (TON Niches)"], group=grp_basket)
 enable_basket_rescan = input.bool(false, "Enable Basket Relatch/Rescan", group=grp_basket, tooltip="When enabled, Auto Scan will re-rank the basket every N bars instead of locking after the first selection.")
@@ -64,6 +62,7 @@ grp_perf = "Performance & Heavy Calculations"
 max_heavy_bars = input.int(5000, "Max Heavy Bars Limit", minval=500, maxval=10000, group=grp_perf, tooltip="Unified limit for expensive calculations (LTF correlation tracking, Transfer Entropy) applied to most recent N bars. Saves computation while keeping visible chart area smooth. Recommended: 1500-2000 for fast load, 2500-3000 for deep history.")
 percentile_scan_interval = input.int(100, "Percentile Scan Interval", minval=10, maxval=500, group=grp_perf, tooltip="Recalculate oscillator percentiles every N bars instead of per-bar. Higher = faster performance, lower = more responsive adaptive thresholds. Recommended: 100 bars.")
 max_validation_bars = input.int(500, "Max Validation Bars", minval=100, maxval=2000, group=grp_perf, tooltip="Only validate setups on the most recent N bars of history. Lower = faster load, higher = more historical validation. 500 recommended for performance.")
+max_tpsl_lines = input.int(120, "Max TP/SL Lines", minval=20, maxval=450, group=grp_perf, tooltip="Maximum number of TP/SL line objects to keep in history. Each position creates 3 lines (TP1, TP2, SL). Higher = more historical lines visible, lower = better performance. Oldest lines auto-deleted when limit reached. Recommended: 120 (40 positions).")
 mc_validator_direction_mode = input.string("Setup Direction", "Validator Direction Mode", options=["Setup Direction", "Best MC Direction"], group=grp_perf, tooltip="Setup Direction: validate only the setup's intended side. Best MC Direction: score both long and short interpretations on the same MC paths and use the stronger MC direction.")
 mc_use_oracle_direction = input.bool(true, "Use Oracle Direction for MAE/MFE", group=grp_perf, tooltip="When enabled: MC calculates MAE/MFE based on the oracle's selected best direction (may flip from setup). When disabled: MC always uses the setup's original direction for MAE/MFE calculations, regardless of oracle selection.")
 
@@ -144,6 +143,12 @@ innov_pivot_pct = input.float(15.0, "Pivot Percentile Threshold (%)", minval=1.0
 burst_osc_mode = input.string("pathA", "BurstScore Mode", options=["pathA", "full"], group=grp_debug, tooltip="pathA = innov_squeeze² × phiDivAccel (clean signal). full = 3-path composite with additional factors.")
 burst_osc_source = input.string("burst", "BURST Oscillator Source", options=["burst", "squeeze", "mahalanobis"], group=grp_debug, tooltip="Choose which metric to display in BURST oscillator:\n• burst = BurstScore (default)\n• squeeze = Squeeze Score [0..1]\n• mahalanobis = Mahalanobis Distance")
 osc_compression = input.string("tanh", "Oscillator Compression", options=["tanh", "sigmoid", "clamp", "none"], group=grp_debug, tooltip="Visual compression for all subpane oscillators. tanh (smooth saturation), sigmoid (asymmetric saturation), clamp (hard linear clip), none (raw linear, may clip at ±1)")
+
+grp_debug_visuals = "Debug Visuals"
+show_setupsdb_debug = input.bool(false, "Show SetupsDB BT Annotations (W/X/?)", group=grp_debug_visuals, tooltip="Overlay kNN+MC backtest outcome annotations on setup entry labels. W=win, X=loss, ?=unconfirmed. Overrides live ✓/✗ markers.")
+show_setupsdb_diag = input.bool(false, "Show SetupsDB Diagnostic Label", group=grp_debug_visuals, tooltip="Display a diagnostic label showing triggered setups count, cache size, entryCtx, basket state, and oscillator values.")
+show_te_debug = input.bool(false, "Show TE Debug Label", group=grp_debug_visuals, tooltip="Display a diagnostic label with TE window, valid sample count, min/max, and bin occupancy shares")
+show_knn_debug_table = input.bool(true, "Show kNN+MC Debug Table", group=grp_debug_visuals, tooltip="Shows a standalone kNN+MC progress/debug table even when the main Info Table is hidden.")
 
 // REMOVED: Legend Table inputs (saves ~25 vars)
 
@@ -257,7 +262,6 @@ phi_div_thresh = input.float(0.75, "Phi Divergence Threshold (z-score)", minval=
 
 grp_te = "Transfer Entropy (TE) Settings"
 show_te_osc = input.bool(true, "Show TE Oscillator", group=grp_te, tooltip="Display Transfer Entropy oscillator in indicator pane")
-show_te_debug = input.bool(false, "Show TE Debug Label", group=grp_te, tooltip="Display a diagnostic label with TE window, valid sample count, min/max, and bin occupancy shares")
 te_window = input.int(100, "TE Window", minval=30, maxval=500, group=grp_te, tooltip="Sliding window for Transfer Entropy. 100-200 optimal for responsive oscillator.")
 te_bins = input.int(3, "TE Bins", minval=2, maxval=8, group=grp_te, tooltip="Histogram bins for probability distribution. 3 bins = fast, 5+ bins = more accurate but slower")
 te_setup_thresh = input.float(0.05, "TE Setup Threshold", minval=0.01, maxval=1.0, step=0.01, group=grp_te, tooltip="Normalized TE threshold for entry signals. Default 0.05 for V2.")
@@ -272,7 +276,6 @@ te_pit_window = input.int(5, "TE Pit Confirmation Window", minval=3, maxval=10, 
 
 grp_knn = "═══ kNN+MC Engine ═══"
 enable_knn = input.bool(true, "Enable kNN+MC Engine", group=grp_knn, tooltip="Enable k-Nearest Neighbor state matching with MC Family classification. Uses 'Max Heavy Bars Limit' for history length.")
-show_knn_debug_table = input.bool(true, "Show kNN+MC Debug Table", group=grp_knn, tooltip="Shows a standalone kNN+MC progress/debug table even when the main Info Table is hidden.")
 knn_k = input.int(50, "K (Neighbors)", minval=10, maxval=100, group=grp_knn, tooltip="Number of nearest neighbors to retrieve. 50 recommended per techspec.")
 knn_norm_len = input.int(200, "Normalization Window", minval=50, maxval=500, group=grp_knn, tooltip="Rolling window for feature normalization (z-score, Fisher transform)")
 knn_decluster_gap = input.int(15, "Decluster Gap (bars)", minval=5, maxval=50, group=grp_knn, tooltip="Min bar distance between accepted kNN neighbors. Prevents temporal autocorrelation.")
@@ -285,6 +288,7 @@ bt_min_history = input.int(300, "Min History Bars for Validation", minval=100, m
 bt_mc_runs = input.int(200, "Backtest MC Runs per Setup", minval=50, maxval=1000, group=grp_backtest, tooltip="MC runs per historical setup. 200=fast, 500=precise. Lower than live 5000 because we run many setups.")
 bt_agree_pct = input.float(75.0, "MC Agreement Threshold %", minval=51.0, maxval=90.0, step=1.0, group=grp_backtest, tooltip="MC oracle must agree with setup direction by >= this % to count as confirmed. 75% = strong filter, rejects weak setups.")
 bt_heavy_budget = input.int(20, "Validations per Tick", minval=5, maxval=100, group=grp_backtest, tooltip="Max setups to validate per realtime tick. Higher = faster backtest completion but may cause timeout. 20=safe, 50=fast, 100=aggressive. Increase if backtest is slow.")
+fee_pct = input.float(0.15, "Round-trip Fee %", minval=0.0, step=0.01, group=grp_backtest, tooltip="Trading fees deducted from PnL (entry + exit). 0.15% = typical spot market round-trip cost.")
 bt_show_table = input.bool(true, "Show Backtest Summary Table", group=grp_backtest, tooltip="Aggregate stats: raw setups vs kNN+MC filtered.")
 
 grp_conf = "Confluence Detector"
@@ -309,8 +313,11 @@ type ActivePosition
     float mc_p50    // MC-calculated MFE (Target)
     float rrr
     bool is_active
+    label setup_label = na  // entry label reference for post-exit text update
+    string tooltip = ""     // original tooltip to append exit info
     int levels_idx = -1   // start index in global level_trackers array
-    int levels_cnt = 0    // number of LevelTrackers (typically 4)
+    int levels_cnt = 0    // number of LevelTrackers (3: TP1, TP2, SL)
+    int exit_code = -1    // exit type: 0=HardSL, 1=TrailSL, 2=PredFlip, 3=Breakeven, 4=TP1, -1=Active
 
 type HistoricalSetup
     int bar_idx
@@ -333,6 +340,8 @@ type HistoricalSetup
     int coupling_regime_snap  // 0=Coupled, 1=Weak, 2=Decoupled
     float basket_fit_norm_snap  // 0-1 percentile-normalized basket quality
     float rho_snap  // Raw Kalman correlation before damping
+    int setup_code        // cfg.code from SetupConfig — replaces SetupsLib.f_setup_id_to_code()
+    float entry_ctx       // Packed context bitfield (macro_exhaustion, falling_knife, etc.) for ML export
     string mc_oracle_dir  // "BULL" or "BEAR" - actual MC direction chosen
     float actual_pnl
     float actual_mae
@@ -355,9 +364,9 @@ f_pack_signed(float value, float scale, int offset, int max_val) =>
     int shifted = scaled + offset
     math.max(0, math.min(shifted, max_val))
 
-f_prng(float seed) =>
-    float raw = math.sin((bar_index + seed) * 12.9898 + (time + seed * 1000.0) * 78.233) * 43758.5453
-    raw - math.floor(raw)
+// Pseudo-random number generator (0.0 to 1.0)
+// FIX Bug #11 (Phase 3): Removed local f_prng - now using MCLib.f_prng(seed1, seed2)
+// Deterministic PRNG with no time dependency → reproducible backtests across chart reloads
 
 f_z_and_corr(src_base, src_ext, len) =>
     z_ext = TAUtilityLib.f_zscore(src_ext, len)
@@ -484,7 +493,6 @@ f_cld(float corr_osc, float price, float z_score, float slope_thresh) =>
 // ============================================================================
 // Family is owned by SetupsLib and each SetupSpec carries its family reference.
 var families = SetupsLib.f_build_family_table()
-var SETUP_DB = SetupsLib.f_build_setup_db_v19(families)
 
 // setupsDB architecture: store triggered configs for use in f_fire_setup_by_id
 var array<SetupsDB.SetupConfig> setupsdb_cache = array.new<SetupsDB.SetupConfig>()
@@ -492,7 +500,7 @@ var array<SetupsDB.SetupConfig> setupsdb_cache = array.new<SetupsDB.SetupConfig>
 var setup_labels = array.new<label>()        // Pool for setup labels (cap 300, never evict until validated)
 var overlay_labels = array.new<label>()      // Pool for CLD/div markers (cap 150, can evict)
 var array<SetupsLib.LevelTracker> level_trackers = na
-var ActivePosition pos = ActivePosition.new("", "", 0, na, na, na, na, na, na, na, false, -1, 0)
+var ActivePosition pos = ActivePosition.new("", "", 0, na, na, na, na, na, na, na, false, na, "", -1, 0, -1)
 
 // Initialize arrays on first use (after all declarations)
 if na(var_knn_ids)
@@ -735,14 +743,6 @@ if barstate.islast and show_te_debug
     [te_dbg, te_dbg_dir, te_dbg_win, te_dbg_valid, te_dbg_min_x, te_dbg_max_x, te_dbg_min_y, te_dbg_max_y, te_dbg_b0, te_dbg_b1, te_dbg_b2, te_dbg_b3, te_dbg_b4, te_dbg_b5, te_dbg_b6, te_dbg_b7] = CausalityLib.f_calculate_te_score_debug(te_primary_returns, te_basket_returns_1, te_window, te_bins, 1)
     string te_dbg_text = f_build_te_debug_string(te_dbg, te_dbg_dir, te_osc, te_strength_smoothed, te_direction_smoothed, te_dbg_win, te_dbg_valid, te_dbg_min_x, te_dbg_max_x, te_dbg_min_y, te_dbg_max_y, te_dbg_b0, te_dbg_b1, te_dbg_b2, te_dbg_b3, te_dbg_b4, te_dbg_b5, te_dbg_b6, te_dbg_b7)
     label.new(bar_index, high, te_dbg_text, color=color.new(color.yellow, 0), textcolor=color.black, style=label.style_label_down, size=size.small, force_overlay=true)
-
-// Setup debug labels (raw barstate check - execution context not yet defined)
-if barstate.islast and show_debug_osc
-    array<string> debug_ids = array.from("S6", "S7", "S8", "S9", "S10", "S11", "L5", "L6", "L7", "L8")
-    for i = 0 to array.size(debug_ids) - 1
-        string dbg_id = array.get(debug_ids, i)
-        int dbg_code = SetupsLib.f_setup_id_to_code(dbg_id)
-        label.new(bar_index, low - (i + 1) * ta.atr(14) * 0.25, dbg_id + "→" + str.tostring(dbg_code), style=label.style_label_right, textcolor=dbg_code == 0 ? color.red : color.lime, color=color.new(color.black, 100), size=size.tiny, force_overlay=true)
 
 // Calculate Simple Validation Basket (Linear Average of Peers)
 // Used strictly for Correlation Filter to avoid "Double Weighting"
@@ -1656,6 +1656,8 @@ var f7_history = array.new_float(0)  // BurstScore
 
 // --- v16: Additional History Arrays for Path Resampling ---
 var arr_close = array.new_float(0)         // Close prices
+var arr_high = array.new_float(0)          // High prices for TP detection
+var arr_low = array.new_float(0)           // Low prices for SL detection
 var arr_ATR = array.new_float(0)           // ATR(14) for noise scaling
 var arr_predma = array.new_float(0)        // FIX 4: Predictive MA for trailing SL / predflip / BE exits
 var arr_setup_id = array.new_int(0)        // Setup code (0 if no setup)
@@ -1791,13 +1793,21 @@ if enable_knn and all_features_valid and is_hard_zone
         array.shift(arr_packed_vec)
     array.push(arr_packed_vec, packed_vec)
     
-    // MC Family classification
-    mc_family := MCLib.f_get_mc_family(f1_vec_norm, f2_corr_norm, f3_innov_norm, f4_te_norm_safe, f5_orth_norm, f6_phi_norm)
+    // MC Family classification (moved from MCLib to SetupsLib - domain logic separation)
+    mc_family := SetupsLib.f_get_mc_family(f1_vec_norm, f2_corr_norm, f3_innov_norm, f4_te_norm_safe, f5_orth_norm, f6_phi_norm)
     
     // v16: Store additional history for Path Resampling
     if array.size(arr_close) >= max_heavy_bars
         array.shift(arr_close)
     array.push(arr_close, close)
+    
+    if array.size(arr_high) >= max_heavy_bars
+        array.shift(arr_high)
+    array.push(arr_high, high)
+    
+    if array.size(arr_low) >= max_heavy_bars
+        array.shift(arr_low)
+    array.push(arr_low, low)
     
     if array.size(arr_ATR) >= max_heavy_bars
         array.shift(arr_ATR)
@@ -1880,6 +1890,7 @@ if should_start_knn and trigger_new_bar and phase_idle
     
     // Run kNN tournament (~50ms)
     // C4 FIX: hamming_thresh=3 (was 4) for ~50% rejection, pool_max=200 (was 50) for T4=1200
+    // Phase 2: kNNLib now uses domain-agnostic category parameters
     [final_knn_ids, final_distances, final_weights, iter_result, hamming_result, na_result, cands_result] = kNNLib.f_hierarchical_tournament_live(s_packed, s_f1, s_f2, s_f3, s_f4, s_f5, s_f6, s_f7, s_family, f1_history, f2_history, f3_history, f4_history, f5_history, f6_history, f7_history, arr_packed_vec, arr_setup_id, arr_setup_family, current_setup_code, knn_oracle_horizon, mc_horizon, knn_k, 3, knn_decluster_gap, 200)
     
     // Persist debug results for table display
@@ -1955,7 +1966,7 @@ if mc_phase == 2 and (allow_chunking or is_fast_path) and array.size(var_knn_ids
     int runs_this_tick = first_tick_of_bar ? (mc_target_runs - mc_chunk_done) : math.min(mc_chunk_size, mc_target_runs - mc_chunk_done)
 
     // Run MC chunk
-    int paths_executed = MCLib.f_welford_knn_chunk(var_knn_ids, var_cumw, arr_close, arr_ATR, mc_horizon, runs_this_tick, mc_noise_scale, close, var_wMean, var_wM2, var_wCount, var_pathsUp, mc_chunk_done, bar_index, time)
+    int paths_executed = MCLib.f_welford_knn_chunk(var_knn_ids, var_cumw, arr_close, arr_ATR, mc_horizon, runs_this_tick, mc_noise_scale, close, var_wMean, var_wM2, var_wCount, var_pathsUp, mc_chunk_done, bar_index)
     
     mc_chunk_done += runs_this_tick
     var_total_paths += paths_executed
@@ -2209,28 +2220,27 @@ f_start_or_queue_validation(bool validator_idle, string curr_pending_setup_id, i
     [out_validating_setup_id, out_setup_trigger_bar, out_setup_entry_price, out_setup_direction, out_validating_label, out_validating_tooltip, out_validation_phase, out_pending_setup_id, out_pending_trigger_bar, out_pending_entry_price, out_pending_direction, out_pending_label, out_pending_tooltip, out_pending_phase]
 
 f_open_position(string setup_id, string dir, string fire_dir, float wr, float tp_pct, float sl_pct, string size_info) =>
-    ActivePosition next_pos = ActivePosition.new("", "", 0, na, na, na, na, na, na, na, false, -1, 0)
+    ActivePosition next_pos = ActivePosition.new("", "", 0, na, na, na, na, na, na, na, false, na, "", -1, 0, -1)
     float ep = close
     [tp1_tmp, tp2_tmp, tp3_tmp, sl_tmp] = SetupsLib.f_calc_tpsl(dir, ep, tp_pct, sl_pct, z2_up, z2_dn, z3_up, z3_dn, tpsl_use_zones)
     float rrr = math.abs(tp1_tmp - ep) / math.max(math.abs(sl_tmp - ep), syminfo.mintick)
-    int direction = dir == "LONG" ? 1 : -1
     
-    // Remove old level lines only if position is active
-    if pos.is_active and pos.levels_idx >= 0
-        SetupsLib.f_remove_levels(level_trackers, pos.levels_idx, pos.levels_cnt)
-    
-    // Always draw TP/SL lines, but use muted colors for bad RRR
+    // Draw TP/SL lines via SetupsLib (freeze on sweep/expire, don't delete)
     bool bad_rrr = rrr < tpsl_min_rrr
     color tp_col = bad_rrr ? color.new(color.green, 60) : color.green
     color sl_col = bad_rrr ? color.new(color.red, 60) : color.red
-    color ep_col = color.new(color.gray, 0)
     
-    [lvl_idx, lvl_cnt] = SetupsLib.f_create_tpsl_levels(level_trackers, dir, ep, tp1_tmp, tp2_tmp, sl_tmp, bar_index, 10, tpsl_max_hold, tpsl_level_scan, tp_col, sl_col, ep_col)
+    [lvl_idx, lvl_cnt] = SetupsLib.f_create_tpsl_levels(level_trackers, dir, tp1_tmp, tp2_tmp, sl_tmp, bar_index, tpsl_max_hold, tpsl_level_scan, tp_col, sl_col)
     
-    next_pos := ActivePosition.new(setup_id, dir, bar_index, ep, tp1_tmp, tp2_tmp, sl_tmp, na, na, rrr, true, lvl_idx, lvl_cnt)
+    next_pos := ActivePosition.new(setup_id, dir, bar_index, ep, tp1_tmp, tp2_tmp, sl_tmp, na, na, rrr, true, na, "", lvl_idx, lvl_cnt, -1)
 
     // Entry context debug packing (data window only)
-    int setup_code = SetupsLib.f_setup_id_to_code(setup_id)
+    int setup_code = 0
+    for _ci = 0 to array.size(setupsdb_cache) - 1
+        SetupsDB.SetupConfig _cc = array.get(setupsdb_cache, _ci)
+        if _cc.id == setup_id
+            setup_code := _cc.code
+            break
     int dir_code = dir == "LONG" ? 1 : 0
     // V19: Use SetupsLib.f_classify_market_state() with Family table
     SetupsLib.Family current_family = SetupsLib.f_classify_market_state(families, nz(z0), nz(est_trend), nz(basket_vec_z), nz(corr_damping), nz(mr_osc))
@@ -2248,8 +2258,12 @@ f_open_position(string setup_id, string dir, string fire_dir, float wr, float tp
 
 // Determine duration category based on setup ID
 f_get_duration_category(string setup_id) =>
-    [_, _, _, _, _, _, setup_avg_bars, _] = SetupsLib.f_find_setup_spec(SETUP_DB, setup_id)
-    int avg_bars = na(setup_avg_bars) ? 7 : int(setup_avg_bars)
+    int avg_bars = 12
+    for _ci = 0 to array.size(setupsdb_cache) - 1
+        SetupsDB.SetupConfig _cc = array.get(setupsdb_cache, _ci)
+        if _cc.id == setup_id
+            avg_bars := _cc.hold_bars
+            break
     avg_bars <= 7 ? 1 : avg_bars <= 12 ? 2 : 3
 
 f_add_setup_label(string setup_id, string setup_name, string dir, float wr, float sharpe, float tp_pct, float sl_pct, string tooltip_text) =>
@@ -2263,39 +2277,65 @@ f_add_setup_label(string setup_id, string setup_name, string dir, float wr, floa
         if not na(old_lbl)
             label.delete(old_lbl)
     
-    [db_name, db_dir, db_wr, db_sharpe, db_tp, db_sl, db_avg_bars, db_tooltip] = SetupsLib.f_find_setup_spec(SETUP_DB, setup_id)
-    string meta_name = db_name == "" ? setup_name : db_name
-    string meta_dir = db_dir == "" ? dir : db_dir
-    float meta_wr = na(db_wr) ? wr : db_wr
-    float meta_sharpe = na(db_sharpe) ? sharpe : db_sharpe
-    float meta_tp = na(db_tp) ? tp_pct : db_tp
-    float meta_sl = na(db_sl) ? sl_pct : db_sl
-    string meta_extra = db_tooltip == "" ? tooltip_text : db_tooltip
-    string duration_text = str.contains(str.lower(meta_extra), "time:") ? meta_extra : "Typical hold: " + str.tostring(na(db_avg_bars) ? 7 : db_avg_bars) + " bars"
-    string full_tooltip = "Setup | " + setup_id + "\n" +"Name  | " + meta_name + "\n" +"Dir   | " + meta_dir + "\n" +"WR    | " + str.tostring(meta_wr, "#.##") + "%\n" +"Sharpe| " + str.tostring(meta_sharpe, "#.##") + "\n" +"TP    | " + str.tostring(meta_tp, "#.##") + "%\n" +"SL    | " + str.tostring(meta_sl, "#.##") + "%\n" +"Hold  | " + duration_text + "\n" +"Entry | " + str.tostring(close, "#.####") + "\n" +"Bar   | " + str.tostring(bar_index) + "\n" +"Meta  | " + meta_extra
+    string meta_name = setup_name
+    string meta_dir = dir
+    float meta_wr = wr
+    float meta_sharpe = sharpe
+    float meta_tp = tp_pct
+    float meta_sl = sl_pct
+    int meta_avg_bars = 12
+    string meta_thesis = tooltip_text
+    for _ci = 0 to array.size(setupsdb_cache) - 1
+        SetupsDB.SetupConfig _cc = array.get(setupsdb_cache, _ci)
+        if _cc.id == setup_id
+            meta_name := _cc.name
+            meta_dir := _cc.dir
+            meta_wr := _cc.wr
+            meta_sharpe := _cc.sharpe
+            meta_tp := _cc.tp_pct
+            meta_sl := _cc.sl_pct
+            meta_avg_bars := _cc.hold_bars
+            meta_thesis := _cc.thesis
+            break
+    string duration_text = "Typical hold: " + str.tostring(meta_avg_bars) + " bars"
+    string full_tooltip = "Setup | " + setup_id + "\n" +"Name  | " + meta_name + "\n" +"Dir   | " + meta_dir + "\n" +"WR    | " + str.tostring(meta_wr, "#.##") + "%\n" +"Sharpe| " + str.tostring(meta_sharpe, "#.##") + "\n" +"TP    | " + str.tostring(meta_tp, "#.##") + "%\n" +"SL    | " + str.tostring(meta_sl, "#.##") + "%\n" +"Hold  | " + duration_text + "\n" +"Entry | " + str.tostring(close, "#.####") + "\n" +"Bar   | " + str.tostring(bar_index) + "\n" +"Meta  | " + meta_thesis
 
     color lbl_color = dir == "LONG" ? color.new(color.lime, 0) : color.new(color.red, 0)
-    float label_y = dir == "LONG" ? low : high
+    
+    // Position at next bar's open price (use close of current bar as proxy for next open)
+    float label_y = close
     
     // Add spaces to widen label based on duration category
     int duration_cat = f_get_duration_category(setup_id)
     string padding = duration_cat == 1 ? "" : (duration_cat == 2 ? "  " : "    ")
     string label_text = setup_id + padding
     
-    label new_lbl = label.new(bar_index, label_y, label_text, yloc=yloc.price, color=lbl_color, textcolor=color.black, style=dir == "LONG" ? label.style_label_up : label.style_label_down, size=size.tiny, tooltip=full_tooltip, force_overlay=true)
+    label new_lbl = label.new(bar_index, label_y, label_text, yloc=yloc.price, color=lbl_color, textcolor=color.black, style=label.style_label_right, size=size.tiny, tooltip=full_tooltip, force_overlay=true)
     array.push(setup_labels, new_lbl)
     [new_lbl, full_tooltip]  // Return [label, tooltip] for MC validation
 
-f_fire_setup(string fire_setup_id, string fire_setup_name, string setup_dir, string fire_dir, float fire_wr, float fire_sharpe, float fire_tp_pct, float fire_sl_pct, string fire_tooltip, string fire_size_info) =>
+f_fire_setup(string fire_setup_id, string fire_setup_name, string setup_dir, string fire_dir, float fire_wr, float fire_sharpe, float fire_tp_pct, float fire_sl_pct, string fire_tooltip, string fire_size_info, int setup_code) =>
     ActivePosition out_pos = pos
     float out_mae = na
     float out_mfe = na
     float out_entry_ctx = na
     
+    // FIX Bug #4: Cleanup active position before overwrite (prevent orphaned labels/levels)
+    if pos.is_active
+        // Freeze TP/SL levels
+        if pos.levels_idx >= 0
+            SetupsLib.f_freeze_levels(level_trackers, pos.levels_idx, pos.levels_cnt)
+        // Mark label with tilde (position interrupted, not properly exited)
+        if not na(pos.setup_label)
+            label.set_text(pos.setup_label, pos.setup_id + " ~")
+            label.set_textcolor(pos.setup_label, color.gray)
+    
     // 1. Add Label and Open Position
     [entry_label, full_tooltip] = f_add_setup_label(fire_setup_id, fire_setup_name, setup_dir, fire_wr, fire_sharpe, fire_tp_pct, fire_sl_pct, fire_tooltip)
     [temp_pos, temp_ctx] = f_open_position(fire_setup_id, setup_dir, fire_dir, fire_wr, fire_tp_pct, fire_sl_pct, fire_size_info)
     out_pos := temp_pos
+    out_pos.setup_label := entry_label
+    out_pos.tooltip := full_tooltip  // Save tooltip for exit info append
     out_entry_ctx := temp_ctx
 
     if enable_mc and enable_knn
@@ -2321,6 +2361,9 @@ f_fire_setup(string fire_setup_id, string fire_setup_name, string setup_dir, str
         rec.coupling_regime_snap := coupling_regime
         rec.basket_fit_norm_snap := nz(basket_fit_normalized, 0.5)
         rec.rho_snap := nz(rho, 0.0)
+        // FIX: Use setup_code passed from f_fire_setup_by_id (cfg.code) instead of searching cleared cache
+        rec.setup_code := setup_code
+        rec.entry_ctx := temp_ctx  // Store packed context bitfield for ML export
         rec.mc_oracle_dir := "NONE"  // Will be set during MC validation
         rec.actual_pnl := na
         rec.actual_mae := na
@@ -2343,37 +2386,56 @@ f_fire_setup(string fire_setup_id, string fire_setup_name, string setup_dir, str
 bool mc_idle_or_done = mc_phase == 0 or mc_phase == 4
 if bt_allowed and enable_knn and enable_mc and allow_bt_init and bt_phase == 0 and mc_idle_or_done
     bt_total_setups := array.size(bt_setups)
-    bt_validated_setups := 0
-    bt_confirmed_setups := 0
-    bt_chunk_idx := 0
-    bt_table_ready := false
-    // Reset persistent accumulators
-    bt_raw_wins := 0
-    bt_raw_total := 0
-    bt_raw_pnl_sum := 0.0
-    bt_filt_wins := 0
-    bt_filt_total := 0
-    bt_filt_pnl_sum := 0.0
-    bt_agree_sum := 0.0
-    bt_raw_mae_sum := 0.0
-    bt_raw_mfe_sum := 0.0
-    bt_filt_mae_sum := 0.0
-    bt_filt_mfe_sum := 0.0
-    bt_raw_mean := 0.0
-    bt_raw_m2 := 0.0
-    bt_filt_mean := 0.0
-    bt_filt_m2 := 0.0
-    bt_phase := 1  // → bt_phase 1: chunked backtest validation
+    
+    // FIX Bug 3: Guard against empty bt_setups - stay in phase 0 for retry
+    if bt_total_setups > 0
+        bt_validated_setups := 0
+        bt_confirmed_setups := 0
+        bt_chunk_idx := 0
+        bt_table_ready := false
+        // Reset persistent accumulators
+        bt_raw_wins := 0
+        bt_raw_total := 0
+        bt_raw_pnl_sum := 0.0
+        bt_filt_wins := 0
+        bt_filt_total := 0
+        bt_filt_pnl_sum := 0.0
+        bt_agree_sum := 0.0
+        bt_raw_mae_sum := 0.0
+        bt_raw_mfe_sum := 0.0
+        bt_filt_mae_sum := 0.0
+        bt_filt_mfe_sum := 0.0
+        bt_raw_mean := 0.0
+        bt_raw_m2 := 0.0
+        bt_filt_mean := 0.0
+        bt_filt_m2 := 0.0
+        bt_phase := 1  // → bt_phase 1: chunked backtest validation
 
 // --- BT PHASE 1: Budget-based chunking with kNN filtering ---
     // AGGRESSIVE LABEL CLEANUP: Clear old labels to prevent overflow
-    if array.size(setup_labels) > 250
-        for i = 0 to math.min(50, array.size(setup_labels) - 250)
+    // FIX Bug #5: Don't delete labels referenced by bt_setups, nullify references
+    // NOTE: Increased from 250 to 450 to preserve BT annotations for more setups
+    if array.size(setup_labels) > 450
+        for i = 0 to math.min(50, array.size(setup_labels) - 450)
             old_lbl = array.shift(setup_labels)
             if not na(old_lbl)
-                label.delete(old_lbl)
+                // Check if label is referenced by any BT setup
+                bool is_referenced = false
+                for j = 0 to array.size(bt_setups) - 1
+                    HistoricalSetup rec = array.get(bt_setups, j)
+                    if rec.setup_label == old_lbl
+                        is_referenced := true
+                        rec.setup_label := na  // Nullify reference
+                        array.set(bt_setups, j, rec)
+                        break
+                // Only delete if not referenced
+                if not is_referenced
+                    label.delete(old_lbl)
     
-    // Process setups in chunks to stay within heavy calculation limitsdle (phase 0 or 4)
+    // Process setups in chunks to stay within heavy calculation limits
+    // NOTE Bug #9: BT only runs when mc_phase == 0 or 4 (idle/done). If setups fire frequently,
+    // MC cycles 0→1→2→3→4→0 continuously, starving BT execution windows. BT Progress stays "...".
+    // Trade-off: prevents heavy calc overflow, but can stall BT on active charts.
 varip int bt_last_seen_attempt = -1
 bool mc_finished = mc_phase == 0 or mc_phase == 4
 if bt_phase == 1 and allow_bt_chunk and mc_finished
@@ -2405,100 +2467,53 @@ if bt_phase == 1 and allow_bt_chunk and mc_finished
 
         float ep = rec.entry_price
         bool is_long = rec.direction == "LONG"
-        float best = 0.0
-        float worst = 0.0
-        float exit_pnl = na
-        string exit_rsn = "MAXHOLD"
-        float trail_sl = na
         int hold_limit = tpsl_enable_maxhold_tp ? math.min(rec.max_hold > 0 ? rec.max_hold : tpsl_max_hold, csize_bt - offset - 1) : csize_bt - offset - 1
 
-        // FIX 4: Full exit simulation — Hard SL → Trailing SL → Predflip → Breakeven → TP
-        for h = 1 to hold_limit
-            int idx = offset + h
-            if idx >= csize_bt
-                break
-            float px = array.get(arr_close, idx)
-            float pma = idx < array.size(arr_predma) ? array.get(arr_predma, idx) : na
-            float pma_3ago = h >= 3 and (idx - 3) < array.size(arr_predma) ? array.get(arr_predma, idx - 3) : na
-            float pma_1ago = (idx - 1) < array.size(arr_predma) ? array.get(arr_predma, idx - 1) : na
-            float pnl = is_long ? (px - ep) / ep * 100.0 : (ep - px) / ep * 100.0
-            best := math.max(best, pnl)
-            worst := math.min(worst, pnl)
-
-            // 1. Hard SL (1.8% catastrophic stop)
-            float hard_sl_px = is_long ? ep * (1.0 - 1.8 / 100.0) : ep * (1.0 + 1.8 / 100.0)
-            if is_long ? px <= hard_sl_px : px >= hard_sl_px
-                exit_pnl := pnl
-                exit_rsn := "SL"
-                break
-
-            // 2. Trailing SL to pred_ma (activates after 0.5% max gain)
-            if best >= 0.5 and not na(pma)
-                float tlevel = pma
-                trail_sl := na(trail_sl) ? tlevel : (is_long ? math.max(trail_sl, tlevel) : math.min(trail_sl, tlevel))
-                if is_long ? px <= trail_sl : px >= trail_sl
-                    exit_pnl := pnl
-                    exit_rsn := "TRAIL"
-                    break
-
-            // 3. Predflip (3-bar slope reversal)
-            if not na(pma) and not na(pma_3ago) and not na(pma_1ago)
-                bool rising_now = pma > pma_3ago
-                bool rising_1ago = pma_1ago > (h >= 4 and (idx - 4) < array.size(arr_predma) ? array.get(arr_predma, idx - 4) : pma_1ago)
-                bool flip_bear = not rising_now and rising_1ago
-                bool flip_bull = rising_now and not rising_1ago
-                if is_long ? flip_bear : flip_bull
-                    exit_pnl := pnl
-                    exit_rsn := "PREDFLIP"
-                    break
-
-            // 4. Breakeven (after 5 bars if still underwater)
-            if h >= 5 and pnl < 0.0
-                exit_pnl := 0.0
-                exit_rsn := "BE"
-                break
-
-            // 5. Legacy TP (lowest priority — only if no earlier exit triggered)
-            if pnl >= rec.tp_pct
-                exit_pnl := pnl
-                exit_rsn := "TP"
-                break
-
-        // Max hold fallback (only if no exit triggered above)
-        if na(exit_pnl)
-            int last_h = math.min(hold_limit, csize_bt - offset - 1)
-            if last_h > 0
-                float last_px = array.get(arr_close, offset + last_h)
-                exit_pnl := is_long ? (last_px - ep) / ep * 100.0 : (ep - last_px) / ep * 100.0
-            else
-                exit_pnl := 0.0
-            if exit_rsn == "MAXHOLD"
-                exit_rsn := "MAXHOLD"
-
-        rec.actual_pnl := exit_pnl
+        // Unified BT simulation via SetupsLib (FIX Bug #3: pass arr_high, arr_low for correct TP/SL detection)
+        [exit_pnl, worst, best, exit_rsn] = SetupsLib.f_simulate_bt_position(rec.direction, ep, rec.tp_pct, hold_limit, arr_close, arr_high, arr_low, arr_predma, offset, csize_bt)
+        
+        rec.actual_pnl := exit_pnl - fee_pct  // Subtract round-trip trading fees
         rec.actual_mae := worst
         rec.actual_mfe := best
         rec.exit_reason := exit_rsn
 
         // P1: Force knnlimit = offset - mchorizon - 1 to eliminate path walk past setup bar
         int knn_limit = math.min(offset - mc_horizon - 1, array.size(arr_packed_vec))
-        int setup_code = SetupsLib.f_setup_id_to_code(rec.setup_id)
+        int setup_code = rec.setup_code
         int family_id = rec.family_snap.id
         
-        [chosen_ids, chosen_dists, chosen_w, dbg_iter, dbg_hskip, dbg_nskip, final_count] = kNNLib.f_hierarchical_tournament_backtest_signaware(rec.packed_snap, rec.f1_snap, rec.f2_snap, rec.f3_snap, rec.f4_snap, rec.f5_snap, rec.f6_snap, rec.f7_snap, family_id, setup_code, arr_packed_vec, f2_history, f3_history, f4_history, f5_history, f6_history, f7_history, arr_setup_id, arr_setup_family, arr_packed_vec, knn_limit, knn_k, 4, knn_decluster_gap, 50)
+        // FIX Bug 2: Create quantized F1 history for BT kNN (expects array<int>, not packed vectors)
+        // BT kNN signature: f1history is array<int> with quantized values (0-15), not packed 28-bit vectors
+        array<int> f1_history_quant = array.new<int>(0)
+        int f1_size = array.size(f1_history)
+        for i = 0 to math.min(f1_size, knn_limit) - 1
+            float f1_val = array.get(f1_history, i)
+            // Quantize to 4-bit (0-15) matching kNN signal-aware filter expectations
+            int quant_val = int(math.round(math.max(0.0, math.min(15.0, (f1_val + 1.0) * 7.5))))
+            array.push(f1_history_quant, quant_val)
+        
+        // Phase 2: kNNLib now uses domain-agnostic category parameters
+        [chosen_ids, chosen_dists, chosen_w, dbg_iter, dbg_hskip, dbg_nskip, final_count] = kNNLib.f_hierarchical_tournament_backtest_signaware(rec.packed_snap, rec.f1_snap, rec.f2_snap, rec.f3_snap, rec.f4_snap, rec.f5_snap, rec.f6_snap, rec.f7_snap, family_id, setup_code, f1_history_quant, f2_history, f3_history, f4_history, f5_history, f6_history, f7_history, arr_setup_id, arr_setup_family, arr_packed_vec, knn_limit, knn_k, 4, knn_decluster_gap, 50)
 
         // P0: Forward bias check - log offset, knnlimit, and chosen_ids range
+        // FIX Bug #7: Skip setup if forward bias detected (prevents future contamination)
         if array.size(chosen_ids) > 0
             int min_id = array.get(chosen_ids, 0)
             int max_id = array.get(chosen_ids, array.size(chosen_ids) - 1)
             bool forward_bias_detected = max_id >= offset
-            // Forward bias detected for " + rec.setup_id
+            if forward_bias_detected
+                rec.mc_confirmed := false
+                rec.mc_pct_agree := na
+                rec.mc_confidence := na
+                array.set(bt_setups, s - 1, rec)  // s already incremented at line 2458
+                heavy_budget -= 1
+                continue
 
         if array.size(chosen_ids) == 0
             rec.mc_confirmed := false
             rec.mc_pct_agree := na
             rec.mc_confidence := na
-            array.set(bt_setups, s - 1, rec)
+            array.set(bt_setups, s - 1, rec)  // s already incremented at line 2458
             heavy_budget -= 1  // Count against budget even if kNN fails
             continue
 
@@ -2527,7 +2542,7 @@ if bt_phase == 1 and allow_bt_chunk and mc_finished
         bool use_setup_direction = mc_validator_direction_mode == "Setup Direction"
         
         for run = 0 to bt_mc_runs - 1
-            float rw = f_prng(run + 1.0 + float(rec.bar_idx) * 0.001)
+            float rw = MCLib.f_prng(rec.bar_idx + run + 1, run + 1)
             int chosen_idx = array.get(chosen_ids, fallback_idx)
             for n = 0 to ksz - 1
                 if rw <= array.get(bt_cw, n)
@@ -2547,8 +2562,8 @@ if bt_phase == 1 and allow_bt_chunk and mc_finished
                 float cur = array.get(arr_close, fb)
                 float prev = array.get(arr_close, fb - 1)
                 float hr = not na(cur) and not na(prev) and prev > 0 ? math.log(cur / prev) : 0.0
-                float u1 = math.max(1e-10, f_prng(run * 997.0 + h * 61.0 + 11.0))
-                float u2 = f_prng(run * 991.0 + h * 67.0 + 17.0)
+                float u1 = math.max(1e-10, MCLib.f_prng(rec.bar_idx + run * 997 + h * 61, 11))
+                float u2 = MCLib.f_prng(rec.bar_idx + run * 991 + h * 67, 17)
                 float z = math.sqrt(-2.0 * math.log(u1)) * math.cos(6.2831853 * u2)
                 priceA *= math.exp(hr + z * ns)
                 priceB *= math.exp(hr - z * ns)
@@ -2565,14 +2580,14 @@ if bt_phase == 1 and allow_bt_chunk and mc_finished
                 float pathLowB = priceB
                 
                 for h = 0 to mc_hz - 1
-                    int fb = rec.bar_idx + h + 1
+                    int fb = offset + h + 1  // FIX: use offset (array index) not rec.bar_idx (absolute bar)
                     if fb >= csize_bt
                         break
                     float cur = array.get(arr_close, fb)
                     float prev = array.get(arr_close, fb - 1)
                     float hr = not na(cur) and not na(prev) and prev > 0 ? math.log(cur / prev) : 0.0
-                    float u1 = math.max(1e-10, f_prng(run * 997.0 + h * 61.0 + 11.0))
-                    float u2 = f_prng(run * 991.0 + h * 67.0 + 17.0)
+                    float u1 = math.max(1e-10, MCLib.f_prng(rec.bar_idx + run * 997 + h * 61, 11))
+                    float u2 = MCLib.f_prng(rec.bar_idx + run * 991 + h * 67, 17)
                     float z = math.sqrt(-2.0 * math.log(u1)) * math.cos(6.2831853 * u2)
                     float ns = nClose > 0 ? nATR * mc_noise_scale / nClose : 0.0
                     priceA *= math.exp(hr + z * ns)
@@ -2628,7 +2643,7 @@ if bt_phase == 1 and allow_bt_chunk and mc_finished
             // In Best MC Direction mode, check if MC direction matches setup direction
             
             for run = 0 to bt_mc_runs - 1
-                float rw = f_prng(run + 1.0 + float(rec.bar_idx) * 0.001)
+                float rw = MCLib.f_prng(rec.bar_idx + run + 1, run + 1)
                 float priceA = rec.entry_price
                 float priceB = rec.entry_price
                 
@@ -2647,8 +2662,8 @@ if bt_phase == 1 and allow_bt_chunk and mc_finished
                     float cur = array.get(arr_close, fb)
                     float prev = array.get(arr_close, fb - 1)
                     float hr = not na(cur) and not na(prev) and prev > 0 ? math.log(cur / prev) : 0.0
-                    float u1 = math.max(1e-10, f_prng(run * 997.0 + h * 61.0 + 11.0))
-                    float u2 = f_prng(run * 991.0 + h * 67.0 + 17.0)
+                    float u1 = math.max(1e-10, MCLib.f_prng(rec.bar_idx + run * 997 + h * 61, 11))
+                    float u2 = MCLib.f_prng(rec.bar_idx + run * 991 + h * 67, 17)
                     float z = math.sqrt(-2.0 * math.log(u1)) * math.cos(6.2831853 * u2)
                     priceA *= math.exp(hr + z * ns)
                     priceB *= math.exp(hr - z * ns)
@@ -2667,22 +2682,24 @@ if bt_phase == 1 and allow_bt_chunk and mc_finished
         
         // P2: CSV export logging per setup for scatter plot analysis
         if not na(rec.mc_pct_agree) and not na(rec.actual_pnl)
-            string csv_line = rec.setup_id + "," + rec.direction + "," + str.tostring(rec.mc_pct_agree, "#.##") + "," + str.tostring(rec.actual_pnl, "#.##")
+            // FIX Bug #1: Remove format truncation for scatter plot precision
+            string csv_line = rec.setup_id + "," + rec.direction + "," + str.tostring(rec.mc_pct_agree) + "," + str.tostring(rec.actual_pnl)
             // CSV: " + csv_line
         
         // --- FIX: BT LABEL RECOLORING (preserves direction, encodes outcome) ---
-        if not na(rec.setup_label) and label.get_x(rec.setup_label) > 0
+        if show_setupsdb_debug and not na(rec.setup_label) and label.get_x(rec.setup_label) > 0
             bool is_long_bt = rec.direction == "LONG"
             if rec.mc_confirmed
                 bool is_win_bt = not na(rec.actual_pnl) and rec.actual_pnl > 0
-                color new_col = is_long_bt ? (is_win_bt ? color.new(color.lime, 0) : color.new(color.lime, 60)) : (is_win_bt ? color.new(color.red, 0) : color.new(color.red, 60))
+                // Win: solid bright colors, Loss: dark colors (no transparency)
+                color new_col = is_long_bt ? (is_win_bt ? color.new(color.lime, 0) : color.new(color.green, 0)) : (is_win_bt ? color.new(color.red, 0) : color.new(color.maroon, 0))
                 label.set_color(rec.setup_label, new_col)
                 label.set_text(rec.setup_label, rec.setup_id + (is_win_bt ? " W" : " X"))
             else
                 label.set_color(rec.setup_label, color.new(is_long_bt ? color.lime : color.red, 80))
                 label.set_text(rec.setup_label, rec.setup_id + " ?")
         
-        array.set(bt_setups, s - 1, rec)
+        array.set(bt_setups, s - 1, rec)  // s already incremented at line 2458
 
         bt_validated_setups += 1
         bt_agree_sum += nz(rec.mc_pct_agree, 0.0)
@@ -2739,6 +2756,24 @@ if bt_phase == 2
     bt_table_ready := true
     bt_phase := 3  // Done (stays at 3, no reset to 0)
 
+// ── BT PHASE 3: Persistent Label Refresh (every bar after completion) ──
+// FIX: Reapply BT annotations on every bar to handle label recreation/chart reload
+// NOTE: Processes ALL setups. If heavy calc overflow occurs, table will show incomplete progress.
+if bt_phase == 3 and show_setupsdb_debug
+    for j = 0 to array.size(bt_setups) - 1
+        HistoricalSetup rec = array.get(bt_setups, j)
+        if not na(rec.setup_label) and label.get_x(rec.setup_label) > 0
+            bool is_long_bt = rec.direction == "LONG"
+            if rec.mc_confirmed
+                bool is_win_bt = not na(rec.actual_pnl) and rec.actual_pnl > 0
+                // Win: solid bright colors, Loss: dark colors (no transparency)
+                color new_col = is_long_bt ? (is_win_bt ? color.new(color.lime, 0) : color.new(color.green, 0)) : (is_win_bt ? color.new(color.red, 0) : color.new(color.maroon, 0))
+                label.set_color(rec.setup_label, new_col)
+                label.set_text(rec.setup_label, rec.setup_id + (is_win_bt ? " W" : " X"))
+            else
+                label.set_color(rec.setup_label, color.new(is_long_bt ? color.lime : color.red, 80))
+                label.set_text(rec.setup_label, rec.setup_id + " ?")
+
 var int last_setup_trigger_bar = 0
 // Armed setup variables removed - obsolete with setupsDB architecture
 
@@ -2748,17 +2783,21 @@ var int last_setup_trigger_bar = 0
 if bt_phase == 2 and barstate.islast
     string vel_fix_str2 = "true"
     string dir_mode_str2 = mc_validator_direction_mode == "Setup Direction" ? "setup" : "best"
-    log.info("ML_EXPORT_HEADER: baridx,setupid,direction,f1,f2,f3,f4,f5,f6,f7,family_id,coupling_regime,basket_fit_norm,rho,mc_oracle_dir,actualpnl,actualmae,actualmfe,exitreason,mcconfirmed,mcconfidence,mc_dir_mode,vel_recouple_abs_fix")
+    // FIX Bug #5: Add setup_code and entry_ctx to header
+    log.info("ML_EXPORT_HEADER: baridx,setupid,direction,setup_code,entry_ctx,f1,f2,f3,f4,f5,f6,f7,family_id,coupling_regime,basket_fit_norm,rho,mc_oracle_dir,actualpnl,actualmae,actualmfe,exitreason,mcconfirmed,mcconfidence")
     int exportcount = array.size(bt_setups)
+    // FIX CRITICAL Export Bugs: (1) Full precision, (2) No 5-row limit, (3) Add entry_ctx + setup_code
     log.info("ML_EXPORT_DEBUG: bt_setups size = " + str.tostring(exportcount))
     if exportcount > 0
-        for i = 0 to math.min(exportcount - 1, 5)  // Limit to first 5 for debugging
+        for i = 0 to exportcount - 1  // FIX Bug #2: Remove artificial 5-row limit
             HistoricalSetup s = array.get(bt_setups, i)
             bool hasoutcome = not na(s.actual_pnl)
             // Check if hist_avail field exists and is valid
             int hist_check = na(s.hist_avail) ? 0 : s.hist_avail
             if hasoutcome and hist_check > 0
-                string row = "ML_EXPORT_ROW: " + str.tostring(s.bar_idx) + "," + s.setup_id + "," + s.direction + "," + str.tostring(s.f1_snap, "#.######") + "," + str.tostring(s.f2_snap, "#.######") + "," + str.tostring(s.f3_snap, "#.######") + "," + str.tostring(s.f4_snap, "#.######") + "," + str.tostring(s.f5_snap, "#.######") + "," + str.tostring(s.f6_snap, "#.######") + "," + str.tostring(s.f7_snap, "#.######") + "," + str.tostring(s.family_snap.id) + "," + str.tostring(s.coupling_regime_snap) + "," + str.tostring(s.basket_fit_norm_snap, "#.###") + "," + str.tostring(s.rho_snap, "#.###") + "," + s.mc_oracle_dir + "," + str.tostring(s.actual_pnl, "#.######") + "," + str.tostring(s.actual_mae, "#.######") + "," + str.tostring(s.actual_mfe, "#.######") + "," + s.exit_reason + "," + str.tostring(s.mc_confirmed) + "," + str.tostring(s.mc_confidence, "#.##")
+                // FIX Bug #1: Remove format strings for full precision (no truncation)
+                // FIX Bug #5: Add setup_code and entry_ctx for market-state awareness
+                string row = "ML_EXPORT_ROW|" + str.tostring(s.bar_idx) + "," + s.setup_id + "," + s.direction + "," + str.tostring(s.setup_code) + "," + str.tostring(s.entry_ctx) + "," + str.tostring(s.f1_snap) + "," + str.tostring(s.f2_snap) + "," + str.tostring(s.f3_snap) + "," + str.tostring(s.f4_snap) + "," + str.tostring(s.f5_snap) + "," + str.tostring(s.f6_snap) + "," + str.tostring(s.f7_snap) + "," + str.tostring(s.family_snap.id) + "," + str.tostring(s.coupling_regime_snap) + "," + str.tostring(s.basket_fit_norm_snap) + "," + str.tostring(s.rho_snap) + "," + s.mc_oracle_dir + "," + str.tostring(s.actual_pnl) + "," + str.tostring(s.actual_mae) + "," + str.tostring(s.actual_mfe) + "," + s.exit_reason + "," + str.tostring(s.mc_confirmed) + "," + str.tostring(s.mc_confidence)
                 log.info(row)
         log.info("ML_EXPORT_DONE: " + str.tostring(exportcount) + " rows")
 
@@ -2809,17 +2848,13 @@ f_fire_setup_by_id(string fire_setup_id, string fire_tooltip, string fire_size_i
             // Use the tighter of MC-TP and SetupDB-TP
             float effective_tp = not na(mc_tp) and mc_tp > 0 ? math.min(setup_tp, mc_tp) : setup_tp
             
-            [r_pos, r_mae, r_mfe, r_entry_ctx] = f_fire_setup(fire_setup_id, setup_name, setup_dir, setup_dir, setup_wr, setup_sharpe, effective_tp, setup_sl, fire_tooltip, fire_size_info)
+            // cfg.code is the authoritative code — always non-zero for all SetupConfig entries
+            out_fire_code := cfg.code
+            
+            [r_pos, r_mae, r_mfe, r_entry_ctx] = f_fire_setup(fire_setup_id, setup_name, setup_dir, setup_dir, setup_wr, setup_sharpe, effective_tp, setup_sl, fire_tooltip, fire_size_info, out_fire_code)
             out_mae := r_mae
             out_mfe := r_mfe
             out_entry_ctx := r_entry_ctx
-
-            // FIX 1: Return fire code — use simple hash for setupsDB IDs (never returns 0)
-            // Base 1000 ensures non-zero, then add length*100 + character positions
-            int s_pos = str.pos(fire_setup_id, "S")
-            int l_pos = str.pos(fire_setup_id, "L")
-            int n_pos = str.pos(fire_setup_id, "N")
-            out_fire_code := 1000 + str.length(fire_setup_id) * 100 + (s_pos >= 0 ? s_pos : 0) + (l_pos >= 0 ? l_pos : 0) + (n_pos >= 0 ? n_pos : 0)
 
             // FIX 7: Guard multi-fire race — only write if this bar's slot hasn't been claimed yet
             int setup_id_count = array.size(arr_setup_id)
@@ -2905,6 +2940,19 @@ bool allow_short = not is_falling_knife
 // DEBUG REMOVED: setup_debug_code, setup_debug_mask
 // Engine event processing moved to after setupsDB.evaluate_all() call (line ~3273)
 
+// Per-bar level tracker update (sweep detection + line extension)
+if show_setup_labels
+    SetupsLib.f_update_levels(level_trackers, high, low, bar_index)
+
+// Prune oldest TP/SL lines when limit reached (configurable 20-450, uses available line slots)
+// Auto-delete oldest 10% of lines to make room for new positions
+if array.size(level_trackers) > max_tpsl_lines
+    int prune_count = math.max(1, int(max_tpsl_lines * 0.1))  // Delete 10% of limit
+    for i = 0 to prune_count - 1
+        SetupsLib.LevelTracker t = array.shift(level_trackers)
+        if not na(t.ln)
+            line.delete(t.ln)
+
 // ═══════════════════════════════════════════════════════════════════════════
 // PREDFLIP + BREAKEVEN EXIT STRATEGY
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2913,17 +2961,6 @@ bool allow_short = not is_falling_knife
 //   1. If PnL > 0 after 5 bars → hold until pred_ma color flip
 //   2. If PnL ≤ 0 after 5 bars → close at breakeven (0% loss)
 //   3. Hard stop -1.8% always active
-
-// Per-bar level tracker update (sweep detection + line extension)
-if show_setup_labels
-    SetupsLib.f_update_levels(level_trackers, high, low, bar_index)
-
-// Prune completed trackers to keep replay memory bounded
-if array.size(level_trackers) > 40
-    for i = array.size(level_trackers) - 1 to 0
-        SetupsLib.LevelTracker lt = array.get(level_trackers, i)
-        if lt.done
-            array.remove(level_trackers, i)
 
 if pos.is_active and bar_index > pos.entry_bar
     // Position metrics
@@ -2941,126 +2978,39 @@ if pos.is_active and bar_index > pos.entry_bar
     
     // Pred MA slope detection (3-bar comparison - matches backtest)
     bool pred_rising = pred_ma > nz(pred_ma[3], pred_ma)
-    bool pred_falling = pred_ma < nz(pred_ma[3], pred_ma)
+    bool pred_rising_1ago = nz(pred_ma[1], pred_ma) > nz(pred_ma[4], pred_ma)
     
-    // Pred color flip detection
-    bool pred_flip_bear = pred_falling and pred_rising[1]  // green → red
-    bool pred_flip_bull = pred_rising and pred_falling[1]  // red → green
-    
-    // Trailing SL to pred_ma (activates when max_pnl > 0.5%)
+    // Unified exit evaluation via SetupsLib
     var float trail_sl = na
-    if bars_held >= 1 and max_pnl > 0.5
-        float trail_level = pred_ma
-        if pos.dir == "LONG"
-            trail_sl := na(trail_sl) ? trail_level : math.max(trail_sl, trail_level)
-        else  // SHORT
-            trail_sl := na(trail_sl) ? trail_level : math.min(trail_sl, trail_level)
-    else if bars_held == 0
-        trail_sl := na  // Reset on new position
+    [exit_code, temp_trail_sl] = SetupsLib.f_evaluate_exit(pos.dir, pos_pnl, max_pnl, bars_held, high, low, pos.tp1, trail_sl, pred_ma, pred_rising, pred_rising_1ago)
+    trail_sl := temp_trail_sl
     
-    // Exit conditions
-    bool exit_trail_sl = not na(trail_sl) and (pos.dir == "LONG" ? low <= trail_sl : high >= trail_sl)
-    bool exit_pred_flip = pos.dir == "LONG" ? pred_flip_bear : pred_flip_bull
-    bool exit_be = bars_held >= 5 and pos_pnl <= 0  // Breakeven after 5 bars if not profitable
-    bool exit_hard_sl = pos_pnl <= -1.8  // Hard stop loss
-    
-    // Legacy TP/SL hits (keep for compatibility, but lower priority)
-    bool hit_tp1 = pos.dir == "LONG" ? high >= pos.tp1 : low <= pos.tp1
-    
-    // Exit priority: Hard SL → Trailing SL → Pred Flip → Breakeven → Legacy TP1
-    if exit_hard_sl
-        // Hard stop loss hit
-        last_exit_reason_code := 0
+    // Process exit (unified handler)
+    if exit_code >= 0
+        last_exit_reason_code := exit_code
         last_exit_bars_held := bars_held
         last_exit_pnl := pos_pnl
         last_exit_mae := math.min(min_pnl, 0.0)
         last_exit_mfe := max_pnl
         last_exit_basket_fit := basket_fit
-        // DEBUG REMOVED: exit_context_bitfield calculation
-        if tpsl_show_result
-            label.new(bar_index, close, "✗ SL", color=color.new(color.white, 100), textcolor=color.red, style=label.style_label_down, size=size.small, force_overlay=true)
+        
+        // Update label with exit marker and tooltip via SetupsLib
+        SetupsLib.f_update_exit_label(pos.setup_label, pos.setup_id, pos.dir, exit_code, pos_pnl)
+        if not na(pos.setup_label)
+            string exit_info = SetupsLib.f_get_exit_info(exit_code)
+            label.set_tooltip(pos.setup_label, pos.tooltip + exit_info)
+        
+        // Cleanup
         trail_sl := na
         max_pnl := 0.0
         min_pnl := 0.0
         if pos.levels_idx >= 0
             SetupsLib.f_freeze_levels(level_trackers, pos.levels_idx, pos.levels_cnt)
-        pos := ActivePosition.new("", "", 0, na, na, na, na, na, na, na, false, -1, 0)
-    else if exit_trail_sl
-        // Trailing SL hit - locked in profit
-        last_exit_reason_code := 1
-        last_exit_bars_held := bars_held
-        last_exit_pnl := pos_pnl
-        last_exit_mae := math.min(min_pnl, 0.0)
-        last_exit_mfe := max_pnl
-        last_exit_basket_fit := basket_fit
-        // DEBUG REMOVED: exit_context_bitfield calculation
-        if tpsl_show_result
-            string exit_label = "⤴ Trail " + str.tostring(pos_pnl, "#.#") + "%"
-            label.new(bar_index, trail_sl, exit_label, color=color.new(color.white, 100), textcolor=color.green, style=label.style_label_center, size=size.small, force_overlay=true)
-        trail_sl := na
-        max_pnl := 0.0
-        min_pnl := 0.0
-        if pos.levels_idx >= 0
-            SetupsLib.f_freeze_levels(level_trackers, pos.levels_idx, pos.levels_cnt)
-        pos := ActivePosition.new("", "", 0, na, na, na, na, na, na, na, false, -1, 0)
-    else if exit_pred_flip
-        // Pred MA color flip - ride the trend exit
-        last_exit_reason_code := 2
-        last_exit_bars_held := bars_held
-        last_exit_pnl := pos_pnl
-        last_exit_mae := math.min(min_pnl, 0.0)
-        last_exit_mfe := max_pnl
-        last_exit_basket_fit := basket_fit
-        // DEBUG REMOVED: exit_context_bitfield calculation
-        if tpsl_show_result
-            string exit_label = "⟲ Flip " + str.tostring(pos_pnl, "#.#") + "%"
-            color exit_color = pos_pnl > 0 ? color.green : color.orange
-            label.new(bar_index, close, exit_label, color=color.new(color.white, 100), textcolor=exit_color, style=label.style_label_center, size=size.small, force_overlay=true)
-        trail_sl := na
-        max_pnl := 0.0
-        min_pnl := 0.0
-        if pos.levels_idx >= 0
-            SetupsLib.f_freeze_levels(level_trackers, pos.levels_idx, pos.levels_cnt)
-        pos := ActivePosition.new("", "", 0, na, na, na, na, na, na, na, false, -1, 0)
-    else if exit_be
-        // Breakeven exit - cut losers early
-        last_exit_reason_code := 3
-        last_exit_bars_held := bars_held
-        last_exit_pnl := pos_pnl
-        last_exit_mae := math.min(min_pnl, 0.0)
-        last_exit_mfe := max_pnl
-        last_exit_basket_fit := basket_fit
-        // DEBUG REMOVED: exit_context_bitfield calculation
-        if tpsl_show_result
-            label.new(bar_index, close, "BE 0%", color=color.new(color.white, 100), textcolor=color.gray, style=label.style_label_center, size=size.small, force_overlay=true)
-        trail_sl := na
-        max_pnl := 0.0
-        min_pnl := 0.0
-        if pos.levels_idx >= 0
-            SetupsLib.f_freeze_levels(level_trackers, pos.levels_idx, pos.levels_cnt)
-        pos := ActivePosition.new("", "", 0, na, na, na, na, na, na, na, false, -1, 0)
-    else if hit_tp1
-        // Legacy TP1 hit (fallback)
-        last_exit_reason_code := 3
-        last_exit_bars_held := bars_held
-        last_exit_pnl := pos_pnl
-        last_exit_mae := math.min(min_pnl, 0.0)
-        last_exit_mfe := max_pnl
-        last_exit_basket_fit := basket_fit
-        // DEBUG REMOVED: exit_context_bitfield calculation
-        if tpsl_show_result
-            label.new(bar_index, pos.tp1, "✓ TP1", color=color.new(color.white, 100), textcolor=color.green, style=label.style_label_up, size=size.small, force_overlay=true)
-        trail_sl := na
-        max_pnl := 0.0
-        min_pnl := 0.0
-        if pos.levels_idx >= 0
-            SetupsLib.f_freeze_levels(level_trackers, pos.levels_idx, pos.levels_cnt)
-        pos := ActivePosition.new("", "", 0, na, na, na, na, na, na, na, false, -1, 0)
+        pos := ActivePosition.new("", "", 0, na, na, na, na, na, na, na, false, na, "", -1, 0, -1)
     else if tpsl_enable_maxhold_tp and bar_index - pos.entry_bar > tpsl_max_hold
-        // Freeze levels (keep visible) rather than delete
         if pos.levels_idx >= 0
             SetupsLib.f_freeze_levels(level_trackers, pos.levels_idx, pos.levels_cnt)
-        pos := ActivePosition.new("", "", 0, na, na, na, na, na, na, na, false, -1, 0)
+        pos := ActivePosition.new("", "", 0, na, na, na, na, na, na, na, false, na, "", -1, 0, -1)
 
 // --- SIGNAL LOGIC ---
 // 1. Predictive Trend (Kalman State)
@@ -3272,7 +3222,7 @@ if barstate.isconfirmed and entry_context_code == 1000
              ",mr=" + str.tostring(mr_for_setups, "#.###") +
              ",vec=" + str.tostring(basket_vec_z, "#.###") +
              ",basket=" + str.tostring(basket_fit, "#.##") +
-             ",burst=" + str.tostring(f7_burst_raw, "#.###") +
+             ",burst=" + str.tostring(f7_burst_raw, "#.######") +
              ",te=" + str.tostring(te_osc, "#.###") +
              ",innW=" + str.tostring(innov_width, "#.####") +
              ",innWmed=" + str.tostring(innov_width_med, "#.####") +
@@ -3299,7 +3249,7 @@ if array.size(triggered_setups) > 0
             array.push(setupsdb_cache, cfg)
             // Register setup event with metadata in tooltip
             string tooltip_data = cfg.name + " | WR: " + str.tostring(cfg.wr, "#.#") + "% | Sharpe: " + str.tostring(cfg.sharpe, "#.###")
-            SetupsLib.f_register_event_auto(engine_events, SETUP_DB, true, cfg.id, tooltip_data)
+            SetupsLib.f_register_event(engine_events, true, cfg.id, tooltip_data, cfg.name)
 
 // Reset MC visualization variables at start of each bar
 mae_viz_price := na
@@ -3763,6 +3713,10 @@ color te_col = te_pit_pending ? color.new(color.yellow, 0) : (te_pit_recovery ? 
 
 // Remove Z-score normalization because it crushes small TE variance to 0.0
 // Instead, map raw [-1, 1] TE to the visual oscillator scale [-10, 10]
+// HIGH Bug #4 WARNING: te_osc_normalized is ONLY for visual display (chart pane).
+// ML export, setup thresholds, and all logic use raw te_osc ([-1, 1] range).
+// If visually optimizing from chart: divide visual value by 10 for code thresholds.
+// Example: Visual "-5" on chart = te_osc = -0.5 in code/export.
 float te_osc_normalized = na(te_osc) ? na : te_osc * 10.0
 
 // Oscillator baselines: MR at 0, TE/Vector/Basket Corr at -6
@@ -3843,7 +3797,8 @@ color innov_color = high_pivot_valid ? color.new(color.red, 0) : (low_pivot_vali
 
 // Encode all signals and thresholds into a single statement to bypass CE10296
 plot((barstate.isrealtime ? 1.0 : 0.0) * 1000.0 + (bt_table_ready ? 100.0 : 0.0) + (mc_has_results ? 10.0 : 0.0), "Trade State", color=color.new(color.blue, 0), display=display.data_window)
-plot(mc_phase * 1000.0 + mc_chunk_done * 100.0 + bt_validated_setups * 10.0 + bt_confirmed_setups, "MC Debug", color=color.new(color.orange, 0), display=display.data_window)
+// FIX: Cap bt_validated at 99 for encoding (actual value shown in table)
+plot(mc_phase * 1000.0 + mc_chunk_done * 100.0 + math.min(bt_validated_setups, 99) * 10.0 + math.min(bt_confirmed_setups, 9), "MC Debug", color=color.new(color.orange, 0), display=display.data_window)
 plot((not na(pos) ? 1000.0 : 0.0) + (pos.dir == "LONG" ? 100.0 : pos.dir == "SHORT" ? 200.0 : 0.0), "Entry Context", color=color.new(color.green, 0), display=display.data_window)
 plot((not na(pos) and not pos.is_active ? 1000.0 : 0.0) + (not na(pos) ? 100.0 : 0.0), "Exit Context", color=color.new(color.red, 0), display=display.data_window)
 plot(0.0, "Density Debug", color=color.new(color.purple, 0), display=display.data_window)
@@ -4181,18 +4136,20 @@ if barstate.islast
             SetupsDB.SetupConfig c = array.get(triggered_setups, i)
             last_triggered_ids += c.id + (i < math.min(triggered_size - 1, 2) ? "," : "")
     
-    // Show current entry context (must match thresholds at line 3236)
-    int current_entry_ctx = z0 < -0.5 ? 1000 : z0 > 0.5 ? 1200 : 1100
-    
-    string diag_text = "setupsDB Diagnostic:\n" + 
-                       "triggered: " + str.tostring(triggered_size) + " | cache: " + str.tostring(cache_size) + "\n" +
-                       "IDs: " + (triggered_size > 0 ? last_triggered_ids : "none") + "\n" +
-                       "entryCtx: " + str.tostring(current_entry_ctx) + " (z0=" + str.tostring(z0, "#.##") + ")\n" +
-                       "basket_latched: " + str.tostring(basket_latched) + " | peers: " + str.tostring(peer_count_active, "#") + " | stable: " + str.tostring(basket_stable) + "\n" +
-                       "basket_vec_z: " + str.tostring(basket_vec_z, "#.##") + " | basket_fit: " + str.tostring(basket_fit, "#.#") + "\n" +
-                       "te_osc: " + str.tostring(te_osc, "#.##") + " | mr: " + str.tostring(mr_for_setups, "#.##") + "\n" +
-                       "f7_burst: " + str.tostring(f7_burst_raw, "#.##") + " | allow_s/l: " + str.tostring(allow_short) + "/" + str.tostring(allow_long) + "\n" +
-                       "lastShort: " + str.tostring(last_pred_short_bar) + " | lastLong: " + str.tostring(last_pred_long_bar) + " | lastTrig: " + str.tostring(last_setup_trigger_bar)
-    label.new(bar_index, high * 1.02, diag_text, color=color.new(color.blue, 80), 
-              textcolor=color.black, style=label.style_label_down, size=size.normal)
+    // Diagnostic label (inside barstate.islast to access local variables)
+    if show_setupsdb_diag
+        // Show current entry context (must match thresholds at line 3236)
+        int current_entry_ctx = z0 < -0.5 ? 1000 : z0 > 0.5 ? 1200 : 1100
+        
+        string diag_text = "setupsDB Diagnostic:\n" + 
+                           "triggered: " + str.tostring(triggered_size) + " | cache: " + str.tostring(cache_size) + "\n" +
+                           "IDs: " + (triggered_size > 0 ? last_triggered_ids : "none") + "\n" +
+                           "entryCtx: " + str.tostring(current_entry_ctx) + " (z0=" + str.tostring(z0, "#.##") + ")\n" +
+                           "basket_latched: " + str.tostring(basket_latched) + " | peers: " + str.tostring(peer_count_active, "#") + " | stable: " + str.tostring(basket_stable) + "\n" +
+                           "basket_vec_z: " + str.tostring(basket_vec_z, "#.##") + " | basket_fit: " + str.tostring(basket_fit, "#.#") + "\n" +
+                           "te_osc: " + str.tostring(te_osc, "#.##") + " | mr: " + str.tostring(mr_for_setups, "#.##") + "\n" +
+                           "f7_burst: " + str.tostring(f7_burst_raw, "#.##") + " | allow_s/l: " + str.tostring(allow_short) + "/" + str.tostring(allow_long) + "\n" +
+                           "lastShort: " + str.tostring(last_pred_short_bar) + " | lastLong: " + str.tostring(last_pred_long_bar) + " | lastTrig: " + str.tostring(last_setup_trigger_bar)
+        label.new(bar_index, high * 1.02, diag_text, color=color.new(color.blue, 80), 
+                  textcolor=color.black, style=label.style_label_down, size=size.normal)
 
