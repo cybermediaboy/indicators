@@ -191,6 +191,8 @@ var int mc_chunk_done = 0         // MC runs completed so far
 var bool mc_has_results = false   // Results ready for display
 var int mc_result_bar = 0         // Bar index when last MC completed (for freshness check)
 varip int bt_chunk_idx = 0          // Current setup index being validated in bt_phase 1
+varip int bt_phase3_idx = 0         // Current label index being refreshed in bt_phase 3
+varip bool bt_phase3_overflow = false  // Phase 3 hit heavy calc limit
 
 // Persistent debug vars for stable table display (survive across ticks)
 var int dbg_total_iter = 0
@@ -2756,11 +2758,21 @@ if bt_phase == 2
     bt_table_ready := true
     bt_phase := 3  // Done (stays at 3, no reset to 0)
 
-// ── BT PHASE 3: Persistent Label Refresh (every bar after completion) ──
-// FIX: Reapply BT annotations on every bar to handle label recreation/chart reload
-// NOTE: Processes ALL setups. If heavy calc overflow occurs, table will show incomplete progress.
-if bt_phase == 3 and show_setupsdb_debug
-    for j = 0 to array.size(bt_setups) - 1
+// ── BT PHASE 3: Chunked Label Refresh (tick-based to prevent overflow) ──
+// FIX: Process bt_heavy_budget labels per tick instead of all at once
+// Color repainting: always enabled if bt_enable=true (shows confirmed vs unconfirmed)
+// Text annotations (W/X/?): only if show_setupsdb_debug=true
+if bt_phase == 3
+    int bt_size = array.size(bt_setups)
+    int labels_this_tick = 0
+    int start_idx = bt_phase3_idx
+    
+    // Process chunk of labels (respects bt_heavy_budget to avoid overflow)
+    for j = start_idx to bt_size - 1
+        if labels_this_tick >= bt_heavy_budget
+            bt_phase3_overflow := true  // Hit budget limit, continue next tick
+            break
+        
         HistoricalSetup rec = array.get(bt_setups, j)
         if not na(rec.setup_label) and label.get_x(rec.setup_label) > 0
             bool is_long_bt = rec.direction == "LONG"
@@ -2769,10 +2781,22 @@ if bt_phase == 3 and show_setupsdb_debug
                 // Win: solid bright colors, Loss: dark colors (no transparency)
                 color new_col = is_long_bt ? (is_win_bt ? color.new(color.lime, 0) : color.new(color.green, 0)) : (is_win_bt ? color.new(color.red, 0) : color.new(color.maroon, 0))
                 label.set_color(rec.setup_label, new_col)
-                label.set_text(rec.setup_label, rec.setup_id + (is_win_bt ? " W" : " X"))
+                // Text annotations only if debug flag enabled
+                if show_setupsdb_debug
+                    label.set_text(rec.setup_label, rec.setup_id + (is_win_bt ? " W" : " X"))
             else
+                // Unconfirmed: 80% transparency
                 label.set_color(rec.setup_label, color.new(is_long_bt ? color.lime : color.red, 80))
-                label.set_text(rec.setup_label, rec.setup_id + " ?")
+                if show_setupsdb_debug
+                    label.set_text(rec.setup_label, rec.setup_id + " ?")
+            labels_this_tick += 1
+        
+        bt_phase3_idx += 1
+    
+    // Reset for next cycle (continuous refresh)
+    if bt_phase3_idx >= bt_size
+        bt_phase3_idx := 0
+        bt_phase3_overflow := false
 
 var int last_setup_trigger_bar = 0
 // Armed setup variables removed - obsolete with setupsDB architecture
@@ -3964,10 +3988,17 @@ f_render_bt_summary_table(table tbl) =>
         table.cell(tbl, 1, 6, agree_txt, bgcolor=row_bg, text_color=nz(bt_avg_agree) > 60 ? color.lime : color.orange, text_size=size.tiny)
         table.cell(tbl, 2, 6, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
         
-        // Progress row
-        string prog = bt_table_ready ? "✓ Done" : str.tostring(bt_validated_setups) + "/" + str.tostring(bt_total_setups)
+        // Progress row (includes Phase 3 label refresh status)
+        int bt_size = array.size(bt_setups)
+        bool phase3_done = bt_phase == 3 and bt_phase3_idx >= bt_size and not bt_phase3_overflow
+        string prog = bt_phase3_overflow ? "⚠ Overflow" : 
+                      phase3_done ? "✓ Done" : 
+                      bt_phase == 3 ? "Labels: " + str.tostring(bt_phase3_idx) + "/" + str.tostring(bt_size) :
+                      bt_table_ready ? "BT ✓" : 
+                      str.tostring(bt_validated_setups) + "/" + str.tostring(bt_total_setups)
+        color prog_color = bt_phase3_overflow ? color.orange : phase3_done ? color.lime : color.gray
         table.cell(tbl, 0, 7, "Progress", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
-        table.cell(tbl, 1, 7, prog, bgcolor=row_bg, text_color=bt_table_ready ? color.lime : color.gray, text_size=size.tiny)
+        table.cell(tbl, 1, 7, prog, bgcolor=row_bg, text_color=prog_color, text_size=size.tiny)
         table.cell(tbl, 2, 7, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
 
 f_render_info_table(table info_tbl) =>
