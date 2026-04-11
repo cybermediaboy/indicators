@@ -3265,7 +3265,9 @@ triggered_setups := SetupsDB.evaluate_all(
 // LONGEVAL: dump all params when LONG zone reached (temporary debug)
 if barstate.isconfirmed and entry_context_code == 1000
     int trig_cnt = na(triggered_setups) ? 0 : array.size(triggered_setups)
+    float _inn_ratio = innov_width_med > 0 ? innov_width / innov_width_med : na
     log.info("LONGEVAL,bar=" + str.tostring(bar_index) +
+             ",entryCtx=" + str.tostring(entry_context_code) +
              ",z0=" + str.tostring(z0, "#.###") +
              ",mr=" + str.tostring(mr_for_setups, "#.###") +
              ",vec=" + str.tostring(basket_vec_z, "#.###") +
@@ -3274,6 +3276,7 @@ if barstate.isconfirmed and entry_context_code == 1000
              ",te=" + str.tostring(te_osc, "#.###") +
              ",innW=" + str.tostring(innov_width, "#.####") +
              ",innWmed=" + str.tostring(innov_width_med, "#.####") +
+             ",innRatio=" + str.tostring(_inn_ratio, "#.###") +
              ",knn=" + str.tostring(mc_knn_confidence, "#.##") +
              ",phiTotal=" + str.tostring(PhiTotal_orth, "#.###") +
              ",triggered=" + str.tostring(trig_cnt))
