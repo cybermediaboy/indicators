@@ -3262,6 +3262,22 @@ triggered_setups := SetupsDB.evaluate_all(
     nz(mc_knn_confidence)
 )
 
+// LONGEVAL: dump all params when LONG zone reached (temporary debug)
+if barstate.isconfirmed and entry_context_code == 1000
+    int trig_cnt = na(triggered_setups) ? 0 : array.size(triggered_setups)
+    log.info("LONGEVAL,bar=" + str.tostring(bar_index) +
+             ",z0=" + str.tostring(z0, "#.###") +
+             ",mr=" + str.tostring(mr_for_setups, "#.###") +
+             ",vec=" + str.tostring(basket_vec_z, "#.###") +
+             ",basket=" + str.tostring(basket_fit, "#.##") +
+             ",burst=" + str.tostring(f7_burst_raw, "#.###") +
+             ",te=" + str.tostring(te_osc, "#.###") +
+             ",innW=" + str.tostring(innov_width, "#.####") +
+             ",innWmed=" + str.tostring(innov_width_med, "#.####") +
+             ",knn=" + str.tostring(mc_knn_confidence, "#.##") +
+             ",phiTotal=" + str.tostring(PhiTotal_orth, "#.###") +
+             ",triggered=" + str.tostring(trig_cnt))
+
 // Process triggered setups from setupsDB
 array<SetupsLib.SetupEvent> engine_events = array.new<SetupsLib.SetupEvent>()
 array.clear(setupsdb_cache)  // Clear cache for this bar

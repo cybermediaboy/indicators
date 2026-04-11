@@ -77,21 +77,18 @@ export evaluate_all(
     // =================================================================
 
     // 7. L6_Neutral_Bounce: Standard Bounce + Machine Learning Filter
-    // mr > 0.2: MR just turning positive in oversold zone; vec < 0.2: peers not strongly bullish
-    bool l6 = valid_data and (entryCtx == 1000) and (mr > 0.2) and (vec < 0.2) and not vwapLongActive and (knnConf >= 70.0)
+    // vec = basket_vec_z (z-score ~[-3,3]): was -5.0; knnConf was 98.0 (too strict)
+    // knnConf is NaN until kNN ring buffer fills — use na-safe guard
+    bool l6 = valid_data and (entryCtx == 1000) and (mr > 0.5) and (vec < -0.3) and not vwapLongActive and (na(knnConf) or knnConf >= 50.0)
     if l6
         active.push(SetupConfig.new("L6", "L6_Neutral_AI", "LONG", 0.08, 0.015, 24, 44.0, 0.153, true))
 
     // 8. L_Inn_Expansion: Deep Capitulation Volatility Breakout
-    // mr > 0.5: stronger reversal signal; vec/burst relaxed for f7_burst_raw scale
-    bool l_inn = valid_data and (entryCtx == 1000) and (mr > 0.5) and (innWidth > innWidthMed) and not (close_price < cyclicFV)
+    // vec = basket_vec_z (~[-3,3]): was -5.0; burst = f7_burst_raw: was -2.0
+    // burst is ~0 in LONG zone — removed as gate; innWidth expansion sufficient
+    bool l_inn = valid_data and (entryCtx == 1000) and (mr > 0.8) and (vec < -0.3) and (innWidth > innWidthMed) and not (close_price < cyclicFV)
     if l_inn
         active.push(SetupConfig.new("L_Exp", "L_Inn_Expansion", "LONG", 0.08, 0.015, 24, 63.4, 0.459, true))
-
-    // 11. L_Basic: Simple MR long in LONG zone — no vec/burst requirement
-    bool l_basic = valid_data and (entryCtx == 1000) and (mr > 0.1) and (basket > 20) and not vwapLongActive
-    if l_basic
-        active.push(SetupConfig.new("L_Basic", "L_Basic_MR", "LONG", 0.06, 0.015, 16, 48.0, 0.10, true))
 
     // =================================================================
     // 3. NEUTRAL ZONE SETUPS (entryCtx == 1100, z0 ∈ [-0.5, 0.5])
@@ -106,7 +103,8 @@ export evaluate_all(
     
     // 10. N_TE_Long: Transfer Entropy driven long in neutral zone  
     // basket: 0-100 scale (basket_fit), burst: f7_burst_raw float
-    bool n_te_long = valid_data and (entryCtx == 1100) and (te > 3.0) and (basket > 30) and (burst < -0.5) and not vwapLongActive
+    // te actual range 0.04-0.09; burst ~0 in LONG zone — use realistic thresholds
+    bool n_te_long = valid_data and (entryCtx == 1100) and (te > 0.05) and (basket > 30) and (mr > 0.3) and not vwapLongActive
     if n_te_long
         active.push(SetupConfig.new("N_TE_L", "N_TE_Long", "LONG", 0.04, 0.012, 12, 52.0, 0.15, true))
 
