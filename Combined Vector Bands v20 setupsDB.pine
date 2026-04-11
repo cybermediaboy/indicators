@@ -2775,8 +2775,8 @@ if bt_phase == 3
     int labels_this_tick = 0
     int start_idx = bt_phase3_idx
     
-    // Dynamic budget: 1/20 of total setups per tick (min 5, max 25) - reduced for safety
-    int p3_budget = math.max(5, math.min(25, int(bt_size / 20)))
+    // Dynamic budget: 1/40 of total setups per tick (min 3, max 15) - ultra-safe for 1000+ setups
+    int p3_budget = math.max(3, math.min(15, int(bt_size / 40)))
     
     // Debug logging (circular buffer, last 8 lines) - always enabled
     if barstate.isrealtime
