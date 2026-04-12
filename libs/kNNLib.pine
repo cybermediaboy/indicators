@@ -482,37 +482,68 @@ export f_hierarchical_tournament_backtest(int s_packed, float s_f1, float s_f2, 
     array<int> t3_id = array.new<int>()
     array<float> t3_dist = array.new_float(0)
     int capped_limit = math.min(knn_limit, math.min(array.size(f1_history), array.size(arr_category_b_history)))
-    for i = 7 to capped_limit - 1
-        if i < array.size(arr_packed_vec)
-            int hd = f_hamming_screen_7(s_packed, array.get(arr_packed_vec, i))
-            if hd > hamming_thresh
+    if capped_limit > 0
+        for i = 0 to capped_limit - 1
+            if i < array.size(arr_packed_vec)
+                int hd = f_hamming_screen_7(s_packed, array.get(arr_packed_vec, i))
+                if hd > hamming_thresh
+                    continue
+            float d1 = s_f1 - nz(array.get(f1_history, i))
+            float d2 = s_f2 - nz(array.get(f2_history, i))
+            float d3 = s_f3 - nz(array.get(f3_history, i))
+            float d4 = s_f4 - nz(array.get(f4_history, i))
+            float d5 = s_f5 - nz(array.get(f5_history, i))
+            float d6 = s_f6 - nz(array.get(f6_history, i))
+            float d7 = s_f7 - nz(array.get(f7_history, i))
+            float dist = d1*d1 + d2*d2 + d3*d3 + d4*d4 + d5*d5 + d6*d6 + d7*d7
+            if na(dist)
                 continue
-        float d1 = s_f1 - nz(array.get(f1_history, i))
-        float d2 = s_f2 - nz(array.get(f2_history, i))
-        float d3 = s_f3 - nz(array.get(f3_history, i))
-        float d4 = s_f4 - nz(array.get(f4_history, i))
-        float d5 = s_f5 - nz(array.get(f5_history, i))
-        float d6 = s_f6 - nz(array.get(f6_history, i))
-        float d7 = s_f7 - nz(array.get(f7_history, i))
-        float dist = d1*d1 + d2*d2 + d3*d3 + d4*d4 + d5*d5 + d6*d6 + d7*d7
-        if na(dist)
-            continue
-        int hist_cat_a = i < array.size(arr_category_a_history) ? array.get(arr_category_a_history, i) : -1
-        int hist_cat_b = i < array.size(arr_category_b_history) ? array.get(arr_category_b_history, i) : 0
-        bool match_cat_a = hist_cat_a == category_a and category_a != -1
-        bool match_cat_b = category_b != 0 and hist_cat_b == category_b
-        if match_cat_b and match_cat_a
-            if array.size(t1_dist) < pool_max
-                array.push(t1_dist, dist)
-                array.push(t1_id, i)
-        else if match_cat_a
-            if array.size(t2_dist) < pool_max
-                array.push(t2_dist, dist)
-                array.push(t2_id, i)
-        else
-            if array.size(t3_dist) < pool_max
-                array.push(t3_dist, dist)
-                array.push(t3_id, i)
+            int hist_cat_a = i < array.size(arr_category_a_history) ? array.get(arr_category_a_history, i) : -1
+            int hist_cat_b = i < array.size(arr_category_b_history) ? array.get(arr_category_b_history, i) : 0
+            bool match_cat_a = hist_cat_a == category_a and category_a != -1
+            bool match_cat_b = category_b != 0 and hist_cat_b == category_b
+            if match_cat_b and match_cat_a
+                if array.size(t1_dist) < pool_max
+                    array.push(t1_dist, dist)
+                    array.push(t1_id, i)
+                else
+                    float worst_d = 0.0
+                    int worst_idx = -1
+                    for w = 0 to array.size(t1_dist) - 1
+                        if array.get(t1_dist, w) > worst_d
+                            worst_d := array.get(t1_dist, w)
+                            worst_idx := w
+                    if worst_idx >= 0 and dist < worst_d
+                        array.set(t1_dist, worst_idx, dist)
+                        array.set(t1_id, worst_idx, i)
+            else if match_cat_a
+                if array.size(t2_dist) < pool_max
+                    array.push(t2_dist, dist)
+                    array.push(t2_id, i)
+                else
+                    float worst_d = 0.0
+                    int worst_idx = -1
+                    for w = 0 to array.size(t2_dist) - 1
+                        if array.get(t2_dist, w) > worst_d
+                            worst_d := array.get(t2_dist, w)
+                            worst_idx := w
+                    if worst_idx >= 0 and dist < worst_d
+                        array.set(t2_dist, worst_idx, dist)
+                        array.set(t2_id, worst_idx, i)
+            else
+                if array.size(t3_dist) < pool_max
+                    array.push(t3_dist, dist)
+                    array.push(t3_id, i)
+                else
+                    float worst_d = 0.0
+                    int worst_idx = -1
+                    for w = 0 to array.size(t3_dist) - 1
+                        if array.get(t3_dist, w) > worst_d
+                            worst_d := array.get(t3_dist, w)
+                            worst_idx := w
+                    if worst_idx >= 0 and dist < worst_d
+                        array.set(t3_dist, worst_idx, dist)
+                        array.set(t3_id, worst_idx, i)
     array<int> final_ids = array.new<int>()
     array<float> final_dist = array.new_float(0)
     array<float> final_weights = array.new_float(0)
@@ -537,23 +568,58 @@ export f_hierarchical_tournament_backtest_signaware(int s_packed, float s_f1, fl
                                                      array<int> f1_history, array<float> f2_history, array<float> f3_history, array<float> f4_history, array<float> f5_history, array<float> f6_history, array<float> f7_history,
                                                      array<int> arr_category_b_history, array<int> arr_category_a_history, array<int> arr_packed_vec,
                                                      int knn_limit, int knn_k, int hamming_thresh, int decluster_gap, int pool_max) =>
-    // Apply sign-aware filtering first
-    [f1_filtered, f2_filtered, f3_filtered, f4_filtered, f5_filtered, f6_filtered, f7_filtered, catb_filtered, cata_filtered, packed_filtered] = f_sign_aware_filter(s_f2, f1_history, f2_history, f3_history, f4_history, f5_history, f6_history, f7_history, arr_category_b_history, arr_category_a_history, arr_packed_vec, knn_limit)
+    // Create filtered arrays inline to capture original indices mapping
+    array<int> f1_filtered = array.new<int>()
+    array<float> f2_filtered = array.new_float()
+    array<float> f3_filtered = array.new_float()
+    array<float> f4_filtered = array.new_float()
+    array<float> f5_filtered = array.new_float()
+    array<float> f6_filtered = array.new_float()
+    array<float> f7_filtered = array.new_float()
+    array<int> catb_filtered = array.new<int>()
+    array<int> cata_filtered = array.new<int>()
+    array<int> packed_filtered = array.new<int>()
+    array<int> original_indices = array.new<int>()
+    
+    float f2_clamped = math.max(-0.99, math.min(s_f2, 0.99))
+    int max_items = math.min(knn_limit, array.size(f1_history))
+    if max_items > 0
+        for i = 0 to max_items - 1
+            bool sign_ok = (f2_clamped >= 0) == (array.get(f2_history, i) >= 0)
+            if sign_ok
+                array.push(f1_filtered, array.get(f1_history, i))
+                array.push(f2_filtered, array.get(f2_history, i))
+                array.push(f3_filtered, array.get(f3_history, i))
+                array.push(f4_filtered, array.get(f4_history, i))
+                array.push(f5_filtered, array.get(f5_history, i))
+                array.push(f6_filtered, array.get(f6_history, i))
+                array.push(f7_filtered, array.get(f7_history, i))
+                array.push(catb_filtered, array.get(arr_category_b_history, i))
+                array.push(cata_filtered, array.get(arr_category_a_history, i))
+                array.push(packed_filtered, array.get(arr_packed_vec, i))
+                array.push(original_indices, i)
     
     // Convert quantized F1 back to float for compatibility with existing tournament logic
-    // Quantization formula: (f1_val + 1.0) * 7.5 => Inverse: quant_val / 7.5 - 1.0
-    // NOTE Bug #6: BT uses quantized F1 (4-bit precision), Live uses float F1 (full precision)
-    // This creates ~0.13 unit precision loss, causing neighbor set divergence between BT and Live.
-    // Trade-off: sign-aware filter requires int array, but loses precision vs live kNN.
     array<float> f1_filtered_float = array.new_float()
-    for i = 0 to array.size(f1_filtered) - 1
-        int quant_val = array.get(f1_filtered, i)
-        float dequant_val = float(quant_val) / 7.5 - 1.0  // FIX: correct inverse of (f1 + 1.0) * 7.5
-        array.push(f1_filtered_float, dequant_val)
+    int f1_filt_size = array.size(f1_filtered)
+    if f1_filt_size > 0
+        for i = 0 to f1_filt_size - 1
+            int quant_val = array.get(f1_filtered, i)
+            float dequant_val = float(quant_val) / 7.5 - 1.0
+            array.push(f1_filtered_float, dequant_val)
     
     // Run standard tournament with filtered data
     [ids, dists, weights, dbg_iter, dbg_hskip, dbg_nskip, final_count] = f_hierarchical_tournament_backtest(s_packed, s_f1, s_f2, s_f3, s_f4, s_f5, s_f6, s_f7, category_a, category_b, f1_filtered_float, f2_filtered, f3_filtered, f4_filtered, f5_filtered, f6_filtered, f7_filtered, packed_filtered, catb_filtered, cata_filtered, knn_limit, knn_k, hamming_thresh, decluster_gap, pool_max)
-    [ids, dists, weights, dbg_iter, dbg_hskip, dbg_nskip, final_count]
+    
+    // FIX: Map filtered indices back to absolute bar indices!
+    array<int> mapped_ids = array.new<int>()
+    int ids_size = array.size(ids)
+    if ids_size > 0
+        for i = 0 to ids_size - 1
+            int filtered_idx = array.get(ids, i)
+            array.push(mapped_ids, array.get(original_indices, filtered_idx))
+            
+    [mapped_ids, dists, weights, dbg_iter, dbg_hskip, dbg_nskip, final_count]
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
