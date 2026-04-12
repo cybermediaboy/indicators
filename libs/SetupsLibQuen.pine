@@ -1,7 +1,10 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 // © cybermediaboy
-// Recalibrated setup database — Quen version
-// Original SetupsLib.v19 left untouched. Swap import in indicator when ready.
+
+// ⚠️ DEPRECATED: SetupsLibQuen.pine — устаревшая версия SetupsLib.
+// Не использовать в новых индикаторах. Актуальная библиотека: SetupsLib.pine
+// Дата deprecation: 2026-04-12
+// Оставлен для backward compatibility с индикаторами на старых версиях импорта.
 
 //@version=6
 library("SetupsLibQuen", overlay=false, dynamic_requests=true)

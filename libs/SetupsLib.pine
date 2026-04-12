@@ -566,20 +566,77 @@ export f_get_setup_horizon(array<SetupSpec> setup_db, string setup_id, int fallb
                 break
     horizon
 
-export f_register_event(array<SetupEvent> engine_events, bool fire_condition, string setup_id, string setup_tooltip, string setup_size_info) =>
-    if fire_condition
-        array.push(engine_events, SetupEvent.new(setup_id, setup_tooltip, setup_size_info, 0.5, 0))
+// ═══════════════════════════════════════════════════════════════════════════
+// ADAPTER: SetupConfig → SetupSpec (Bridge for setupsDBGem integration)
+// ═══════════════════════════════════════════════════════════════════════════
+// @function f_config_to_spec
+// @description Converts a SetupConfig (from setupsDBGem) to SetupSpec (SetupsLib native type)
+// @param cfg SetupConfig from setupsDBGem.evaluate_all()
+// @returns SetupSpec compatible with SetupsLib functions (f_register_event_v2, f_check_showstoppers, etc.)
+export f_config_to_spec(string id, string name, string dir, float tp_pct, float sl_pct, int hold_bars, float wr, float sharpe, float edgeratio, string thesis, int showstopper_mask, int code, int mask) =>
+    SetupSpec.new(
+        id                    = id,
+        name                  = name,
+        dir                   = dir,
+        family                = na,
+        wr                    = wr,
+        sharpe                = sharpe,
+        tp_pct                = tp_pct,
+        sl_pct                = sl_pct,
+        avg_bars              = hold_bars,
+        tooltip               = thesis,
+        timestop              = hold_bars,
+        edge_ratio            = edgeratio,
+        thesis                = thesis,
+        thesis_flags          = 0,
+        showstopper_mask      = showstopper_mask,
+        impulse_penalty_scale = 1.0,
+        code                  = code,
+        mask                  = mask
+    )
 
-export f_register_event_auto(array<SetupEvent> engine_events, array<SetupSpec> setup_db, bool fire_condition, string setup_id, string setup_size_info) =>
-    if fire_condition
-        string tooltip = ""
-        int db_size = array.size(setup_db)
-        for i = 0 to db_size - 1
-            SetupSpec spec = array.get(setup_db, i)
-            if spec.id == setup_id
-                tooltip := spec.tooltip
-                break
-        array.push(engine_events, SetupEvent.new(setup_id, tooltip, setup_size_info, 0.5, 0))
+// ═══════════════════════════════════════════════════════════════════════════
+// OSC CONTEXT BUILDER - Unified OscContext assembly
+// ═══════════════════════════════════════════════════════════════════════════
+// @function f_build_osc_context
+// @description Builds OscContext from oscillator values and percentile boundaries
+// @param vec_osc Vector oscillator value
+// @param mr_osc Mean reversion oscillator value
+// @param te_osc Transfer entropy oscillator value
+// @param corr_osc Correlation oscillator value
+// @param ltf_corr Lower timeframe correlation value
+// @param pred_slope Predictive slope value
+// @param vec_p25 Vector 25th percentile
+// @param vec_p75 Vector 75th percentile
+// @param mr_p25 MR 25th percentile
+// @param mr_p75 MR 75th percentile
+// @param mr_p2 MR 2nd percentile (lower extreme)
+// @param mr_p98 MR 98th percentile (upper extreme)
+// @param te_p25 TE 25th percentile
+// @param te_p75 TE 75th percentile
+// @param corr_p20 Correlation 20th percentile
+// @param corr_p80 Correlation 80th percentile
+// @param ltf_p20 LTF correlation 20th percentile
+// @param ltf_p80 LTF correlation 80th percentile
+// @param pred_p25 Predictive slope 25th percentile
+// @param pred_p75 Predictive slope 75th percentile
+// @returns OscContext with 6-slot arrays (vec, mr, te, corr, ltf_corr, pred_slope)
+export f_build_osc_context(
+    float vec_osc, float mr_osc, float te_osc, float corr_osc, float ltf_corr, float pred_slope,
+    float vec_p25, float vec_p75,
+    float mr_p25, float mr_p75, float mr_p2, float mr_p98,
+    float te_p25, float te_p75,
+    float corr_p20, float corr_p80,
+    float ltf_p20, float ltf_p80,
+    float pred_p25, float pred_p75
+) =>
+    OscContext.new(
+        array.from(vec_osc, mr_osc, te_osc, corr_osc, ltf_corr, pred_slope),
+        array.from(vec_p25, mr_p25, te_p25, corr_p20, ltf_p20, pred_p25),
+        array.from(vec_p75, mr_p75, te_p75, corr_p80, ltf_p80, pred_p75),
+        array.from(vec_p25, mr_p2,  te_p25, corr_p20, ltf_p20, pred_p25),
+        array.from(vec_p75, mr_p98, te_p75, corr_p80, ltf_p80, pred_p75)
+    )
 
 export f_get_spec(array<SetupSpec> setup_db, string setup_id) =>
     SetupSpec result = na

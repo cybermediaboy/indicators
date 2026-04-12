@@ -4,7 +4,7 @@
 //@version=6
 import cybermediaboy/CausalityLib/15 as CausalityLib
 import cybermediaboy/MCLib/12 as MCLib  // Phase 3: Deterministic PRNG export
-import cybermediaboy/SetupsLib/22 as SetupsLib
+import cybermediaboy/SetupsLib/23 as SetupsLib
 import cybermediaboy/TAUtilityLib/53 as TAUtilityLib
 import cybermediaboy/kNNLib/19 as kNNLib  // Phase 2: Domain-agnostic category parameters
 import cybermediaboy/BandsLib/5 as BandsLib
@@ -199,6 +199,7 @@ varip array<string> bt_u_setups = array.new_string(0)
 varip array<int> bt_u_cands = array.new_int(0)
 varip array<float> bt_u_mc_conf = array.new_float(0)
 varip array<int> bt_u_cnt = array.new_int(0)
+var label mc_progress_lbl = na  // Live MC chunking progress label on current bar
 
 // Persistent debug vars for stable table display (survive across ticks)
 var int dbg_total_iter = 0
@@ -295,7 +296,7 @@ bt_enable = input.bool(true, "Enable Historical kNN+MC Validation", group=grp_ba
 bt_min_history = input.int(300, "Min History Bars for Validation", minval=100, maxval=2000, group=grp_backtest, tooltip="Skip setups before kNN had this many bars. 300 = ~3 days on 15m. Below this, kNN neighbors unreliable.")
 bt_mc_runs = input.int(200, "Backtest MC Runs per Setup", minval=50, maxval=1000, group=grp_backtest, tooltip="MC runs per historical setup. 200=fast, 500=precise. Lower than live 5000 because we run many setups.")
 bt_agree_pct = input.float(75.0, "MC Agreement Threshold %", minval=51.0, maxval=90.0, step=1.0, group=grp_backtest, tooltip="MC oracle must agree with setup direction by >= this % to count as confirmed. 75% = strong filter, rejects weak setups.")
-bt_heavy_budget = input.int(10, "Validations per Tick", minval=5, maxval=100, group=grp_backtest, tooltip="Max setups to validate per realtime tick. Higher = faster backtest completion but may cause timeout. 10=safe, 50=fast, 100=aggressive. Increase if backtest is slow.")
+bt_heavy_budget = input.int(8, "Validations per Tick", minval=5, maxval=100, group=grp_backtest, tooltip="Max setups to validate per realtime tick. Higher = faster backtest completion but may cause timeout. 8=safe, 50=fast, 100=aggressive. Increase if backtest is slow.")
 fee_pct = input.float(0.15, "Round-trip Fee %", minval=0.0, step=0.01, group=grp_backtest, tooltip="Trading fees deducted from PnL (entry + exit). 0.15% = typical spot market round-trip cost.")
 bt_show_table = input.bool(true, "Show Backtest Summary Table", group=grp_backtest, tooltip="Aggregate stats: raw setups vs kNN+MC filtered.")
 
@@ -1866,7 +1867,7 @@ varip float bt_avg_agree = na
 varip bool bt_table_ready = false
 varip int bt_first_bar = na  // First validated setup bar_idx
 varip int bt_last_bar = na   // Last validated setup bar_idx
-var table bt_summary_tbl = table.new(position.top_right, 3, 21, border_width=1)
+var table bt_summary_tbl = table.new(position.top_right, 4, 21, border_width=1)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // --- EXECUTION CONTEXT NORMALIZATION (Stage 7) ---
@@ -1886,6 +1887,10 @@ if should_start_knn and trigger_new_bar and phase_idle
     mc_oracle_direction := 0
     mc_oracle_pct_up := na
     mc_knn_confidence := na
+    // Clean up progress label from previous bar
+    if not na(mc_progress_lbl)
+        label.delete(mc_progress_lbl)
+        mc_progress_lbl := na
     
     // Snapshot current state
     float s_f1 = nz(f1_vec_norm)
@@ -1982,8 +1987,26 @@ if mc_phase == 2 and (allow_chunking or is_fast_path) and array.size(var_knn_ids
     mc_chunk_done += runs_this_tick
     var_total_paths += paths_executed
     
+    // Update live progress label on current bar
+    if barstate.isrealtime
+        if not na(mc_progress_lbl)
+            label.delete(mc_progress_lbl)
+        int current_chunk = int(math.ceil(mc_chunk_done / mc_chunk_size))
+        int total_chunks = int(math.ceil(mc_target_runs / mc_chunk_size))
+        int bt_size = array.size(bt_setups)
+        string chunk_text = "CHUNK: " + str.tostring(current_chunk) + "/" + str.tostring(total_chunks) + 
+                           " | MC: " + str.tostring(mc_chunk_done) + "/" + str.tostring(mc_target_runs) + 
+                           " | setups: " + str.tostring(bt_size)
+        mc_progress_lbl := label.new(bar_index, high * 1.005, chunk_text, 
+                                     color=color.new(color.blue, 70), textcolor=color.white, 
+                                     style=label.style_label_down, size=size.small)
+    
     if mc_chunk_done >= mc_target_runs
         mc_phase := 3  // → next tick computes percentiles
+        // Delete progress label when done
+        if not na(mc_progress_lbl)
+            label.delete(mc_progress_lbl)
+            mc_progress_lbl := na
 
 // ── PHASE 3: Percentiles + Oracle Direction (one tick) ──
 if mc_phase == 3 and (allow_chunking or is_fast_path)
@@ -2056,6 +2079,10 @@ if mc_phase == 3 and (allow_chunking or is_fast_path)
 // Stage 7 (DR-4): MC state machine resets independently of backtest
 if mc_phase == 4 and trigger_new_bar
     mc_phase := 0  // Reset for next bar
+    // Clean up progress label from previous bar
+    if not na(mc_progress_lbl)
+        label.delete(mc_progress_lbl)
+        mc_progress_lbl := na
 
 // Calculate ma_trend (needed for Synergic Density)
 float ma_slope = pred_ma - nz(pred_ma[3], pred_ma)
@@ -2282,18 +2309,32 @@ f_add_setup_label(string setup_id, string setup_name, string dir, float wr, floa
     if not show_setup_labels
         [na, tooltip_text]
     
-    // Manage setup label array (max 300, never evict until validated)
+    // Manage setup label array (max 500). Keep confirmed labels, evict oldest unconfirmed.
     if array.size(setup_labels) >= 500
-        old_lbl = array.shift(setup_labels)
-        if not na(old_lbl)
-            bool is_bt_ref = false
+        int idx_to_remove = -1
+        label lbl_to_remove = na
+        // Find the oldest unconfirmed label
+        for i = 0 to array.size(setup_labels) - 1
+            label test_lbl = array.get(setup_labels, i)
+            bool is_confirmed = false
             for j = 0 to array.size(bt_setups) - 1
                 HistoricalSetup rec = array.get(bt_setups, j)
-                if rec.setup_label == old_lbl
-                    is_bt_ref := true
+                if rec.setup_label == test_lbl
+                    if rec.mc_confirmed
+                        is_confirmed := true
                     break
-            if not is_bt_ref
-                label.delete(old_lbl)
+            if not is_confirmed
+                idx_to_remove := i
+                lbl_to_remove := test_lbl
+                break
+        
+        if idx_to_remove >= 0
+            array.remove(setup_labels, idx_to_remove)
+            label.delete(lbl_to_remove)
+        else
+            // If all 500 are confirmed, we have to drop the oldest one anyway to make room
+            old_lbl = array.shift(setup_labels)
+            label.delete(old_lbl)
     
     string meta_name = setup_name
     string meta_dir = dir
@@ -2318,7 +2359,7 @@ f_add_setup_label(string setup_id, string setup_name, string dir, float wr, floa
     string duration_text = "Typical hold: " + str.tostring(meta_avg_bars) + " bars"
     string full_tooltip = "Setup | " + setup_id + "\n" +"Name  | " + meta_name + "\n" +"Dir   | " + meta_dir + "\n" +"WR    | " + str.tostring(meta_wr, "#.##") + "%\n" +"Sharpe| " + str.tostring(meta_sharpe, "#.##") + "\n" +"TP    | " + str.tostring(meta_tp, "#.##") + "%\n" +"SL    | " + str.tostring(meta_sl, "#.##") + "%\n" +"Hold  | " + duration_text + "\n" +"Entry | " + str.tostring(close, "#.####") + "\n" +"Bar   | " + str.tostring(bar_index) + "\n" +"Meta  | " + meta_thesis
 
-    color lbl_color = dir == "LONG" ? color.new(color.lime, 0) : color.new(color.red, 0)
+    color lbl_color = dir == "LONG" ? color.new(color.lime, 80) : color.new(color.red, 80)
     
     // Position at next bar's open price (use close of current bar as proxy for next open)
     float label_y = close
@@ -2811,8 +2852,9 @@ if bt_phase == 2
 // ── BT PHASE 3: Continuous Label Rendering ──
 // Labels must be recolored on EVERY tick after validation is done,
 // otherwise Pine Script's rollback mechanic reverts them to their initial color.
+// CRITICAL: Must run on every realtime tick, not just history edge
 var int current_painted_labels = 0
-if bt_phase >= 3
+if bt_phase >= 3 and (barstate.isrealtime or barstate.islast)
     int bt_size = array.size(bt_setups)
     int painted_cnt = 0
     
@@ -2834,7 +2876,7 @@ if bt_phase >= 3
                     if show_setupsdb_debug
                         label.set_text(rec.setup_label, rec.setup_id + (is_win_bt ? " W" : " X"))
                 else
-                    label.set_color(rec.setup_label, color.new(is_long_bt ? color.lime : color.red, 50))
+                    label.set_color(rec.setup_label, color.new(is_long_bt ? color.lime : color.red, 80))
                     if show_setupsdb_debug
                         label.set_text(rec.setup_label, rec.setup_id + " ?")
         current_painted_labels := painted_cnt
@@ -3417,11 +3459,16 @@ if array.size(triggered_setups) > 0
                         final_wr += exh_penalty
             
             cfg.wr := math.max(0.0, math.min(100.0, final_wr))
-            // Cache config for f_fire_setup_by_id to use
-            array.push(setupsdb_cache, cfg)
-            // Register setup event with metadata in tooltip
-            string tooltip_data = cfg.name + " | WR: " + str.tostring(cfg.wr, "#.#") + "% | Sharpe: " + str.tostring(cfg.sharpe, "#.###")
-            SetupsLib.f_register_event(engine_events, true, cfg.id, tooltip_data, cfg.name)
+        // Cache config for f_fire_setup_by_id to use
+        array.push(setupsdb_cache, cfg)
+        // Register setup event with metadata using v2 (confidence-aware, showstopper-ready)
+        SetupsLib.SetupSpec spec = SetupsLib.f_config_to_spec(
+            cfg.id, cfg.name, cfg.dir, cfg.tp_pct, cfg.sl_pct, cfg.hold_bars,
+            cfg.wr, cfg.sharpe, cfg.edgeratio, cfg.thesis, cfg.showstopper_mask, cfg.code, cfg.mask)
+        SetupsLib.OscContext ctx = SetupsLib.OscContext.new(
+            array.new<float>(6, 0.0), array.new<float>(6, 0.0), array.new<float>(6, 1.0),
+            array.new<float>(6, 0.0), array.new<float>(6, 1.0))
+        SetupsLib.f_register_event_v2(engine_events, true, spec, ctx, 0.0, cfg.name)
 
 // Reset MC visualization variables at start of each bar
 mae_viz_price := na
@@ -3602,12 +3649,15 @@ f_calc_vel_coupling(bool _ltf_en, bool _ltf_dec, bool _ltf_rec, bool _ltf_is_dec
     bool _rec_e = _ltf_en ? _ltf_rec : ((not na(_rho_ret) and math.abs(_rho_ret) > 0.7) and (na(_rho_ret[1]) or math.abs(_rho_ret[1]) <= 0.7))
     bool _sdo   = ((_int_dyn > 0.05 and _bvz > 0.15) or (_int_dyn < -0.05 and _bvz < -0.15))
     bool _dep   = _dec_e and not _sdo
-    float _y    = _dep ? (_fv_col ? high : _pred_ma) : _rec_e ? (_fv_col ? low : _pred_ma) : na
-    color _col  = _dep ? color.new(color.gray, 0) : _rec_e ? (_fv_up ? color.new(color.lime, 0) : color.new(color.red, 0)) : na
-    [_y, _col]
+    float _dec_y = _dep ? (_fv_col ? high : _pred_ma) : na
+    color _dec_c = color.new(color.gray, 0)
+    float _rec_y = _rec_e ? (_fv_col ? low : _pred_ma) : na
+    color _rec_c = _fv_up ? color.new(color.lime, 0) : color.new(color.red, 0)
+    [_dec_y, _dec_c, _rec_y, _rec_c]
 
-[vel_y, vel_col] = f_calc_vel_coupling(ltf_enabled, ltf_decouple_event, ltf_recouple_event, ltf_is_decoupled, rho_returns, internal_dynamics, basket_vec_z, ltf_decouple_event, ltf_recouple_event, pred_fv_slope_up, pred_fv_color_candles, pred_ma)
-plotshape(show_burst_signals and show_velocity_signals and not simple_mode ? vel_y : na, "Velocity Signals", shape.circle, location.absolute, vel_col, size=size.tiny, force_overlay=true)
+[vel_dec_y, vel_dec_col, vel_rec_y, vel_rec_col] = f_calc_vel_coupling(ltf_enabled, ltf_decouple_event, ltf_recouple_event, ltf_is_decoupled, rho_returns, internal_dynamics, basket_vec_z, ltf_decouple_event, ltf_recouple_event, pred_fv_slope_up, pred_fv_color_candles, pred_ma)
+plotchar(show_burst_signals and show_velocity_signals and not simple_mode ? vel_dec_y : na, "Velocity Decouple", "D", location.absolute, vel_dec_col, size=size.tiny, force_overlay=true)
+plotchar(show_burst_signals and show_velocity_signals and not simple_mode ? vel_rec_y : na, "Velocity Recouple", "C", location.absolute, vel_rec_col, size=size.tiny, force_overlay=true)
 
 // High Vector Context Markers (HIDE IN SIMPLE MODE)
 if show_burst_signals and not simple_mode and macro_exhaustion and not macro_exhaustion[1]
@@ -3646,27 +3696,26 @@ if show_burst_signals and show_breakout_markers and not simple_mode and (expansi
 
 // VWAP Rejection signals as small centered plotchar points at LTF close level - MERGED
 color vwap_col = is_smart_vwap_long_rejection ? color.new(color.lime, 0) : is_smart_vwap_short_rejection ? color.new(color.red, 0) : na
-plotchar(is_smart_vwap_long_rejection ? current_intrabar_vwap : na, "VWAP Rejection Long", "•", location.absolute, vwap_col, size=size.tiny, force_overlay=true)
-plotchar(is_smart_vwap_short_rejection ? current_intrabar_vwap : na, "VWAP Rejection Short", "•", location.absolute, vwap_col, size=size.tiny, force_overlay=true)
+plotchar(show_burst_signals and show_breakout_markers and show_vwap_rejection_signal and not simple_mode and is_smart_vwap_long_rejection ? current_intrabar_vwap : na, "VWAP Rejection Long", "•", location.absolute, vwap_col, size=size.tiny, force_overlay=true)
+plotchar(show_burst_signals and show_breakout_markers and show_vwap_rejection_signal and not simple_mode and is_smart_vwap_short_rejection ? current_intrabar_vwap : na, "VWAP Rejection Short", "•", location.absolute, vwap_col, size=size.tiny, force_overlay=true)
 
 // Squeeze breakout markers (HIDE IN SIMPLE MODE)
-plotshape(not simple_mode and squeeze_bull ? c0 : na, "Squeeze Bull", shape.circle, location.absolute, color.new(color.blue, 0), size=size.auto, force_overlay=true)
+plotshape(show_burst_signals and show_breakout_markers and not simple_mode and squeeze_bull ? c0 : na, "Squeeze Bull", shape.circle, location.absolute, color.new(color.blue, 0), size=size.auto, force_overlay=true)
 
 // --- SQUEEZE THROAT STATE LABELS ---
-// ARM state: 💤 when squeeze is building (score >= 0.55 or phi_onset)
 bool sqz_arm_edge = sqz_armed_state and not sqz_armed_state[1]
-if sqz_arm_edge and not simple_mode
-    string arm_tooltip = "Squeeze ARMED 💤\nScore: " + str.tostring(squeeze_score, "#.##") + 
-                         "\nPhi Div: " + str.tostring(phi_div_score, "#.##") + 
-                         "\nMahal: " + str.tostring(sqm_dist, "#.##") + 
+if show_burst_signals and show_breakout_markers and not simple_mode and sqz_arm_edge
+    string arm_tooltip = "Squeeze ARMED 💤\nScore: " + str.tostring(squeeze_score, "#.##") +
+                         "\nPhi Div: " + str.tostring(phi_div_score, "#.##") +
+                         "\nMahal: " + str.tostring(sqm_dist, "#.##") +
                          "\nWaiting for: expansion + reactive confirms"
     f_add_signal_label("💤", arm_tooltip, false, high, color.new(color.blue, 30))
 
 // FIRE state: 🔥 when squeeze fires (armed + expanding + reactive)
 bool sqz_fire_edge = throat_active and not throat_active[1]
-if sqz_fire_edge and not simple_mode
-    string fire_tooltip = "Squeeze FIRING 🔥\nScore: " + str.tostring(squeeze_score, "#.##") + 
-                          "\nDirection: " + (throat_squeeze_bull ? "BULL ↑" : "BEAR ↓") + 
+if show_burst_signals and show_breakout_markers and sqz_fire_edge and not simple_mode
+    string fire_tooltip = "Squeeze FIRING 🔥\nScore: " + str.tostring(squeeze_score, "#.##") +
+                          "\nDirection: " + (throat_squeeze_bull ? "BULL ↑" : "BEAR ↓") +
                           "\nPhi Div: " + str.tostring(phi_div_score, "#.##") + (phi_onset ? " ⚡ONSET" : "") +
                           "\nMahal: " + str.tostring(sqm_dist, "#.##") + (sqz_raw.mahal_armed ? " ✓" : "") +
                           "\nBreakout in progress"
@@ -4084,8 +4133,8 @@ if enable_knn and enable_mc and show_mc_cone and mc_has_results and cone_fresh a
         string prog_text = "⏳ " + mc_txt + " | " + bt_txt
 // Backtest summary table render function (inline, 3-column layout with progress)
 f_render_bt_summary_table(table tbl) =>
-    if not bt_table_ready or not bt_show_table
-        table.clear(tbl, 0, 0, 2, 20)
+    if bt_phase == 0 or not bt_show_table
+        table.clear(tbl, 0, 0, 3, 20)
     else
         color hdr_bg = color.new(color.gray, 30)
         color row_bg = color.new(color.black, 20)
@@ -4103,38 +4152,45 @@ f_render_bt_summary_table(table tbl) =>
         float filt_rr = bt_filt_mae_sum > 0 ? bt_filt_mfe_sum / bt_filt_mae_sum : 0.0
         table.cell(tbl, 0, 0, "kNN+MC Backtest", bgcolor=hdr_bg, text_color=color.white, text_size=size.small)
         table.cell(tbl, 1, 0, "Raw", bgcolor=hdr_bg, text_color=color.yellow, text_size=size.small)
-        table.cell(tbl, 2, 0, "Filtered", bgcolor=hdr_bg, text_color=color.aqua, text_size=size.small)
+        table.cell(tbl, 2, 0, "MC Conf", bgcolor=hdr_bg, text_color=color.aqua, text_size=size.small, tooltip="MC Confirmed: setups passing bt_filt_* thresholds (WR, MFE:MAE, etc.)")
+        table.cell(tbl, 3, 0, "Closed", bgcolor=hdr_bg, text_color=color.lime, text_size=size.small, tooltip="Completed trades with actual_pnl != NaN")
 
         // WR
         table.cell(tbl, 0, 1, "Win Rate", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
         table.cell(tbl, 1, 1, str.tostring(raw_wr, "#.1") + "%", bgcolor=row_bg, text_color=raw_wr >= 55 ? color.lime : color.orange, text_size=size.tiny)
         table.cell(tbl, 2, 1, str.tostring(filt_wr, "#.1") + "%", bgcolor=row_bg, text_color=filt_wr >= 55 ? color.lime : color.orange, text_size=size.tiny)
+        table.cell(tbl, 3, 1, str.tostring(raw_wr, "#.1") + "%", bgcolor=row_bg, text_color=raw_wr >= 55 ? color.lime : color.orange, text_size=size.tiny)
 
         // Avg PnL
         table.cell(tbl, 0, 2, "Avg PnL%", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
         table.cell(tbl, 1, 2, str.tostring(raw_avg, "#.2") + "%", bgcolor=row_bg, text_color=raw_avg > 0 ? color.lime : color.red, text_size=size.tiny)
         table.cell(tbl, 2, 2, str.tostring(filt_avg, "#.2") + "%", bgcolor=row_bg, text_color=filt_avg > 0 ? color.lime : color.red, text_size=size.tiny)
+        table.cell(tbl, 3, 2, str.tostring(raw_avg, "#.2") + "%", bgcolor=row_bg, text_color=raw_avg > 0 ? color.lime : color.red, text_size=size.tiny)
 
         // Sharpe
         table.cell(tbl, 0, 3, "Sharpe", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
         table.cell(tbl, 1, 3, str.tostring(raw_sharpe, "#.2"), bgcolor=row_bg, text_color=raw_sharpe > 0.5 ? color.lime : color.gray, text_size=size.tiny)
         table.cell(tbl, 2, 3, str.tostring(filt_sharpe, "#.2"), bgcolor=row_bg, text_color=filt_sharpe > 0.5 ? color.lime : color.gray, text_size=size.tiny)
+        table.cell(tbl, 3, 3, str.tostring(raw_sharpe, "#.2"), bgcolor=row_bg, text_color=raw_sharpe > 0.5 ? color.lime : color.gray, text_size=size.tiny)
         
         // MFE:MAE
         table.cell(tbl, 0, 4, "MFE:MAE", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
         table.cell(tbl, 1, 4, str.tostring(raw_rr, "#.2"), bgcolor=row_bg, text_color=raw_rr > 1.0 ? color.lime : color.red, text_size=size.tiny)
         table.cell(tbl, 2, 4, str.tostring(filt_rr, "#.2"), bgcolor=row_bg, text_color=filt_rr > 1.0 ? color.lime : color.red, text_size=size.tiny)
+        table.cell(tbl, 3, 4, str.tostring(raw_rr, "#.2"), bgcolor=row_bg, text_color=raw_rr > 1.0 ? color.lime : color.red, text_size=size.tiny)
         
         // Setups count
         table.cell(tbl, 0, 5, "Setups", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
-        table.cell(tbl, 1, 5, str.tostring(bt_raw_total), bgcolor=row_bg, text_color=color.yellow, text_size=size.tiny)
-        table.cell(tbl, 2, 5, str.tostring(bt_filt_total) + " (" + str.tostring(bt_confirmed_setups) + "✓)", bgcolor=row_bg, text_color=color.aqua, text_size=size.tiny)
+        table.cell(tbl, 1, 5, str.tostring(bt_validated_setups), bgcolor=row_bg, text_color=color.yellow, text_size=size.tiny)
+        table.cell(tbl, 2, 5, str.tostring(bt_confirmed_setups), bgcolor=row_bg, text_color=color.aqua, text_size=size.tiny)
+        table.cell(tbl, 3, 5, str.tostring(bt_raw_total), bgcolor=row_bg, text_color=color.lime, text_size=size.tiny)
         
         // MC Agreement
         table.cell(tbl, 0, 6, "MC Agree", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
         string agree_txt = na(bt_avg_agree) ? "..." : str.tostring(bt_avg_agree, "#.1") + "%"
         table.cell(tbl, 1, 6, agree_txt, bgcolor=row_bg, text_color=nz(bt_avg_agree) > 60 ? color.lime : color.orange, text_size=size.tiny)
         table.cell(tbl, 2, 6, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
+        table.cell(tbl, 3, 6, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
         
         // Progress row (includes Phase 3 label refresh status)
         int bt_size = array.size(bt_setups)
@@ -4148,6 +4204,7 @@ f_render_bt_summary_table(table tbl) =>
         table.cell(tbl, 0, 7, "Progress", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
         table.cell(tbl, 1, 7, prog, bgcolor=row_bg, text_color=prog_color, text_size=size.tiny)
         table.cell(tbl, 2, 7, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
+        table.cell(tbl, 3, 7, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
         
         // Scan Range row (bar indices where validation occurred)
         int scan_range = not na(bt_first_bar) and not na(bt_last_bar) ? bt_last_bar - bt_first_bar + 1 : 0
@@ -4155,12 +4212,14 @@ f_render_bt_summary_table(table tbl) =>
         table.cell(tbl, 0, 8, "Scan Range", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
         table.cell(tbl, 1, 8, range_txt, bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
         table.cell(tbl, 2, 8, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
+        table.cell(tbl, 3, 8, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
         
         // Phase 3 Debug Log (always visible)
         string log_txt = bt_audit_log != "" ? bt_audit_log : "..."
         table.cell(tbl, 0, 9, "BT Audit", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
         table.cell(tbl, 1, 9, log_txt, bgcolor=row_bg, text_color=color.white, text_size=size.tiny, text_halign=text.align_left)
         table.cell(tbl, 2, 9, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
+        table.cell(tbl, 3, 9, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
         
         // Phase 3 Stage (current processing state, always visible)
         string stage_txt = bt_phase >= 3 ? "✓ Maintained (" + str.tostring(current_painted_labels) + ")" : "⏳ Running"
@@ -4168,6 +4227,7 @@ f_render_bt_summary_table(table tbl) =>
         table.cell(tbl, 0, 10, "Repaint", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
         table.cell(tbl, 1, 10, stage_txt, bgcolor=row_bg, text_color=stage_color, text_size=size.tiny)
         table.cell(tbl, 2, 10, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
+        table.cell(tbl, 3, 10, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
         
         // Exhaustion Gate
         table.cell(tbl, 0, 11, "EXH Gate", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
@@ -4175,6 +4235,7 @@ f_render_bt_summary_table(table tbl) =>
         color exh_col = na(exh_p85) ? color.gray : ((exh_block_long or exh_block_short) ? color.red : color.lime)
         table.cell(tbl, 1, 11, exh_status + " p85=" + str.tostring(nz(exh_p85), "#.##"), bgcolor=row_bg, text_color=exh_col, text_size=size.tiny, text_halign=text.align_left)
         table.cell(tbl, 2, 11, "n=" + str.tostring(array.size(zz_leg_amps)), bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
+        table.cell(tbl, 3, 11, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
 
         // kNN Candidates Split Rows
         int u_size = array.size(bt_u_setups)
@@ -4191,19 +4252,23 @@ f_render_bt_summary_table(table tbl) =>
                     table.cell(tbl, 0, r, sid + " cands", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
                     table.cell(tbl, 1, r, "n=" + str.tostring(avg_cands), bgcolor=row_bg, text_color=cand_col, text_size=size.tiny, text_halign=text.align_left)
                     table.cell(tbl, 2, r, str.tostring(avg_conf, "#.1") + "%", bgcolor=row_bg, text_color=conf_col, text_size=size.tiny)
+                    table.cell(tbl, 3, r, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
                 else
                     table.cell(tbl, 0, r, "", bgcolor=na, text_color=na, text_size=size.tiny)
                     table.cell(tbl, 1, r, "", bgcolor=na, text_color=na, text_size=size.tiny)
                     table.cell(tbl, 2, r, "", bgcolor=na, text_color=na, text_size=size.tiny)
+                    table.cell(tbl, 3, r, "", bgcolor=na, text_color=na, text_size=size.tiny)
         else
             table.cell(tbl, 0, 12, "kNN Cands", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
             table.cell(tbl, 1, 12, "...", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny, text_halign=text.align_left)
             table.cell(tbl, 2, 12, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
+            table.cell(tbl, 3, 12, "", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
             for i = 1 to 7
                 int r = 12 + i
                 table.cell(tbl, 0, r, "", bgcolor=na, text_color=na, text_size=size.tiny)
                 table.cell(tbl, 1, r, "", bgcolor=na, text_color=na, text_size=size.tiny)
                 table.cell(tbl, 2, r, "", bgcolor=na, text_color=na, text_size=size.tiny)
+                table.cell(tbl, 3, r, "", bgcolor=na, text_color=na, text_size=size.tiny)
 
 f_render_info_table(table info_tbl) =>
     string vec_context = macro_exhaustion ? "⚠️ EXHAUSTION" : (continuation_setup ? "✅ CONTINUATION" : (idiosyncratic_flow ? "🔀 IDIOSYNC" : "Neutral"))
@@ -4328,7 +4393,7 @@ if bt_enable and bt_show_table and (allow_chunking or is_history_edge or is_righ
     f_render_bt_summary_table(bt_summary_tbl)
 
 else if not bt_enable or not bt_show_table
-    table.clear(bt_summary_tbl, 0, 0, 2, 20)
+    table.clear(bt_summary_tbl, 0, 0, 3, 20)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // OSCILLATOR LABELS - Managed through OscMeta.lbl in 2-UDT system
@@ -4353,7 +4418,7 @@ else if not bt_enable or not bt_show_table
 bool show_knn_diag_pack = enable_knn
 int corr_damping_q = int(math.round(nz(corr_damping, 0.0) * 7.0))  // 3-bit quantized [0-7]
 float knn_diag_superpack = show_knn_diag_pack ? (math.round(nz(mc_knn_confidence)) * 17179869184.0) + (corr_damping_q * 2147483648.0) + (mc_family * 268435456.0) + packed_vec : na
-plot(knn_diag_superpack, "kNN Superpack (Conf|Damp|Fam|Vec)", color=color.new(color.yellow, 0), linewidth=1, display=display.data_window)
+//plot(knn_diag_superpack, "kNN Superpack (Conf|Damp|Fam|Vec)", color=color.new(color.yellow, 0), linewidth=1, display=display.data_window)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // DIAGNOSTIC LABEL - setupsDB integration debug
@@ -4378,6 +4443,7 @@ if barstate.islast
         
         string diag_text = "setupsDB Diagnostic:\n" + 
                            "triggered: " + str.tostring(triggered_size) + " | cache: " + str.tostring(cache_size) + "\n" +
+                           "bt_setups.size: " + str.tostring(bt_size) + " | labels: " + str.tostring(label_count) + "\n" +
                            "IDs: " + (triggered_size > 0 ? last_triggered_ids : "none") + "\n" +
                            "entryCtx: " + str.tostring(current_entry_ctx) + " (z0=" + str.tostring(z0, "#.##") + ")\n" +
                            "basket_latched: " + str.tostring(basket_latched) + " | peers: " + str.tostring(peer_count_active, "#") + " | stable: " + str.tostring(basket_stable) + "\n" +
