@@ -155,6 +155,7 @@ show_setupsdb_debug = input.bool(false, "Show SetupsDB BT Annotations (W/X/?)", 
 show_setupsdb_diag = input.bool(false, "Show SetupsDB Diagnostic Label", group=grp_debug_visuals, tooltip="Display a diagnostic label showing triggered setups count, cache size, entryCtx, basket state, and oscillator values.")
 show_te_debug = input.bool(false, "Show TE Debug Label", group=grp_debug_visuals, tooltip="Display a diagnostic label with TE window, valid sample count, min/max, and bin occupancy shares")
 show_knn_debug_table = input.bool(true, "Show kNN+MC Debug Table", group=grp_debug_visuals, tooltip="Shows a standalone kNN+MC progress/debug table even when the main Info Table is hidden.")
+enable_longeval_log = input.bool(false, "Log LONGEVAL (CSV)", group=grp_debug_visuals, tooltip="WARNING: Logs ~7000 lines per session. Disable when exporting MC_LOG to prevent Pine log buffer overflow (4096 line limit).")
 
 // REMOVED: Legend Table inputs (saves ~25 vars)
 
@@ -210,32 +211,8 @@ var int dbg_cands = 0
 var float dbg_avg_dist = na
 var array<int> final_knn_ids_display = array.new_int(0)
 
-// Persistent backtest metrics (survive across Phase 5-6 ticks)
-// All Setups column (all fired setups, no validation filter)
-varip int bt_all_wins = 0
-varip int bt_all_total = 0
-varip float bt_all_pnl_sum = 0.0
-varip float bt_all_mae_sum = 0.0
-varip float bt_all_mfe_sum = 0.0
-varip float bt_all_mean = 0.0
-varip float bt_all_m2 = 0.0
-// Validated column (passed hist_avail + kNN + forward bias checks)
-varip int bt_raw_wins = 0
-varip int bt_raw_total = 0
-varip float bt_raw_pnl_sum = 0.0
-varip float bt_raw_mae_sum = 0.0
-varip float bt_raw_mfe_sum = 0.0
-varip float bt_raw_mean = 0.0
-varip float bt_raw_m2 = 0.0
-// MC Conf column (validated + mc_confirmed == true)
-varip int bt_filt_wins = 0
-varip int bt_filt_total = 0
-varip float bt_filt_pnl_sum = 0.0
-varip float bt_filt_mae_sum = 0.0
-varip float bt_filt_mfe_sum = 0.0
-varip float bt_filt_mean = 0.0
-varip float bt_filt_m2 = 0.0
-varip float bt_agree_sum = 0.0
+// Aggregate variables removed - now computed on-demand via f_agg_setups()
+// bt_setups[] is the single source of truth
 var array<float> bt_cw = array.new_float()
 
 // Persistent kNN results (survive across ticks)
@@ -309,6 +286,15 @@ bt_confidence_thresh = input.float(40.0, "kNN Confidence Threshold %", minval=0.
 bt_heavy_budget = input.int(8, "Validations per Tick", minval=5, maxval=100, group=grp_backtest, tooltip="Max setups to validate per realtime tick. Higher = faster backtest completion but may cause timeout. 8=safe, 50=fast, 100=aggressive. Increase if backtest is slow.")
 fee_pct = input.float(0.15, "Round-trip Fee %", minval=0.0, step=0.01, group=grp_backtest, tooltip="Trading fees deducted from PnL (entry + exit). 0.15% = typical spot market round-trip cost.")
 bt_show_table = input.bool(true, "Show Backtest Summary Table", group=grp_backtest, tooltip="Aggregate stats: raw setups vs kNN+MC filtered.")
+// Advanced kNN Validation Filters (Validated column gates)
+bt_enable_dir_filter = input.bool(true, "Filter: MC Directional Concordance", group=grp_backtest, tooltip="Require MC paths ≥55% agree with setup direction. Prevents kNN confident but directionally opposing setups from passing Validated.")
+bt_dir_thresh = input.float(55.0, "  └─ MC Dir Agreement %", minval=51.0, maxval=90.0, step=1.0, group=grp_backtest, tooltip="Min mc_dir_pct for Validated inclusion. 55% = majority of MC paths agree with setup direction.")
+bt_enable_regime_filter = input.bool(true, "Filter: Coupling Regime", group=grp_backtest, tooltip="Exclude setups from Decoupled regime (ZEC diverged from basket). Decoupled = basket kNN neighbors meaningless.")
+bt_regime_mode = input.string("Coupled Only", "  └─ Regime Mode", options=["Coupled Only", "Exclude Decoupled"], group=grp_backtest, tooltip="Coupled Only (0) = strict. Exclude Decoupled (!=2) = allows Transitioning.")
+bt_enable_fit_filter = input.bool(true, "Filter: Basket Fit Floor", group=grp_backtest, tooltip="Require minimum basket fit at entry. Low fit = ZEC not correlated to basket, kNN neighbors contextually invalid.")
+bt_fit_floor = input.float(0.4, "  └─ Min Basket Fit Norm", minval=0.0, maxval=1.0, step=0.05, group=grp_backtest, tooltip="Min basket_fit_norm_snap (0-1 percentile). 0.4 = 40th percentile, excludes weakest basket correlations.")
+bt_enable_family_filter = input.bool(false, "Filter: Setup-Type-Specific kNN", group=grp_backtest, tooltip="kNN neighbors must match setup family (MR/CONT/etc). Prevents cross-contamination (S8 short voting on N_TE_L long). REQUIRES kNNLib update.")
+bt_enable_adaptive_horizon = input.bool(false, "Filter: Per-Family Oracle Horizon", group=grp_backtest, tooltip="Use family-specific oracle horizons: MR=3 bars, CONT=8 bars, default=5. Aligns kNN scoring with actual holding period. REQUIRES family_snap field.")
 
 grp_conf = "Confluence Detector"
 show_confluence = input.bool(false, "Show Confluence Blocks", group=grp_conf, tooltip="Plot blocks where multiple sigma levels align (displayed on price pane)")
@@ -319,6 +305,15 @@ conf_min_lines = input.int(2, "Min Lines for Block", minval=2, group=grp_conf)
 type ConfluenceCluster
     float level
     int count
+
+type AggResult
+    int total
+    int wins
+    float avg_pnl
+    float sharpe
+    float mfe_mae
+    float mfe_raw
+    float mae_raw
 
 type ActivePosition
     string setup_id
@@ -373,9 +368,13 @@ type HistoricalSetup
     int knn_cands
     label setup_label
     float label_y         // Entry price for label recreation
-    string label_text     // Label text for recreation
-    color label_color     // Initial label color for recreation
-    string orig_tooltip   // Original entry tooltip for Phase 3 augmentation with kNN/MC results
+    string label_text     // Label text for recreation (deprecated - use label_text_final)
+    color label_color     // Initial label color for recreation (deprecated - use label_color_final)
+    string orig_tooltip   // Original entry tooltip for Phase 3 augmentation with kNN/MC results (deprecated - use label_tooltip_final)
+    // --- LABEL RENDER STATE (sources of truth, set once by kNN+MC pipeline) ---
+    color label_color_final    // Final color after MC validation (solid or dim based on mc_confirmed)
+    string label_text_final    // Final text (setup_id + padding)
+    string label_tooltip_final // Full tooltip string (built once in f_add_setup_label)
 
 // --- HELPER FUNCTIONS ---
 // V19: f_get_mc_family_from_context() removed - use SetupsLib.f_classify_market_state() instead
@@ -1877,10 +1876,13 @@ var array<int> pathsUpAtH = array.new_int(0)
 varip int bt_total_setups = 0
 varip int bt_validated_setups = 0
 varip int bt_confirmed_setups = 0
-varip float bt_avg_agree = na
 varip bool bt_table_ready = false
 varip int bt_first_bar = na  // First validated setup bar_idx
 varip int bt_last_bar = na   // Last validated setup bar_idx
+// Aggregate results (computed in Phase 2, persist across ticks for table display)
+varip AggResult bt_agg_all = na
+varip AggResult bt_agg_validated = na
+varip AggResult bt_agg_mcconf = na
 var table bt_summary_tbl = table.new(position.top_right, 4, 21, border_width=1)
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2340,7 +2342,7 @@ f_get_duration_category(string setup_id) =>
 f_add_setup_label(string setup_id, string setup_name, string dir, float wr, float sharpe, float tp_pct, float sl_pct, string tooltip_text) =>
     // Guard against disabled setup labels
     if not show_setup_labels
-        [na, tooltip_text]
+        [na, tooltip_text, na, na]
     
     // Manage setup label array (max 500). Keep confirmed labels, evict oldest unconfirmed.
     if array.size(setup_labels) >= 500
@@ -2418,7 +2420,109 @@ f_add_setup_label(string setup_id, string setup_name, string dir, float wr, floa
     
     label new_lbl = label.new(bar_index, label_y, label_text, yloc=yloc.price, color=lbl_color, textcolor=color.black, style=label.style_label_right, size=size.tiny, tooltip=full_tooltip, force_overlay=true)
     array.push(setup_labels, new_lbl)
-    [new_lbl, full_tooltip]  // Return [label, tooltip] for MC validation
+    [new_lbl, full_tooltip, label_text, lbl_color]  // Return [label, tooltip, text, color] for HistoricalSetup render state
+
+// ============================================================
+// REALTIME LABEL MAINTENANCE
+// ============================================================
+// Called every realtime tick to maintain label persistence
+// Sources of truth: rec.label_color_final, rec.label_text_final, rec.label_tooltip_final
+// Recreation budget: 500 labels (only mc_confirmed setups)
+f_maintain_setup_labels_rtl() =>
+    int bt_size = array.size(bt_setups)
+    if bt_size == 0
+        [0, 0]
+    else
+        int painted = 0
+        int recreated = 0
+        for j = bt_size - 1 to 0
+            HistoricalSetup rec = array.get(bt_setups, j)
+            
+            // Skip if no render data available
+            if na(rec.label_color_final) or na(rec.label_text_final)
+                continue
+            
+            if not na(rec.setup_label)
+                // Label alive - maintain color, text, tooltip from sources of truth
+                label.set_color(rec.setup_label, rec.label_color_final)
+                label.set_text(rec.setup_label, rec.label_text_final)
+                label.set_tooltip(rec.setup_label, rec.label_tooltip_final)
+                painted += 1
+            else if not na(rec.label_y)
+                // Label was GC'd or deleted - recreate only if mc_confirmed (budget 500)
+                if rec.mc_confirmed
+                    label new_lbl = label.new(rec.bar_idx, rec.label_y, rec.label_text_final, yloc=yloc.price, style=label.style_label_right, color=rec.label_color_final, textcolor=color.black, size=size.tiny, tooltip=rec.label_tooltip_final, force_overlay=true)
+                    rec.setup_label := new_lbl
+                    array.set(bt_setups, j, rec)
+                    recreated += 1
+        [painted, recreated]
+
+// ============================================================
+// AGGREGATION — computed from bt_setups on demand
+// ============================================================
+// Call after Pass 0 completes and after each bt_phase 1 chunk
+// filter: "all" | "validated" | "mcconf"
+f_agg_setups(array<HistoricalSetup> setups, string filter) =>
+    int tot = 0
+    int wins = 0
+    float psum = 0.0
+    float mae_sum = 0.0
+    float mfe_sum = 0.0
+    float mean = 0.0
+    float m2 = 0.0
+    int sz = array.size(setups)
+    
+    if sz > 0
+        for j = 0 to sz - 1
+            HistoricalSetup r = array.get(setups, j)
+            if na(r.actual_pnl)
+                continue
+            
+            // Apply filter
+            bool include = false
+            if filter == "all"
+                include := true
+            else if filter == "validated"
+                include := not na(r.mc_confidence) and r.mc_confidence >= bt_confidence_thresh
+                // Apply advanced filters if enabled
+                if include and bt_enable_dir_filter
+                    include := not na(r.mc_dir_pct) and r.mc_dir_pct >= bt_dir_thresh
+                if include and bt_enable_regime_filter
+                    include := bt_regime_mode == "Coupled Only" ? r.coupling_regime_snap == 0 : r.coupling_regime_snap != 2
+                if include and bt_enable_fit_filter
+                    include := not na(r.basket_fit_norm_snap) and r.basket_fit_norm_snap >= bt_fit_floor
+            else if filter == "mcconf"
+                // MC Conf must also pass validation filters
+                include := r.mc_confirmed
+                if include and not na(r.mc_confidence)
+                    include := r.mc_confidence >= bt_confidence_thresh
+                if include and bt_enable_dir_filter
+                    include := not na(r.mc_dir_pct) and r.mc_dir_pct >= bt_dir_thresh
+                if include and bt_enable_regime_filter
+                    include := bt_regime_mode == "Coupled Only" ? r.coupling_regime_snap == 0 : r.coupling_regime_snap != 2
+                if include and bt_enable_fit_filter
+                    include := not na(r.basket_fit_norm_snap) and r.basket_fit_norm_snap >= bt_fit_floor
+            
+            if not include
+                continue
+            
+            tot += 1
+            if r.actual_pnl > 0
+                wins += 1
+            psum += r.actual_pnl
+            mae_sum += math.abs(nz(r.actual_mae, 0.0))
+            mfe_sum += nz(r.actual_mfe, 0.0)
+            float delta = r.actual_pnl - mean
+            mean += delta / tot
+            m2 += delta * (r.actual_pnl - mean)
+    
+    float avg_pnl = tot > 0 ? psum / tot : na
+    float variance = tot > 1 ? m2 / (tot - 1) : na
+    float std = not na(variance) and variance > 0 ? math.sqrt(variance) : na
+    float sharpe = not na(std) and std > 0 ? avg_pnl / std : na
+    float mfe_mae = mae_sum > 0 ? mfe_sum / mae_sum : na
+    
+    AggResult.new(tot, wins, avg_pnl, sharpe, mfe_mae, mfe_sum, mae_sum)
 
 f_fire_setup(string fire_setup_id, string fire_setup_name, string setup_dir, string fire_dir, float fire_wr, float fire_sharpe, float fire_tp_pct, float fire_sl_pct, string fire_tooltip, string fire_size_info, int setup_code) =>
     ActivePosition out_pos = pos
@@ -2437,7 +2541,7 @@ f_fire_setup(string fire_setup_id, string fire_setup_name, string setup_dir, str
             label.set_textcolor(pos.setup_label, color.gray)
     
     // 1. Add Label and Open Position
-    [entry_label, full_tooltip] = f_add_setup_label(fire_setup_id, fire_setup_name, setup_dir, fire_wr, fire_sharpe, fire_tp_pct, fire_sl_pct, fire_tooltip)
+    [entry_label, full_tooltip, label_text_init, label_color_init] = f_add_setup_label(fire_setup_id, fire_setup_name, setup_dir, fire_wr, fire_sharpe, fire_tp_pct, fire_sl_pct, fire_tooltip)
     [temp_pos, temp_ctx] = f_open_position(fire_setup_id, setup_dir, fire_dir, fire_wr, fire_tp_pct, fire_sl_pct, fire_size_info)
     out_pos := temp_pos
     out_pos.setup_label := entry_label
@@ -2485,6 +2589,10 @@ f_fire_setup(string fire_setup_id, string fire_setup_name, string setup_dir, str
         rec.label_text := fire_setup_id
         rec.label_color := fire_dir == "LONG" ? color.new(color.lime, 80) : color.new(color.red, 80)
         rec.orig_tooltip := full_tooltip  // Save original tooltip for Phase 3 kNN/MC result augmentation
+        // Save label render state (sources of truth for maintainSetupLabelsRTL)
+        rec.label_text_final := label_text_init
+        rec.label_color_final := label_color_init  // Pre-MC color (dim, 80% alpha)
+        rec.label_tooltip_final := full_tooltip    // Will be augmented with kNN/MC results in Phase 1
         array.push(bt_setups, rec)
         // Instant MC validation disabled (token-saving placeholder)
 
@@ -2504,45 +2612,11 @@ if bt_allowed and enable_knn and enable_mc and allow_bt_init and bt_phase == 0 a
         bt_confirmed_setups := 0
         bt_chunk_idx := 0
         bt_table_ready := false
-        // Reset persistent accumulators
-        bt_raw_wins := 0
-        bt_raw_total := 0
-        bt_raw_pnl_sum := 0.0
-        bt_filt_wins := 0
-        bt_filt_total := 0
-        bt_filt_pnl_sum := 0.0
-        bt_agree_sum := 0.0
-        bt_raw_mae_sum := 0.0
-        bt_raw_mfe_sum := 0.0
-        bt_filt_mae_sum := 0.0
-        bt_filt_mfe_sum := 0.0
-        bt_raw_mean := 0.0
-        bt_raw_m2 := 0.0
-        bt_filt_mean := 0.0
-        bt_filt_m2 := 0.0
+        // Aggregate accumulators removed - computed on-demand via f_agg_setups()
         bt_phase := 1  // → bt_phase 1: chunked backtest validation
 
 // --- BT PHASE 1: Budget-based chunking with kNN filtering ---
-    // AGGRESSIVE LABEL CLEANUP: Clear old labels to prevent overflow
-    // FIX Bug #5: Don't delete labels referenced by bt_setups
-    // NOTE: Increased from 250 to 450 to preserve BT annotations for more setups
-    // FIX: Skip cleanup during entire backtest (Phase 1-4) until rendering is complete
-    bool bt_in_progress = bt_phase > 0 and bt_phase < 4
-    bool phase3_painting = bt_phase == 3 and bt_phase3_idx < array.size(bt_setups)
-    bool bt_done = bt_phase == 4
-    if array.size(setup_labels) > 450 and bt_done and not bt_in_progress and not phase3_painting
-        for i = 0 to math.min(50, array.size(setup_labels) - 450)
-            old_lbl = array.shift(setup_labels)
-            if not na(old_lbl)
-                // Nullify matching HistoricalSetup refs BEFORE delete (prevents dangling handles)
-                for j = 0 to array.size(bt_setups) - 1
-                    HistoricalSetup rec = array.get(bt_setups, j)
-                    if rec.setup_label == old_lbl
-                        rec.setup_label := na
-                        array.set(bt_setups, j, rec)
-                        break
-                // Delete label (now safe - no dangling references)
-                label.delete(old_lbl)
+    // Label cleanup removed - now handled by f_maintain_setup_labels_rtl() recreation budget (500 mc_confirmed labels)
     
     // Process setups in chunks to stay within heavy calculation limits
     // NOTE Bug #9: BT only runs when mc_phase == 0 or 4 (idle/done). If setups fire frequently,
@@ -2584,18 +2658,7 @@ if bt_phase == 1 and allow_bt_chunk and mc_finished
         rec.actual_mfe := best
         rec.exit_reason := exit_rsn
         
-        // Collect All Setups metrics (before validation filter)
-        if not na(rec.actual_pnl)
-            bt_all_total += 1
-            bt_all_pnl_sum += rec.actual_pnl
-            if rec.actual_pnl > 0
-                bt_all_wins += 1
-            bt_all_mae_sum += math.abs(nz(rec.actual_mae, 0.0))
-            bt_all_mfe_sum += nz(rec.actual_mfe, 0.0)
-            float delta_all = rec.actual_pnl - bt_all_mean
-            bt_all_mean := bt_all_mean + delta_all / bt_all_total
-            float delta2_all = rec.actual_pnl - bt_all_mean
-            bt_all_m2 := bt_all_m2 + delta_all * delta2_all
+        // All Setups metrics removed - computed via f_agg_setups("all")
         
         // Now apply validation checks
         if hist_avail < bt_min_history
@@ -2638,6 +2701,9 @@ if bt_phase == 1 and allow_bt_chunk and mc_finished
                 array.set(bt_setups, s - 1, rec)  // s already incremented at line 2458
                 heavy_budget -= 1
                 continue
+            else
+                // kNN returned candidates and no forward bias - continue to MC validation
+                na  // No-op: bt_raw_total incremented later with confidence gate
 
         if array.size(chosen_ids) == 0
             rec.mc_confirmed := false
@@ -2759,6 +2825,9 @@ if bt_phase == 1 and allow_bt_chunk and mc_finished
         // NEW: Direction agreement percentage for concordance filter
         rec.mc_dir_pct := total_paths > 0 ? dir_agree * 100.0 / total_paths : na
         
+        // Calculate mc_confidence BEFORE strength_ok check (was after line 2812 - caused na bypass bug)
+        rec.mc_confidence := math.min(100.0, float(array.size(chosen_ids)) / knn_k * 100.0)
+        
         // CONCORDANCE FILTER: Use directional agreement + kNN confidence for gate, TP/SL for RR quality
         bool strength_ok = not na(rec.mc_dir_pct) and rec.mc_dir_pct >= bt_agree_pct and (na(rec.mc_confidence) or rec.mc_confidence >= bt_confidence_thresh)
         bool direction_match = false
@@ -2808,21 +2877,23 @@ if bt_phase == 1 and allow_bt_chunk and mc_finished
         
         // Set Oracle direction based on MC agreement
         rec.mc_oracle_dir := long_agree_total > short_agree_total ? "BULL" : "BEAR"
-        rec.mc_confirmed := strength_ok  // Use directional agreement for gate
-        rec.mc_confidence := math.min(100.0, float(array.size(chosen_ids)) / knn_k * 100.0)
+        rec.mc_confirmed := strength_ok  // Use directional agreement + kNN confidence gate
         
-        // Paint label immediately if it exists (don't wait for Phase 3 - avoid Pine rollback)
+        // Calculate final label color once (source of truth for maintainSetupLabelsRTL)
+        bool is_long_bt = rec.direction == "LONG"
+        bool is_win_bt = not na(rec.actual_pnl) and rec.actual_pnl > 0
+        rec.label_color_final := rec.mc_confirmed ? 
+             (is_long_bt ? (is_win_bt ? color.new(color.lime, 0) : color.new(color.green, 0)) : 
+                           (is_win_bt ? color.new(color.red, 0) : color.new(color.maroon, 0))) : 
+             color.new(is_long_bt ? color.lime : color.red, 80)
+        
+        // Augment tooltip with kNN/MC results (source of truth for maintainSetupLabelsRTL)
+        rec.label_tooltip_final := rec.orig_tooltip + "\n--- kNN/MC Result ---\nkNN Conf: " + str.tostring(nz(rec.mc_confidence, 0.0), "#.1") + "%\nDir Agree: " + str.tostring(nz(rec.mc_dir_pct, 0.0), "#.1") + "%\nConfirmed: " + (rec.mc_confirmed ? "YES" : "NO") + "\nkNN Cands: " + str.tostring(nz(rec.knn_cands, 0)) + "\nActual PnL: " + str.tostring(nz(rec.actual_pnl, 0.0), "#.2") + "%"
+        
+        // Paint label immediately if it exists (may rollback - maintainSetupLabelsRTL will restore)
         if not na(rec.setup_label)
-            bool is_long_bt = rec.direction == "LONG"
-            bool is_win_bt = not na(rec.actual_pnl) and rec.actual_pnl > 0
-            color new_col = rec.mc_confirmed ? 
-                 (is_long_bt ? (is_win_bt ? color.new(color.lime, 0) : color.new(color.green, 0)) : 
-                               (is_win_bt ? color.new(color.red, 0) : color.new(color.maroon, 0))) : 
-                 color.new(is_long_bt ? color.lime : color.red, 80)
-            label.set_color(rec.setup_label, new_col)
-            // Update tooltip with kNN/MC results (Phase 1 inline)
-            string upd_tooltip = rec.orig_tooltip + "\n--- kNN/MC Result ---\nkNN Conf: " + str.tostring(nz(rec.mc_confidence, 0.0), "#.1") + "%\nDir Agree: " + str.tostring(nz(rec.mc_dir_pct, 0.0), "#.1") + "%\nConfirmed: " + (rec.mc_confirmed ? "YES" : "NO") + "\nkNN Cands: " + str.tostring(nz(rec.knn_cands, 0)) + "\nActual PnL: " + str.tostring(nz(rec.actual_pnl, 0.0), "#.2") + "%"
-            label.set_tooltip(rec.setup_label, upd_tooltip)
+            label.set_color(rec.setup_label, rec.label_color_final)
+            label.set_tooltip(rec.setup_label, rec.label_tooltip_final)
         
         // P2: CSV export logging per setup for scatter plot analysis
         if not na(rec.mc_pct_agree) and not na(rec.actual_pnl)
@@ -2833,55 +2904,21 @@ if bt_phase == 1 and allow_bt_chunk and mc_finished
         array.set(bt_setups, s - 1, rec)  // s already incremented at line 2458
 
         bt_validated_setups += 1
-        bt_agree_sum += nz(rec.mc_pct_agree, 0.0)
         
         // Track scan range (first and last validated bar)
         if na(bt_first_bar)
             bt_first_bar := rec.bar_idx
         bt_last_bar := rec.bar_idx
         
-        // Validated column: count setups with actual_pnl != na
-        if not na(rec.actual_pnl)
-            bt_raw_total += 1
-            bt_raw_pnl_sum += rec.actual_pnl
-            if rec.actual_pnl > 0
-                bt_raw_wins += 1
-            bt_raw_mae_sum += math.abs(nz(rec.actual_mae, 0.0))
-            bt_raw_mfe_sum += nz(rec.actual_mfe, 0.0)
-            float delta = rec.actual_pnl - bt_raw_mean
-            bt_raw_mean := bt_raw_mean + delta / bt_raw_total
-            float delta2 = rec.actual_pnl - bt_raw_mean
-            bt_raw_m2 := bt_raw_m2 + delta * delta2
+        // Track mc_confirmed count (for audit log)
         if rec.mc_confirmed
             bt_confirmed_setups += 1
-            if not na(rec.actual_pnl)
-                bt_filt_total += 1
-                bt_filt_pnl_sum += rec.actual_pnl
-                if rec.actual_pnl > 0
-                    bt_filt_wins += 1
-                bt_filt_mae_sum += math.abs(nz(rec.actual_mae, 0.0))
-                bt_filt_mfe_sum += nz(rec.actual_mfe, 0.0)
-                float delta_f = rec.actual_pnl - bt_filt_mean
-                bt_filt_mean := bt_filt_mean + delta_f / bt_filt_total
-                float delta2_f = rec.actual_pnl - bt_filt_mean
-                bt_filt_m2 := bt_filt_m2 + delta_f * delta2_f
         
         heavy_budget -= 1  // Count this heavy validation
     
     bt_chunk_idx := s
     if bt_chunk_idx >= bt_total_setups
         bt_phase := 2
-        // ── MC AGREE LOG DUMP (paste into Pine Logs, copy-paste to CSV) ──
-        // FIX 6: Added mc_dir_mode and vel_fix columns for cross-file comparison
-        // Format: BAR_IDX | SETUP_ID | DIR | ENTRY | MC_AGREE% | DIR_PCT% | CONFIRMED | CONFIDENCE | PNL% | MAE% | MFE% | EXIT | DIR_MODE | VEL_FIX
-        string vel_fix_str = "true"  // ltf_corr_ema uses math.abs() from this version
-        string dir_mode_str = mc_validator_direction_mode == "Setup Direction" ? "setup" : "best"
-        log.info("MC_LOG_HEADER: bar_idx|setup_id|direction|entry_price|mc_pct_agree|mc_dir_pct|mc_confirmed|mc_confidence|actual_pnl|actual_mae|actual_mfe|exit_reason|mc_dir_mode|vel_recouple_abs_fix")
-        int _log_n = array.size(bt_setups)
-        if _log_n > 0
-            for _li = 0 to _log_n - 1
-                HistoricalSetup _ls = array.get(bt_setups, _li)
-                log.info("MC_LOG:" + str.tostring(_ls.bar_idx) + "|" + _ls.setup_id + "|" + _ls.direction + "|" + str.tostring(_ls.entry_price, "#.######") + "|" + str.tostring(_ls.mc_pct_agree, "#.##") + "|" + str.tostring(_ls.mc_dir_pct, "#.##") + "|" + str.tostring(_ls.mc_confirmed) + "|" + str.tostring(_ls.mc_confidence, "#.##") + "|" + str.tostring(_ls.actual_pnl, "#.####") + "|" + str.tostring(_ls.actual_mae, "#.####") + "|" + str.tostring(_ls.actual_mfe, "#.####") + "|" + _ls.exit_reason + "|" + dir_mode_str + "|" + vel_fix_str)
     // BT progress tracked every 100 chunks
     if bt_chunk_idx % 100 == 0
         bt_last_seen_attempt := bt_chunk_idx  // Update progress marker
@@ -2890,11 +2927,28 @@ if bt_phase == 1 and allow_bt_chunk and mc_finished
 // Stage 7 (DR-4): Backtest completes independently, never resets MC state
 // Only set ready flag, actual rendering moved to main UI loop
 if bt_phase == 2
-    bt_avg_agree := bt_validated_setups > 0 ? bt_agree_sum / bt_validated_setups : na
     bt_table_ready := true
+    
+    // Compute aggregates from bt_setups (single source of truth) and persist for table
+    bt_agg_all := f_agg_setups(bt_setups, "all")
+    bt_agg_validated := f_agg_setups(bt_setups, "validated")
+    bt_agg_mcconf := f_agg_setups(bt_setups, "mcconf")
+    
+    // ── MC AGREE LOG DUMP (paste into Pine Logs, copy-paste to CSV) ──
+    // MOVED FROM PHASE 1: Export after all mc_confirmed flags are set
+    // FIX 6: Added mc_dir_mode and vel_fix columns for cross-file comparison
+    // Format: BAR_IDX | SETUP_ID | DIR | ENTRY | MC_AGREE% | DIR_PCT% | CONFIRMED | CONFIDENCE | PNL% | MAE% | MFE% | EXIT | DIR_MODE | VEL_FIX
+    string vel_fix_str = "true"  // ltf_corr_ema uses math.abs() from this version
+    string dir_mode_str = mc_validator_direction_mode == "Setup Direction" ? "setup" : "best"
+    log.info("MC_LOG_HEADER: bar_idx|setup_id|direction|entry_price|mc_pct_agree|mc_dir_pct|mc_confirmed|mc_confidence|actual_pnl|actual_mae|actual_mfe|exit_reason|mc_dir_mode|vel_recouple_abs_fix")
+    int _log_n = array.size(bt_setups)
+    if _log_n > 0
+        for _li = 0 to _log_n - 1
+            HistoricalSetup _ls = array.get(bt_setups, _li)
+            log.info("MC_LOG:" + str.tostring(_ls.bar_idx) + "|" + _ls.setup_id + "|" + _ls.direction + "|" + str.tostring(_ls.entry_price, "#.######") + "|" + str.tostring(_ls.mc_pct_agree, "#.##") + "|" + str.tostring(_ls.mc_dir_pct, "#.##") + "|" + str.tostring(_ls.mc_confirmed) + "|" + str.tostring(_ls.mc_confidence, "#.##") + "|" + str.tostring(_ls.actual_pnl, "#.####") + "|" + str.tostring(_ls.actual_mae, "#.####") + "|" + str.tostring(_ls.actual_mfe, "#.####") + "|" + _ls.exit_reason + "|" + dir_mode_str + "|" + vel_fix_str)
     int bt_rec_size = array.size(bt_setups)
     int bt_scan_range = not na(bt_first_bar) and not na(bt_last_bar) ? bt_last_bar - bt_first_bar + 1 : na
-    bt_audit_log := "AUD setups=" + str.tostring(bt_rec_size) + " val=" + str.tostring(bt_validated_setups) + " raw=" + str.tostring(bt_raw_total) + " filt=" + str.tostring(bt_filt_total) + " conf=" + str.tostring(bt_confirmed_setups) + " rng=" + str.tostring(bt_scan_range)
+    bt_audit_log := "AUD setups=" + str.tostring(bt_rec_size) + " val=" + str.tostring(bt_validated_setups) + " raw=" + str.tostring(bt_agg_validated.total) + " filt=" + str.tostring(bt_agg_mcconf.total) + " conf=" + str.tostring(bt_confirmed_setups) + " rng=" + str.tostring(bt_scan_range)
     
     // Build Candidates Summary
     array.clear(bt_u_setups)
@@ -2930,61 +2984,23 @@ if bt_phase == 2
     bt_phase3_overflow := false
     bt_phase := 3  // Move to render state
 
-// ── BT PHASE 3: Continuous Label Rendering ──
-// Labels must be recolored on EVERY tick after validation is done,
-// otherwise Pine Script's rollback mechanic reverts them to their initial color.
-// CRITICAL: Must run ONLY on realtime ticks (NOT islast or islastconfirmedhistory - Pine reverts object changes on historical bars)
+// ── BT PHASE 3: Transition to Phase 4 ──
+// Simplified: Label rendering now handled by f_maintain_setup_labels_rtl() in realtime block
+// Phase 3 only checks that all setups have label_color_final set, then transitions to Phase 4
 var int current_painted_labels = 0
-if bt_phase >= 3 and barstate.isrealtime
+if bt_phase == 3 and barstate.isrealtime
+    // Check that all setups with actual_pnl have label_color_final populated
+    bool all_ready = true
     int bt_size = array.size(bt_setups)
-    int painted_cnt = 0
-    
-    // Render loop: recreate ONLY mc_confirmed labels (save label budget - Pine limit 500 total)
-    // Non-confirmed labels are gray/transparent anyway - not worth recreating
-    int recreated_cnt = 0
-    int max_recreate = 200  // Reserve budget for mc_confirmed labels only (~120 expected)
-    
     if bt_size > 0
-        // Recreate mc_confirmed setups only (always recreate, regardless of visibility)
-        for j = bt_size - 1 to 0
-            if recreated_cnt >= max_recreate
+        for j = 0 to bt_size - 1
+            HistoricalSetup rec = array.get(bt_setups, j)
+            if not na(rec.actual_pnl) and na(rec.label_color_final)
+                all_ready := false
                 break
-            HistoricalSetup rec = array.get(bt_setups, j)
-            if na(rec.setup_label) and not na(rec.label_y) and rec.mc_confirmed
-                label new_lbl = label.new(rec.bar_idx, rec.label_y, rec.label_text, 
-                     style=label.style_label_up, color=rec.label_color, textcolor=color.white, size=size.tiny)
-                rec.setup_label := new_lbl
-                array.set(bt_setups, j, rec)
-                recreated_cnt += 1
-        
-        // Pass 3: Repaint ALL labels with BT result colors
-        for j = bt_size - 1 to 0
-            HistoricalSetup rec = array.get(bt_setups, j)
-            if not na(rec.setup_label)
-                painted_cnt += 1
-                bool is_long_bt = rec.direction == "LONG"
-                if rec.mc_confirmed
-                    bool is_win_bt = not na(rec.actual_pnl) and rec.actual_pnl > 0
-                    // Win: solid bright colors, Loss: dark colors (no transparency)
-                    color new_col = is_long_bt ? (is_win_bt ? color.new(color.lime, 0) : color.new(color.green, 0)) : (is_win_bt ? color.new(color.red, 0) : color.new(color.maroon, 0))
-                    label.set_color(rec.setup_label, new_col)
-                    // Update tooltip with kNN/MC results (Phase 3 Pass 3)
-                    string upd_tooltip = rec.orig_tooltip + "\n--- kNN/MC Result ---\nkNN Conf: " + str.tostring(nz(rec.mc_confidence, 0.0), "#.1") + "%\nDir Agree: " + str.tostring(nz(rec.mc_dir_pct, 0.0), "#.1") + "%\nConfirmed: YES\nkNN Cands: " + str.tostring(nz(rec.knn_cands, 0)) + "\nActual PnL: " + str.tostring(nz(rec.actual_pnl, 0.0), "#.2") + "%"
-                    label.set_tooltip(rec.setup_label, upd_tooltip)
-                    // Text annotations only if debug flag enabled
-                    if show_setupsdb_debug
-                        label.set_text(rec.setup_label, rec.setup_id + (is_win_bt ? " W" : " X"))
-                else
-                    label.set_color(rec.setup_label, color.new(is_long_bt ? color.lime : color.red, 80))
-                    // Update tooltip for unconfirmed setups
-                    string upd_tooltip_unc = rec.orig_tooltip + "\n--- kNN/MC Result ---\nkNN Conf: " + str.tostring(nz(rec.mc_confidence, 0.0), "#.1") + "%\nDir Agree: " + str.tostring(nz(rec.mc_dir_pct, 0.0), "#.1") + "%\nConfirmed: NO\nkNN Cands: " + str.tostring(nz(rec.knn_cands, 0))
-                    label.set_tooltip(rec.setup_label, upd_tooltip_unc)
-                    if show_setupsdb_debug
-                        label.set_text(rec.setup_label, rec.setup_id + " ?")
-        current_painted_labels := painted_cnt
     
-    // Transition to Phase 4 when all labels painted (only on realtime ticks - object changes on historical bars are reverted by Pine)
-    if barstate.isrealtime and bt_phase == 3 and painted_cnt >= bt_size
+    // Transition to Phase 4 when all label render state is ready
+    if all_ready
         bt_phase := 4
 
 var int last_setup_trigger_bar = 0
@@ -3519,8 +3535,8 @@ triggered_setups := SetupsDB.evaluate_all(
     nz(mc_knn_confidence)
 )
 
-// LONGEVAL: dump all params when LONG zone reached (temporary debug)
-if barstate.isconfirmed and entry_context_code == 1000
+// LONGEVAL: dump all params when LONG zone reached (gated to prevent log buffer overflow)
+if enable_longeval_log and barstate.isconfirmed and entry_context_code == 1000
     int trig_cnt = na(triggered_setups) ? 0 : array.size(triggered_setups)
     float _inn_ratio = innov_width_med > 0 ? innov_width / innov_width_med : na
     log.info("LONGEVAL,bar=" + str.tostring(bar_index) +
@@ -4272,7 +4288,11 @@ f_render_bt_summary_table(table tbl) =>
         float filt_rr = bt_filt_mae_sum > 0 ? bt_filt_mfe_sum / bt_filt_mae_sum : 0.0
         table.cell(tbl, 0, 0, "kNN+MC Backtest", bgcolor=hdr_bg, text_color=color.white, text_size=size.small)
         table.cell(tbl, 1, 0, "All Setups", bgcolor=hdr_bg, text_color=color.gray, text_size=size.small, tooltip="All fired setups (no validation)")
-        table.cell(tbl, 2, 0, "Validated", bgcolor=hdr_bg, text_color=color.yellow, text_size=size.small, tooltip="Setups with closed trades (actual_pnl != NaN)")
+        string val_filters = "kNN≥" + str.tostring(bt_confidence_thresh, "#") + "%"
+        val_filters += bt_enable_dir_filter ? " + Dir≥" + str.tostring(bt_dir_thresh, "#") + "%" : ""
+        val_filters += bt_enable_regime_filter ? " + " + bt_regime_mode : ""
+        val_filters += bt_enable_fit_filter ? " + Fit≥" + str.tostring(bt_fit_floor, "#.#") : ""
+        table.cell(tbl, 2, 0, "Validated", bgcolor=hdr_bg, text_color=color.yellow, text_size=size.small, tooltip="Advanced kNN filters: " + val_filters)
         table.cell(tbl, 3, 0, "MC Conf", bgcolor=hdr_bg, text_color=color.aqua, text_size=size.small, tooltip="MC Confirmed: validated setups passing bt_filt_* thresholds")
 
         // WR
@@ -4308,7 +4328,9 @@ f_render_bt_summary_table(table tbl) =>
         // Criteria
         table.cell(tbl, 0, 6, "Criteria", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
         table.cell(tbl, 1, 6, "All fired", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny, tooltip="All setups with actual_pnl != na (no validation)")
-        table.cell(tbl, 2, 6, "+hist+kNN", bgcolor=row_bg, text_color=color.yellow, text_size=size.tiny, tooltip="All + hist_avail + kNN candidates + no forward bias")
+        int active_filters = (bt_enable_dir_filter ? 1 : 0) + (bt_enable_regime_filter ? 1 : 0) + (bt_enable_fit_filter ? 1 : 0)
+        string crit_text = "+kNN" + (active_filters > 0 ? "+" + str.tostring(active_filters) + "F" : "")
+        table.cell(tbl, 2, 6, crit_text, bgcolor=row_bg, text_color=color.yellow, text_size=size.tiny, tooltip=val_filters)
         table.cell(tbl, 3, 6, "+MC conf", bgcolor=row_bg, text_color=color.aqua, text_size=size.tiny, tooltip="Validated + mc_confirmed == true")
         
         // MC Agreement
@@ -4561,6 +4583,16 @@ bool show_knn_diag_pack = enable_knn
 int corr_damping_q = int(math.round(nz(corr_damping, 0.0) * 7.0))  // 3-bit quantized [0-7]
 float knn_diag_superpack = show_knn_diag_pack ? (math.round(nz(mc_knn_confidence)) * 17179869184.0) + (corr_damping_q * 2147483648.0) + (mc_family * 268435456.0) + packed_vec : na
 //plot(knn_diag_superpack, "kNN Superpack (Conf|Damp|Fam|Vec)", color=color.new(color.yellow, 0), linewidth=1, display=display.data_window)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// REALTIME LABEL MAINTENANCE
+// ═══════════════════════════════════════════════════════════════════════════
+// Called every realtime tick to maintain label persistence from UDT sources of truth
+// Independent of bt_phase - works from Phase 1 completion onwards
+if barstate.isrealtime
+    [painted, recreated] = f_maintain_setup_labels_rtl()
+    current_painted_labels := painted
+    // Recreated count available for diagnostics if needed
 
 // ═══════════════════════════════════════════════════════════════════════════
 // DIAGNOSTIC LABEL - setupsDB integration debug
