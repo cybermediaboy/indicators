@@ -623,9 +623,11 @@ export f_hierarchical_tournament_backtest_signaware(int s_packed, float s_f1, fl
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// V19 COMPATIBILITY WRAPPERS (generic API over existing 7-feature engine)
+// DEPRECATED: V19 COMPATIBILITY WRAPPERS - Remove in kNNLib v4
+// Use f_hierarchical_tournament_* instead
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// DEPRECATED: Use f_hierarchical_tournament_backtest or f_hierarchical_tournament_live
 export f_knn_scan(array<float> cur_features,
                   array<float> h0, array<float> h1, array<float> h2, array<float> h3, array<float> h4, array<float> h5, array<float> h6,
                   array<int> arr_packed,
@@ -658,6 +660,7 @@ export f_knn_scan(array<float> cur_features,
                     array.push(dists, math.sqrt(dist))
     [ids, dists, dbg_iter, dbg_hskip, dbg_nskip]
 
+// DEPRECATED: Use f_hierarchical_tournament_* instead
 export f_knn_select(array<int> t1_ids, array<float> t1_dist,
                     array<int> t2_ids, array<float> t2_dist,
                     array<int> t3_ids, array<float> t3_dist,
@@ -747,6 +750,7 @@ export f_normalize_phi_div(float phi_div, array<float> history, int len) =>
 // 3. K-NEAREST NEIGHBOR RETRIEVAL
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// DEPRECATED: 6-feature version - Use 7-feature hierarchical tournament instead
 // @function Calculate Euclidean distance between current state and historical state
 // @param f1_cur-f6_cur Current feature values (normalized)
 // @param f1_hist-f6_hist Historical feature values (normalized)
@@ -762,6 +766,7 @@ export f_euclidean_distance(float f1_cur, float f2_cur, float f3_cur, float f4_c
     
     math.sqrt(d1*d1 + d2*d2 + d3*d3 + d4*d4 + d5*d5 + d6*d6)
 
+// DEPRECATED: 6-feature version - Use f_hierarchical_tournament_backtest or f_hierarchical_tournament_live
 // @function Find K nearest neighbors using Hamming screening + Euclidean distance
 // @param f1_cur-f6_cur Current feature values
 // @param f1_history-f6_history Feature history arrays
@@ -808,6 +813,7 @@ export f_find_k_nearest(float f1_cur, float f2_cur, float f3_cur, float f4_cur, 
     
     nearest_indices
 
+// DEPRECATED: 6-feature version - Confidence is now computed in hierarchical tournament
 // @function Calculate epistemic confidence from K-nearest distance distribution
 // @param f1_cur-f6_cur Current feature values
 // @param f1_history-f6_history Feature history arrays
@@ -836,6 +842,7 @@ export f_calculate_confidence(float f1_cur, float f2_cur, float f3_cur, float f4
     
     confidence
 
+// DEPRECATED: 6-feature version - Not used in v20 hierarchical tournament
 // @function Calculate median distance from k-nearest neighbors (robust confidence metric)
 // @param k_nearest Array of K nearest neighbor indices
 // @param f1_cur-f6_cur Current feature values

@@ -126,6 +126,7 @@ export type SetupEvent
     float confidence
     int showstopper_hits
 
+// DEPRECATED: Flat-struct version - Use OscContext (array-based) instead - Remove in SetupsLib v7
 export type SetupContext
     float vec_osc
     float mr_osc
@@ -260,6 +261,7 @@ export f_eval_showstoppers(int mask, OscContext ctx) =>
             triggered := true
     triggered
 
+// DEPRECATED: Use f_eval_showstoppers(mask, OscContext) instead - Remove in SetupsLib v7
 export f_check_showstoppers(SetupSpec spec, SetupContext ctx) =>
     int mask = spec.showstopper_mask
     int hits = 0
@@ -419,21 +421,21 @@ export f_calc_tpsl(string dir, float ep, float tp_pct, float sl_pct, float z2_up
 
 // Universal exit evaluation (used by both Live and BT)
 // Returns: [exit_code, new_trail_sl]
-// exit_code: 0=HardSL, 1=TrailSL, 2=PredFlip, 3=Breakeven, 4=TP1, -1=NoExit
-export f_evaluate_exit(string dir, float pnl, float max_pnl, int bars_held, float hi, float lo, float tp1, float trail_sl_in, float pred_ma_now, bool pred_rising_now, bool pred_rising_1ago) =>
+// exit_code: 0=HardSL, 1=TrailSL, 2=SignalReverse, 3=Breakeven, 4=TP1, -1=NoExit
+// signal_reverse_check: indicator-specific reversal condition (e.g. CVB pred_ma flip, basket decouple, etc.)
+// trail_sl_target: price level to trail SL to (e.g. CVB pred_ma, EMA, baseline, etc.)
+export f_evaluate_exit(string dir, float pnl, float max_pnl, int bars_held, float hi, float lo, float tp1, float trail_sl_in, float trail_sl_target, bool signal_reverse_check) =>
     int exit_code = -1
     float trail_sl_out = trail_sl_in
     
     // Update trailing SL if profitable
     if bars_held >= 1 and max_pnl > 0.5
-        trail_sl_out := na(trail_sl_in) ? pred_ma_now : (dir == "LONG" ? math.max(trail_sl_in, pred_ma_now) : math.min(trail_sl_in, pred_ma_now))
+        trail_sl_out := na(trail_sl_in) ? trail_sl_target : (dir == "LONG" ? math.max(trail_sl_in, trail_sl_target) : math.min(trail_sl_in, trail_sl_target))
     
     // Exit conditions (priority order)
     bool exit_hard_sl = pnl <= -1.8
     bool exit_trail_sl = not na(trail_sl_out) and (dir == "LONG" ? lo <= trail_sl_out : hi >= trail_sl_out)
-    bool pred_flip_bear = not pred_rising_now and pred_rising_1ago
-    bool pred_flip_bull = pred_rising_now and not pred_rising_1ago
-    bool exit_pred_flip = dir == "LONG" ? pred_flip_bear : pred_flip_bull
+    bool exit_signal_reverse = signal_reverse_check
     bool exit_be = bars_held >= 5 and pnl <= 0
     bool hit_tp1 = dir == "LONG" ? hi >= tp1 : lo <= tp1
     
@@ -441,7 +443,7 @@ export f_evaluate_exit(string dir, float pnl, float max_pnl, int bars_held, floa
         exit_code := 0
     else if exit_trail_sl
         exit_code := 1
-    else if exit_pred_flip
+    else if exit_signal_reverse
         exit_code := 2
     else if exit_be
         exit_code := 3
@@ -451,7 +453,7 @@ export f_evaluate_exit(string dir, float pnl, float max_pnl, int bars_held, floa
     [exit_code, trail_sl_out]
 
 // Update setup label with exit marker and color
-// exit_code: 0=HardSL, 1=TrailSL, 2=PredFlip, 3=Breakeven, 4=TP1
+// exit_code: 0=HardSL, 1=TrailSL, 2=SignalReverse, 3=Breakeven, 4=TP1
 export f_update_exit_label(label lbl, string setup_id, string dir, int exit_code, float pnl) =>
     if not na(lbl)
         // Marker selection based on exit_code
@@ -463,7 +465,7 @@ export f_update_exit_label(label lbl, string setup_id, string dir, int exit_code
         // SL (exit_code 0,1): always white (visible on red/green label)
         // Other exits (2,3): color depends on PnL
         color text_col = color.white
-        if exit_code == 2 or exit_code == 3  // PredFlip or Breakeven
+        if exit_code == 2 or exit_code == 3  // SignalReverse or Breakeven
             bool is_profit = pnl > 0.1
             text_col := is_profit ? color.white : (dir == "LONG" ? color.red : color.black)
         
@@ -473,10 +475,10 @@ export f_update_exit_label(label lbl, string setup_id, string dir, int exit_code
         label.set_textcolor(lbl, text_col)
 
 // Append exit type to label tooltip
-// exit_code: 0=HardSL, 1=TrailSL, 2=PredFlip, 3=Breakeven, 4=TP1
+// exit_code: 0=HardSL, 1=TrailSL, 2=SignalReverse, 3=Breakeven, 4=TP1
 // Returns: updated tooltip string
 export f_get_exit_info(int exit_code) =>
-    string exit_name = exit_code == 0 ? "Hard SL" : exit_code == 1 ? "Trail SL" : exit_code == 2 ? "PredFlip" : exit_code == 3 ? "Breakeven" : exit_code == 4 ? "TP1" : "Unknown"
+    string exit_name = exit_code == 0 ? "Hard SL" : exit_code == 1 ? "Trail SL" : exit_code == 2 ? "SignalReverse" : exit_code == 3 ? "Breakeven" : exit_code == 4 ? "TP1" : "Unknown"
     "\n\nExit: [" + str.tostring(exit_code) + "] " + exit_name
 
 // Backtest simulation using unified exit logic
@@ -510,14 +512,19 @@ export f_simulate_bt_position(string dir, float ep, float tp_pct, int hold_limit
         bool pred_rising_now = pma_now > pma_3ago
         bool pred_rising_1ago = pma_1ago > pma_4ago  // 3-bar lookback, consistent with Live
         
+        // CVB-specific signal reverse check (pred_ma flip)
+        bool pred_flip_bear = not pred_rising_now and pred_rising_1ago
+        bool pred_flip_bull = pred_rising_now and not pred_rising_1ago
+        bool signal_reverse_check = is_long ? pred_flip_bear : pred_flip_bull
+        
         // Use unified exit evaluation with actual high/low
         float tp1 = ep * (1.0 + tp_pct / 100.0 * (is_long ? 1.0 : -1.0))
-        [temp_exit_code, temp_trail_sl] = f_evaluate_exit(dir, pnl, best, h, hi, lo, tp1, trail_sl, pma_now, pred_rising_now, pred_rising_1ago)
+        [temp_exit_code, temp_trail_sl] = f_evaluate_exit(dir, pnl, best, h, hi, lo, tp1, trail_sl, pma_now, signal_reverse_check)
         trail_sl := temp_trail_sl
         
         if temp_exit_code >= 0
             exit_pnl := pnl
-            exit_rsn := temp_exit_code == 0 ? "SL" : temp_exit_code == 1 ? "TRAIL" : temp_exit_code == 2 ? "PREDFLIP" : temp_exit_code == 3 ? "BE" : "TP"
+            exit_rsn := temp_exit_code == 0 ? "SL" : temp_exit_code == 1 ? "TRAIL" : temp_exit_code == 2 ? "SIGREVERSE" : temp_exit_code == 3 ? "BE" : "TP"
             break
     
     // Max hold fallback
@@ -531,6 +538,8 @@ export f_simulate_bt_position(string dir, float ep, float tp_pct, int hold_limit
     
     [exit_pnl, worst, best, exit_rsn]
 
+// DEPRECATED: Use f_get_spec() instead - Remove in SetupsLib v7
+// Returns tuple instead of SetupSpec object (legacy API)
 export f_find_setup_spec(array<SetupSpec> setup_db, string setup_id) =>
     string found_name = ""
     string found_dir = ""
@@ -573,7 +582,7 @@ export f_get_setup_horizon(array<SetupSpec> setup_db, string setup_id, int fallb
 // @description Converts a SetupConfig (from setupsDBGem) to SetupSpec (SetupsLib native type)
 // @param cfg SetupConfig from setupsDBGem.evaluate_all()
 // @returns SetupSpec compatible with SetupsLib functions (f_register_event_v2, f_check_showstoppers, etc.)
-export f_config_to_spec(string id, string name, string dir, float tp_pct, float sl_pct, int hold_bars, float wr, float sharpe, float edgeratio, string thesis, int showstopper_mask, int code, int mask) =>
+export f_config_to_spec(string id, string name, string dir, float tp_pct, float sl_pct, int hold_bars, float wr, float sharpe, float edgeratio, string thesis, int showstopper_mask, int code, int mask, string tooltip, int thesisflags, float impulse_penalty_scale) =>
     SetupSpec.new(
         id                    = id,
         name                  = name,
@@ -584,13 +593,13 @@ export f_config_to_spec(string id, string name, string dir, float tp_pct, float 
         tp_pct                = tp_pct,
         sl_pct                = sl_pct,
         avg_bars              = hold_bars,
-        tooltip               = thesis,
+        tooltip               = tooltip,
         timestop              = hold_bars,
         edge_ratio            = edgeratio,
         thesis                = thesis,
-        thesis_flags          = 0,
+        thesis_flags          = thesisflags,
         showstopper_mask      = showstopper_mask,
-        impulse_penalty_scale = 1.0,
+        impulse_penalty_scale = impulse_penalty_scale,
         code                  = code,
         mask                  = mask
     )
@@ -675,6 +684,8 @@ export f_start_or_queue_validation(ValidationState vs, string next_setup_id, int
         vs.pending_phase := next_phase
     vs
 
+// DEPRECATED: Use f_evaluate_exit() + f_exit_label_text() + f_exit_label_color() instead - Remove in SetupsLib v7
+// This function violates SRP by mixing exit logic with label rendering
 export f_exit_logic(string dir, float tp1, float pos_pnl, int bars_held, float pred_ma_now, float pred_ma_3ago, float pred_ma_1ago, float trail_sl_in, float max_pnl, float low_price, float high_price, float close_price) =>
     bool pred_rising_now = pred_ma_now > pred_ma_3ago
     bool pred_falling_now = pred_ma_now < pred_ma_3ago
@@ -738,3 +749,44 @@ export f_exit_logic(string dir, float tp1, float pos_pnl, int bars_held, float p
         label_color := color.green
         label_y := tp1
     [exit_triggered, exit_reason, trail_sl, show_label, label_text, label_color, label_y]
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXIT LABEL HELPERS - Separate rendering from logic (P5 fix)
+// ═══════════════════════════════════════════════════════════════════════════
+// @function f_exit_label_text
+// @description Generate exit label text based on exit code
+// @param exit_code Exit type: 0=HardSL, 1=TrailSL, 2=PredFlip, 3=Breakeven, 4=TP1
+// @param pnl Position PnL percentage
+// @returns Label text string
+export f_exit_label_text(int exit_code, float pnl) =>
+    string txt = ""
+    if exit_code == 0
+        txt := "✗ SL"
+    else if exit_code == 1
+        txt := "⤴ Trail " + str.tostring(pnl, "#.#") + "%"
+    else if exit_code == 2
+        txt := "⟲ Flip " + str.tostring(pnl, "#.#") + "%"
+    else if exit_code == 3
+        txt := "BE 0%"
+    else if exit_code == 4
+        txt := "✓ TP1"
+    txt
+
+// @function f_exit_label_color
+// @description Generate exit label color based on exit code and PnL
+// @param exit_code Exit type: 0=HardSL, 1=TrailSL, 2=PredFlip, 3=Breakeven, 4=TP1
+// @param pnl Position PnL percentage
+// @returns Label color
+export f_exit_label_color(int exit_code, float pnl) =>
+    color col = color.white
+    if exit_code == 0
+        col := color.red
+    else if exit_code == 1
+        col := color.green
+    else if exit_code == 2
+        col := pnl > 0 ? color.green : color.orange
+    else if exit_code == 3
+        col := color.gray
+    else if exit_code == 4
+        col := color.green
+    col

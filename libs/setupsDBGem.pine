@@ -24,6 +24,9 @@ export type SetupConfig
     int code              // replaces f_setup_id_to_code()
     int mask              // replaces f_setup_id_to_mask()
     int mc_family         // replaces f_get_mc_family_from_setup()
+    string tooltip        // P4: Full descriptive tooltip text for setup labels
+    int thesisflags = 0   // 0=none, 1=anti-impulse, 2=coupling-required (for f_score_confidence penalty)
+    float impulse_penalty_scale = 1.0  // Impulse penalty multiplier (default 1.0)
 
 // =====================================================================
 // EVALUATE ALL SETUPS (MASTER FUNCTION)
@@ -51,32 +54,32 @@ export evaluate_all(
     // 1. S3_Sniper: Deep Reversion (MR < -0.2, VEC bearish) + Quiet Market + Not at support (strongest)
     bool s3 = valid_data and (entryCtx == 1200) and (mr < -0.2) and (vec < -0.8) and not (((close_price - innL) / close_price) < 0.01) and (burst < 0.5)
     if s3
-        active.push(SetupConfig.new("S3", "Decoupled Reversion", "SHORT", 6.0, 1.5, 16, 54.0, 0.267, true, 0.95, "Asset is heavily overbought (MR Osc < -0.2) while its peers are pulling down (Vector Pressure < -0.8). Market lacks momentum (BURST Osc < 0.5) and is not at immediate support, creating an ideal counter-trend opportunity.", 2, 103, 0, 4))
+        active.push(SetupConfig.new("S3", "Decoupled Reversion", "SHORT", 6.0, 1.5, 16, 54.0, 0.267, true, 0.95, "MR", 2, 103, 0, 4, "Asset is heavily overbought (MR Osc < -0.2) while its peers are pulling down (Vector Pressure < -0.8). Market lacks momentum (BURST Osc < 0.5) and is not at immediate support, creating an ideal counter-trend opportunity.", 1, 1.0))
 
     // 2. S_Trapped_MA: Trapped between BaseMA and PredVecMA (Quiet Market)
     bool s_trap = valid_data and (entryCtx == 1200) and (close_price < baseMA) and (close_price > predVecMA) and not (close_price < cyclicFV) and (burst < 0.5)
     if s_trap
-        active.push(SetupConfig.new("S_Trap", "Trapped Price", "SHORT", 6.0, 1.5, 16, 51.2, 0.113, true, 1.0, "Price is compressed below the baseline trend (Basis MA) but still holds above predictive fair value (Pred FV Line). Lack of upside momentum (BURST Osc < 0.5) suggests an impending downside resolution.", 0, 116, 67108864, 4))
+        active.push(SetupConfig.new("S_Trap", "Trapped Price", "SHORT", 6.0, 1.5, 16, 51.2, 0.113, true, 1.0, "MR", 0, 116, 67108864, 4, "Price is compressed below the baseline trend (Basis MA) but still holds above predictive fair value (Pred FV Line). Lack of upside momentum (BURST Osc < 0.5) suggests an impending downside resolution.", 1, 1.0))
 
     // 3. S_Inn_Contraction: Volatility Squeeze Breakout (Peak Momentum Only)
     bool s_inn = valid_data and (entryCtx == 1200) and (innWidth < innWidthMed) and not vwapShortActive and (burst > 0.3)
     if s_inn
-        active.push(SetupConfig.new("S_Inn", "Volatility Breakdown", "SHORT", 6.0, 1.5, 16, 50.7, 0.073, true, 1.0, "Market volatility has compressed (Innov Bands Width) and is now resolving with a sudden downside impulse (BURST Osc > 0.3). VWAP support is cleared, confirming bearish momentum.", 0, 115, 33554432, 4))
+        active.push(SetupConfig.new("S_Inn", "Volatility Breakdown", "SHORT", 6.0, 1.5, 16, 50.7, 0.073, true, 1.0, "BURST", 0, 115, 33554432, 4, "Market volatility has compressed (Innov Bands Width) and is now resolving with a sudden downside impulse (BURST Osc > 0.3). VWAP support is cleared, confirming bearish momentum.", 2, 1.0))
 
     // 4. S4_Basket: Highly Correlated Breakout (Peak Momentum Only)
     bool s4 = valid_data and (entryCtx == 1200) and (basket > 70) and not (te >= 4.0) and (burst > 0.3)
     if s4
-        active.push(SetupConfig.new("S4", "Correlated Breakdown", "SHORT", 6.0, 1.5, 16, 48.5, 0.025, true, 1.0, "The asset is highly synchronized with its peers (Basket Fit > 70) and is confirming a coordinated downside impulse (BURST Osc > 0.3). The move is supported by broad market weakness.", 0, 113, 134217728, 4))
+        active.push(SetupConfig.new("S4", "Correlated Breakdown", "SHORT", 6.0, 1.5, 16, 48.5, 0.025, true, 1.0, "BASKET", 0, 113, 134217728, 4, "The asset is highly synchronized with its peers (Basket Fit > 70) and is confirming a coordinated downside impulse (BURST Osc > 0.3). The move is supported by broad market weakness.", 2, 1.0))
 
     // 5. S8_BURST: Impulse momentum + Valid Correlation (SHORT only — entryCtx guard prevents firing in LONG zone)
     bool s8 = valid_data and (entryCtx == 1200) and (burst != 0) and (mr < -0.3) and not (basket < 30)
     if s8
-        active.push(SetupConfig.new("S8", "Overbought Impulse", "SHORT", 6.0, 1.5, 16, 44.0, 0.004, true, 1.20, "Extreme local overbought conditions (MR Osc < -0.3) are meeting sudden directional momentum (BURST Osc). The asset is tightly coupled with its basket, validating the reversal structure.", 2, 108, 32768, 4))
+        active.push(SetupConfig.new("S8", "Overbought Impulse", "SHORT", 6.0, 1.5, 16, 44.0, 0.004, true, 1.20, "MR+BURST", 2, 108, 32768, 4, "Extreme local overbought conditions (MR Osc < -0.3) are meeting sudden directional momentum (BURST Osc). The asset is tightly coupled with its basket, validating the reversal structure.", 1, 1.0))
 
     // 6. S11_Cyclic_Div: Price > Fair Value — fallback (weakest, Sharpe -0.013)
     bool s11 = valid_data and (entryCtx == 1200) and (close_price > cyclicFV) and not (innWidth > innWidthMed) and (burst < 0.5)
     if s11
-        active.push(SetupConfig.new("S11", "Fair Value Reversion", "SHORT", 6.0, 1.5, 16, 48.2, -0.013, true, 1.0, "Price has drifted significantly above its calculated fair value (Kalman Cyclic FV) during a quiet market regime (BURST Osc < 0.5). Lack of volatility expansion suggests an imminent reversion.", 0, 111, 16777216, 4))
+        active.push(SetupConfig.new("S11", "Fair Value Reversion", "SHORT", 6.0, 1.5, 16, 48.2, -0.013, true, 1.0, "FV", 0, 111, 16777216, 4, "Price has drifted significantly above its calculated fair value (Kalman Cyclic FV) during a quiet market regime (BURST Osc < 0.5). Lack of volatility expansion suggests an imminent reversion.", 1, 1.0))
 
     // =================================================================
     // 2. LONG SETUPS (Market Profile: TP=8%, SL=1.5%, H=24)
@@ -88,17 +91,17 @@ export evaluate_all(
     // 9. L_Exp: Volatility expansion capitulation bounce (strongest — Sharpe 0.459)
     bool l_inn = valid_base and (entryCtx == 1000) and (mr > 0.5) and (vec < -0.3) and (innWidth > innWidthMed) and not (close_price < cyclicFV)
     if l_inn
-        active.push(SetupConfig.new("L_Exp", "Capitulation Bounce", "LONG", 8.0, 1.5, 24, 63.4, 0.459, true, 1.28, "Extreme panic selling has triggered maximum volatility expansion (Innov Bands Width). The asset is deeply oversold (MR Osc > 0.5) but holds above structural fair value (Kalman Cyclic FV), creating a high-probability bounce.", 0, 211, 536870912, 1))
+        active.push(SetupConfig.new("L_Exp", "Capitulation Bounce", "LONG", 8.0, 1.5, 24, 63.4, 0.459, true, 1.28, "MR+VOL", 0, 211, 536870912, 1, "Extreme panic selling has triggered maximum volatility expansion (Innov Bands Width). The asset is deeply oversold (MR Osc > 0.5) but holds above structural fair value (Kalman Cyclic FV), creating a high-probability bounce.", 1, 1.0))
 
     // 8. L6_Neutral_Bounce: Confirmed bounce + ML filter (mid — Sharpe 0.153)
     bool l6 = valid_base and (entryCtx == 1000) and (mr > 0.2) and (vec < -0.3) and not vwapLongActive and (na(knnConf) or knnConf >= 50.0)
     if l6
-        active.push(SetupConfig.new("L6", "Model-Confirmed Bounce", "LONG", 8.0, 1.5, 24, 44.0, 0.153, true, 1.12, "Asset has reached standard oversold territory (MR Osc > 0.2) while peers drag it down (Vector Pressure < -0.3). The k-Nearest Neighbor machine learning model (kNN Confidence) confirms historical probability of an immediate bounce.", 32, 206, 524288, 4))
+        active.push(SetupConfig.new("L6", "Model-Confirmed Bounce", "LONG", 8.0, 1.5, 24, 44.0, 0.153, true, 1.12, "MR+kNN", 32, 206, 524288, 4, "Asset has reached standard oversold territory (MR Osc > 0.2) while peers drag it down (Vector Pressure < -0.3). The k-Nearest Neighbor machine learning model (kNN Confidence) confirms historical probability of an immediate bounce.", 1, 1.0))
 
     // 7. L_Basic: Low-threshold oversold entry — fallback when L_Exp/L6 don't qualify (Sharpe 0.05)
     bool l_basic = valid_base and (entryCtx == 1000) and (mr > 0.1) and (vec < -0.3) and not vwapLongActive
     if l_basic
-        active.push(SetupConfig.new("L_Basic", "Micro-Bounce Scalp", "LONG", 6.0, 1.5, 20, 42.0, 0.05, true, 1.05, "Initial signs of oversold conditions (MR Osc > 0.1) while structurally dislocated from basket peers (Vector Pressure < -0.3). A basic reversion scalp prioritizing quick structural correction.", 0, 210, 268435456, 1))
+        active.push(SetupConfig.new("L_Basic", "Micro-Bounce Scalp", "LONG", 6.0, 1.5, 20, 42.0, 0.05, true, 1.05, "MR", 0, 210, 268435456, 1, "Initial signs of oversold conditions (MR Osc > 0.1) while structurally dislocated from basket peers (Vector Pressure < -0.3). A basic reversion scalp prioritizing quick structural correction.", 1, 1.0))
 
     // =================================================================
     // 3. NEUTRAL ZONE SETUPS (entryCtx == 1100, z0 ∈ [-0.5, 0.5])
@@ -108,11 +111,11 @@ export evaluate_all(
     // 9. N_TE_Short: Transfer Entropy driven short in neutral zone
     bool n_te_short = valid_te and (entryCtx == 1100) and (te > 0.06) and (basket > 30) and (burst > 0.3) and not vwapShortActive
     if n_te_short
-        active.push(SetupConfig.new("N_TE_S", "Lead-Lag Breakdown", "SHORT", 4.0, 1.2, 12, 52.0, 0.15, true, 1.0, "The broader market is trading sideways (Combined Z-Score), but Transfer Entropy (TE Osc) detects that peers are beginning to pull this asset down. High correlation (Basket Fit) and rising momentum (BURST Osc) confirm the drop.", 0, 120, 1073741824, 4))
+        active.push(SetupConfig.new("N_TE_S", "Lead-Lag Breakdown", "SHORT", 4.0, 1.2, 12, 52.0, 0.15, true, 1.0, "TE", 0, 120, 1073741824, 4, "The broader market is trading sideways (Combined Z-Score), but Transfer Entropy (TE Osc) detects that peers are beginning to pull this asset down. High correlation (Basket Fit) and rising momentum (BURST Osc) confirm the drop.", 2, 1.0))
     
     // 10. N_TE_Long: Transfer Entropy driven long in neutral zone
     bool n_te_long = valid_te and (entryCtx == 1100) and (te > 0.05) and (basket > 30) and (mr > 0.3) and not vwapLongActive
     if n_te_long
-        active.push(SetupConfig.new("N_TE_L", "Lead-Lag Surge", "LONG", 4.0, 1.2, 12, 52.0, 0.15, true, 1.0, "Market is in an equilibrium state (Combined Z-Score), but predictive information flow (TE Osc) indicates peers will pull the asset higher. The asset is slightly oversold locally (MR Osc > 0.3), offering an optimal entry point.", 0, 221, 2147483648, 1))
+        active.push(SetupConfig.new("N_TE_L", "Lead-Lag Surge", "LONG", 4.0, 1.2, 12, 52.0, 0.15, true, 1.0, "TE", 0, 221, 2147483648, 1, "Market is in an equilibrium state (Combined Z-Score), but predictive information flow (TE Osc) indicates peers will pull the asset higher. The asset is slightly oversold locally (MR Osc > 0.3), offering an optimal entry point.", 2, 1.0))
 
     active
