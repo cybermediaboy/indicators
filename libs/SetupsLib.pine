@@ -126,28 +126,7 @@ export type SetupEvent
     float confidence
     int showstopper_hits
 
-// DEPRECATED: Flat-struct version - Use OscContext (array-based) instead - Remove in SetupsLib v7
-export type SetupContext
-    float vec_osc
-    float mr_osc
-    float te_osc
-    float corr_osc
-    float ltf_corr
-    float pred_slope
-    float vec_p25
-    float vec_p75
-    float mr_p25
-    float mr_p75
-    float mr_p2
-    float mr_p98
-    float te_p25
-    float te_p75
-    float corr_p20
-    float corr_p80
-    float ltf_p20
-    float ltf_p80
-    float pred_p25
-    float pred_p75
+// SetupContext removed in v22 - Use OscContext (array-based)
 
 export type OscContext
     array<float> values
@@ -261,65 +240,8 @@ export f_eval_showstoppers(int mask, OscContext ctx) =>
             triggered := true
     triggered
 
-// DEPRECATED: Use f_eval_showstoppers(mask, OscContext) instead - Remove in SetupsLib v7
-export f_check_showstoppers(SetupSpec spec, SetupContext ctx) =>
-    int mask = spec.showstopper_mask
-    int hits = 0
-    string reason = ""
-    bool blocked = false
-    if mask != SS_NONE
-        if math.floor(mask / SS_VEC_GT_P75) % 2 != 0 and not na(ctx.vec_osc) and not na(ctx.vec_p75) and ctx.vec_osc > ctx.vec_p75
-            hits += 1
-            reason += "vec>P75 "
-        if math.floor(mask / SS_VEC_LT_P25) % 2 != 0 and not na(ctx.vec_osc) and not na(ctx.vec_p25) and ctx.vec_osc < ctx.vec_p25
-            hits += 1
-            reason += "vec<P25 "
-        if math.floor(mask / SS_MR_GT_P75) % 2 != 0 and not na(ctx.mr_osc) and not na(ctx.mr_p75) and ctx.mr_osc > ctx.mr_p75
-            hits += 1
-            reason += "mr>P75 "
-        if math.floor(mask / SS_MR_LT_P25) % 2 != 0 and not na(ctx.mr_osc) and not na(ctx.mr_p25) and ctx.mr_osc < ctx.mr_p25
-            hits += 1
-            reason += "mr<P25 "
-        if math.floor(mask / SS_TE_GT_P75) % 2 != 0 and not na(ctx.te_osc) and not na(ctx.te_p75) and ctx.te_osc > ctx.te_p75
-            hits += 1
-            reason += "te>P75 "
-        if math.floor(mask / SS_TE_LT_P25) % 2 != 0 and not na(ctx.te_osc) and not na(ctx.te_p25) and ctx.te_osc < ctx.te_p25
-            hits += 1
-            reason += "te<P25 "
-        if math.floor(mask / SS_CORR_GT_P75) % 2 != 0 and not na(ctx.corr_osc) and not na(ctx.corr_p80) and ctx.corr_osc > ctx.corr_p80
-            hits += 1
-            reason += "corr>P80 "
-        if math.floor(mask / SS_CORR_LT_P25) % 2 != 0 and not na(ctx.corr_osc) and not na(ctx.corr_p20) and ctx.corr_osc < ctx.corr_p20
-            hits += 1
-            reason += "corr<P20 "
-        if math.floor(mask / SS_LTF_GT_P80) % 2 != 0 and not na(ctx.ltf_corr) and not na(ctx.ltf_p80) and ctx.ltf_corr > ctx.ltf_p80
-            hits += 1
-            reason += "ltf>P80 "
-        if math.floor(mask / SS_LTF_LT_P20) % 2 != 0 and not na(ctx.ltf_corr) and not na(ctx.ltf_p20) and ctx.ltf_corr < ctx.ltf_p20
-            hits += 1
-            reason += "ltf<P20 "
-        if math.floor(mask / SS_PRED_GT_P75) % 2 != 0 and not na(ctx.pred_slope) and not na(ctx.pred_p75) and ctx.pred_slope > ctx.pred_p75
-            hits += 1
-            reason += "pred>P75 "
-        if math.floor(mask / SS_PRED_LT_P25) % 2 != 0 and not na(ctx.pred_slope) and not na(ctx.pred_p25) and ctx.pred_slope < ctx.pred_p25
-            hits += 1
-            reason += "pred<P25 "
-        blocked := hits > 0
-    [blocked, hits, reason]
-
-export f_score_confidence(SetupSpec spec, SetupContext ctx, float impulse_strength) =>
-    float base = math.max(0.0, math.min(spec.wr / 100.0, 1.0))
-    float edge_ratio = spec.edge_ratio
-    string thesis = spec.thesis
-    float edge_bonus = edge_ratio > 1.2 ? 0.10 : (edge_ratio < 0.9 ? -0.15 : 0.0)
-    float impulse_pen = 0.0
-    if thesis == "MR" or thesis == "DECOUPLE"
-        impulse_pen := -impulse_strength * 0.20
-    float coupling_pen = 0.0
-    if thesis == "MOMENTUM" or thesis == "RECOUPLE"
-        if not na(ctx.ltf_corr) and not na(ctx.ltf_p20) and ctx.ltf_corr < ctx.ltf_p20
-            coupling_pen := -0.15
-    math.max(0.05, math.min(base + edge_bonus + impulse_pen + coupling_pen, 1.0))
+// f_check_showstoppers() removed in v22 - Use f_eval_showstoppers(mask, OscContext)
+// f_score_confidence() removed in v22 - Logic moved to f_register_event_v2()
 
 export f_register_event_v2(array<SetupEvent> events, bool condition, SetupSpec spec, OscContext ctx, float impulse_strength, string size_info) =>
     SetupEvent evt = na
@@ -581,7 +503,7 @@ export f_get_setup_horizon(array<SetupSpec> setup_db, string setup_id, int fallb
 // @function f_config_to_spec
 // @description Converts a SetupConfig (from setupsDBGem) to SetupSpec (SetupsLib native type)
 // @param cfg SetupConfig from setupsDBGem.evaluate_all()
-// @returns SetupSpec compatible with SetupsLib functions (f_register_event_v2, f_check_showstoppers, etc.)
+// @returns SetupSpec compatible with SetupsLib functions (f_register_event_v2, f_eval_showstoppers, etc.)
 export f_config_to_spec(string id, string name, string dir, float tp_pct, float sl_pct, int hold_bars, float wr, float sharpe, float edgeratio, string thesis, int showstopper_mask, int code, int mask, string tooltip, int thesisflags, float impulse_penalty_scale) =>
     SetupSpec.new(
         id                    = id,

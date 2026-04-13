@@ -1,8 +1,10 @@
-# CVB v21 — Technical Specification
+# CVB v22 — Technical Specification
 **Combined Vector Bands · SetupsLib · kNNMC Engine**
-Version: 2026-04-13 · Status: Post-refactoring (patch v20→v21 applied)
+Version: 2026-04-13 · Status: Post-refactoring (patch v20→v22 applied)
 
 **v21 Critical Fix**: Label cleanup now nullifies `rec.setup_label := na` **before** `label.delete()` to prevent dangling references. Phase 3 recreation detects evicted labels via `na(rec.setup_label) and not na(rec.label_y)`.
+
+**v22 Critical Fix**: `f_add_setup_label` eviction (cap=500) now nullifies `rec.setup_label` before delete, preventing dual-ownership dangling references. Removed deprecated `SetupContext`, `f_check_showstoppers`, `f_score_confidence` (~70 lines).
 
 ---
 
@@ -519,15 +521,20 @@ bool blocked = SetupsLib.fevalshowstoppers(spec.showstoppermask, oscCtx)
 | `f_calculate_confidence()` (6-feature) | DEPRECATED | Confidence computed in tournament |
 | `f_median_distance()` (6-feature) | DEPRECATED | Not used in v20 tournament |
 
-### 10.3 Deprecated in SetupsLib (marked for removal in v7)
+### 10.3 Removed from SetupsLib (v22)
+| Symbol | Removed in | Replacement |
+|--------|-----------|-------------|
+| `type SetupContext` | v22 | `OscContext` (array-based) |
+| `f_check_showstoppers(SetupSpec, SetupContext)` | v22 | `f_eval_showstoppers(mask, OscContext)` |
+| `f_score_confidence(SetupSpec, SetupContext, float)` | v22 | Logic integrated in `f_register_event_v2()` |
+
+### 10.4 Deprecated in SetupsLib (marked for future removal)
 | Symbol | Status | Replacement |
 |--------|--------|-------------|
-| `type SetupContext` | DEPRECATED | `OscContext` (array-based) |
-| `f_check_showstoppers(SetupSpec, SetupContext)` | DEPRECATED | `f_eval_showstoppers(mask, OscContext)` |
 | `f_find_setup_spec()` | DEPRECATED | `f_get_spec()` (returns SetupSpec object) |
-| `f_exit_logic()` | DEPRECATED | `f_evaluate_exit()` + `f_exit_label_text()` + `f_exit_label_color()` |
+| `f_exit_logic()` | DEPRECATED | `f_evaluate_exit()` + `f_update_exit_label()` + `f_get_exit_info()` |
 
-### 10.4 Legacy (pre-v19)
+### 10.5 Legacy (pre-v19)
 | Symbol | Removed in | Replacement |
 |--------|-----------|-------------|
 | `f_get_mc_family_from_setup()` | v19 | `SetupsLib.f_classify_market_state()` |

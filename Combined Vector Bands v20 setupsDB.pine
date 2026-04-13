@@ -2358,11 +2358,25 @@ f_add_setup_label(string setup_id, string setup_name, string dir, float wr, floa
                 break
         
         if idx_to_remove >= 0
+            // Nullify matching HistoricalSetup refs BEFORE delete (prevents dangling handles)
+            for j = 0 to array.size(bt_setups) - 1
+                HistoricalSetup rec = array.get(bt_setups, j)
+                if rec.setup_label == lbl_to_remove
+                    rec.setup_label := na
+                    array.set(bt_setups, j, rec)
+                    break
             array.remove(setup_labels, idx_to_remove)
             label.delete(lbl_to_remove)
         else
             // If all 500 are confirmed, we have to drop the oldest one anyway to make room
             old_lbl = array.shift(setup_labels)
+            // Nullify matching HistoricalSetup refs BEFORE delete
+            for j = 0 to array.size(bt_setups) - 1
+                HistoricalSetup rec = array.get(bt_setups, j)
+                if rec.setup_label == old_lbl
+                    rec.setup_label := na
+                    array.set(bt_setups, j, rec)
+                    break
             label.delete(old_lbl)
     
     string meta_name = setup_name
