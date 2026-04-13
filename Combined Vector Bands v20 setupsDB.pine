@@ -3,13 +3,13 @@
 
 //@version=6
 import cybermediaboy/CausalityLib/15 as CausalityLib
-import cybermediaboy/MCLib/12 as MCLib  // Phase 3: Deterministic PRNG export
-import cybermediaboy/SetupsLib/24 as SetupsLib
+import cybermediaboy/MCLib/13 as MCLib  // Phase 3: Deterministic PRNG export
+import cybermediaboy/SetupsLib/25 as SetupsLib
 import cybermediaboy/TAUtilityLib/53 as TAUtilityLib
-import cybermediaboy/kNNLib/19 as kNNLib  // Phase 2: Domain-agnostic category parameters
+import cybermediaboy/kNNLib/20 as kNNLib  // Phase 2: Domain-agnostic category parameters
 import cybermediaboy/BandsLib/5 as BandsLib
 import cybermediaboy/BasketLib/3 as BasketLib
-import cybermediaboy/setupsDBGem/9 as SetupsDB
+import cybermediaboy/setupsDBGem_private/1 as SetupsDB
 // To switch to scalping profile, change to: import cybermediaboy/setupsDBQuen/1 as SetupsDB
 indicator("Combined Vector Bands v20 setupsDB", shorttitle="CVB v20", overlay=true, max_boxes_count=500, max_labels_count=500, max_lines_count=500, dynamic_requests=true, max_bars_back=5000)
 
@@ -305,6 +305,7 @@ bt_enable = input.bool(true, "Enable Historical kNN+MC Validation", group=grp_ba
 bt_min_history = input.int(300, "Min History Bars for Validation", minval=100, maxval=2000, group=grp_backtest, tooltip="Skip setups before kNN had this many bars. 300 = ~3 days on 15m. Below this, kNN neighbors unreliable.")
 bt_mc_runs = input.int(200, "Backtest MC Runs per Setup", minval=50, maxval=1000, group=grp_backtest, tooltip="MC runs per historical setup. 200=fast, 500=precise. Lower than live 5000 because we run many setups.")
 bt_agree_pct = input.float(75.0, "MC Agreement Threshold %", minval=51.0, maxval=90.0, step=1.0, group=grp_backtest, tooltip="MC oracle must agree with setup direction by >= this % to count as confirmed. 75% = strong filter, rejects weak setups.")
+bt_confidence_thresh = input.float(40.0, "kNN Confidence Threshold %", minval=0.0, maxval=100.0, step=5.0, group=grp_backtest, tooltip="Min kNN fill ratio (found/K * 100). Low value = sparse history or poor pattern match. 40% = at least 20/50 neighbors found.")
 bt_heavy_budget = input.int(8, "Validations per Tick", minval=5, maxval=100, group=grp_backtest, tooltip="Max setups to validate per realtime tick. Higher = faster backtest completion but may cause timeout. 8=safe, 50=fast, 100=aggressive. Increase if backtest is slow.")
 fee_pct = input.float(0.15, "Round-trip Fee %", minval=0.0, step=0.01, group=grp_backtest, tooltip="Trading fees deducted from PnL (entry + exit). 0.15% = typical spot market round-trip cost.")
 bt_show_table = input.bool(true, "Show Backtest Summary Table", group=grp_backtest, tooltip="Aggregate stats: raw setups vs kNN+MC filtered.")
@@ -374,6 +375,7 @@ type HistoricalSetup
     float label_y         // Entry price for label recreation
     string label_text     // Label text for recreation
     color label_color     // Initial label color for recreation
+    string orig_tooltip   // Original entry tooltip for Phase 3 augmentation with kNN/MC results
 
 // --- HELPER FUNCTIONS ---
 // V19: f_get_mc_family_from_context() removed - use SetupsLib.f_classify_market_state() instead
@@ -2317,9 +2319,11 @@ f_open_position(string setup_id, string dir, string fire_dir, float wr, float tp
     int trend_code = f_pack_signed(est_trend, 100.0, 32, 63)
     int vec_code = f_pack_signed(basket_vec_z, 100.0, 32, 63)
     int damp_code = int(math.round(math.max(0.0, math.min(corr_damping, 1.0)) * 63.0))
-    int mr_code = f_pack_signed(mr_osc, 32.0, 32, 63)
-    int te_code = f_pack_signed(te_osc, 32.0, 32, 63)
+    int mr_code = f_pack_signed(mr_osc, 32.0, 32, 63)  // TODO: Should use mr_for_setups (routing source), but not in scope here
+    int te_code = na(te_osc) ? 0 : f_pack_signed(te_osc, 32.0, 32, 63) + 1  // 0=na (warmup), 1..64=packed value
     int rr_code = int(math.round(math.max(0.0, math.min(rrr, 6.3)) * 10.0))
+    // entry_ctx bit-field decode: setup_code[0-31] + oracle_flipped[32] + family[64-448] + z0[512-32256] + trend[32768-2064384] + vec[2097152-132120576] + damp[134217728-8455716864] + mr[8589934592-541165879296] + te[549755813888-35184372088832] + rr[35184372088832-2251799813685248]
+    // NOTE: te_code uses na-sentinel: 0=na (warmup period), 1-64=packed value. Decode: te_raw = (te_code - 1) / 32.0 - 1.0 if te_code > 0 else na
     float entry_ctx = setup_code + oracle_flipped * 32.0 + family_code * 64.0 + z0_code * 512.0 + trend_code * 32768.0 + vec_code * 2097152.0 + damp_code * 134217728.0 + mr_code * 8589934592.0 + te_code * 549755813888.0 + rr_code * 35184372088832.0
     [next_pos, entry_ctx]
 
@@ -2480,6 +2484,7 @@ f_fire_setup(string fire_setup_id, string fire_setup_name, string setup_dir, str
         rec.label_y := close
         rec.label_text := fire_setup_id
         rec.label_color := fire_dir == "LONG" ? color.new(color.lime, 80) : color.new(color.red, 80)
+        rec.orig_tooltip := full_tooltip  // Save original tooltip for Phase 3 kNN/MC result augmentation
         array.push(bt_setups, rec)
         // Instant MC validation disabled (token-saving placeholder)
 
@@ -2754,8 +2759,8 @@ if bt_phase == 1 and allow_bt_chunk and mc_finished
         // NEW: Direction agreement percentage for concordance filter
         rec.mc_dir_pct := total_paths > 0 ? dir_agree * 100.0 / total_paths : na
         
-        // CONCORDANCE FILTER: Use directional agreement for gate, TP/SL for RR quality
-        bool strength_ok = not na(rec.mc_dir_pct) and rec.mc_dir_pct >= bt_agree_pct
+        // CONCORDANCE FILTER: Use directional agreement + kNN confidence for gate, TP/SL for RR quality
+        bool strength_ok = not na(rec.mc_dir_pct) and rec.mc_dir_pct >= bt_agree_pct and (na(rec.mc_confidence) or rec.mc_confidence >= bt_confidence_thresh)
         bool direction_match = false
         
         // Track long/short agreement separately for mc_oracle_dir (needed outside if/else)
@@ -2815,6 +2820,9 @@ if bt_phase == 1 and allow_bt_chunk and mc_finished
                                (is_win_bt ? color.new(color.red, 0) : color.new(color.maroon, 0))) : 
                  color.new(is_long_bt ? color.lime : color.red, 80)
             label.set_color(rec.setup_label, new_col)
+            // Update tooltip with kNN/MC results (Phase 1 inline)
+            string upd_tooltip = rec.orig_tooltip + "\n--- kNN/MC Result ---\nkNN Conf: " + str.tostring(nz(rec.mc_confidence, 0.0), "#.1") + "%\nDir Agree: " + str.tostring(nz(rec.mc_dir_pct, 0.0), "#.1") + "%\nConfirmed: " + (rec.mc_confirmed ? "YES" : "NO") + "\nkNN Cands: " + str.tostring(nz(rec.knn_cands, 0)) + "\nActual PnL: " + str.tostring(nz(rec.actual_pnl, 0.0), "#.2") + "%"
+            label.set_tooltip(rec.setup_label, upd_tooltip)
         
         // P2: CSV export logging per setup for scatter plot analysis
         if not na(rec.mc_pct_agree) and not na(rec.actual_pnl)
@@ -2960,11 +2968,17 @@ if bt_phase >= 3 and barstate.isrealtime
                     // Win: solid bright colors, Loss: dark colors (no transparency)
                     color new_col = is_long_bt ? (is_win_bt ? color.new(color.lime, 0) : color.new(color.green, 0)) : (is_win_bt ? color.new(color.red, 0) : color.new(color.maroon, 0))
                     label.set_color(rec.setup_label, new_col)
+                    // Update tooltip with kNN/MC results (Phase 3 Pass 3)
+                    string upd_tooltip = rec.orig_tooltip + "\n--- kNN/MC Result ---\nkNN Conf: " + str.tostring(nz(rec.mc_confidence, 0.0), "#.1") + "%\nDir Agree: " + str.tostring(nz(rec.mc_dir_pct, 0.0), "#.1") + "%\nConfirmed: YES\nkNN Cands: " + str.tostring(nz(rec.knn_cands, 0)) + "\nActual PnL: " + str.tostring(nz(rec.actual_pnl, 0.0), "#.2") + "%"
+                    label.set_tooltip(rec.setup_label, upd_tooltip)
                     // Text annotations only if debug flag enabled
                     if show_setupsdb_debug
                         label.set_text(rec.setup_label, rec.setup_id + (is_win_bt ? " W" : " X"))
                 else
                     label.set_color(rec.setup_label, color.new(is_long_bt ? color.lime : color.red, 80))
+                    // Update tooltip for unconfirmed setups
+                    string upd_tooltip_unc = rec.orig_tooltip + "\n--- kNN/MC Result ---\nkNN Conf: " + str.tostring(nz(rec.mc_confidence, 0.0), "#.1") + "%\nDir Agree: " + str.tostring(nz(rec.mc_dir_pct, 0.0), "#.1") + "%\nConfirmed: NO\nkNN Cands: " + str.tostring(nz(rec.knn_cands, 0))
+                    label.set_tooltip(rec.setup_label, upd_tooltip_unc)
                     if show_setupsdb_debug
                         label.set_text(rec.setup_label, rec.setup_id + " ?")
         current_painted_labels := painted_cnt
@@ -4307,11 +4321,7 @@ f_render_bt_summary_table(table tbl) =>
         // Progress row (includes Phase 3 label refresh status)
         int bt_size = array.size(bt_setups)
         bool phase3_done = bt_phase == 3 and bt_phase3_idx >= bt_size and not bt_phase3_overflow
-        string prog = bt_phase3_overflow ? "⚠ Overflow" : 
-                      phase3_done ? "✓ Done" : 
-                      bt_phase == 3 ? "Labels: " + str.tostring(bt_phase3_idx) + "/" + str.tostring(bt_size) :
-                      bt_table_ready ? "BT ✓" : 
-                      str.tostring(bt_validated_setups) + "/" + str.tostring(bt_actual_size)
+        string prog = bt_phase3_overflow ? "⚠ Overflow" : phase3_done ? "✓ Done" : bt_phase == 3 ? "Labels: " + str.tostring(bt_phase3_idx) + "/" + str.tostring(bt_size) : bt_table_ready ? "BT ✓" : str.tostring(bt_validated_setups) + "/" + str.tostring(bt_total_setups)
         color prog_color = bt_phase3_overflow ? color.orange : phase3_done ? color.lime : color.gray
         table.cell(tbl, 0, 7, "Progress", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
         table.cell(tbl, 1, 7, prog, bgcolor=row_bg, text_color=prog_color, text_size=size.tiny)
