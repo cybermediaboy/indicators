@@ -4268,24 +4268,21 @@ f_render_bt_summary_table(table tbl) =>
     else
         color hdr_bg = color.new(color.gray, 30)
         color row_bg = color.new(color.black, 20)
-        // All Setups metrics
-        float all_wr = bt_all_total > 0 ? bt_all_wins * 100.0 / bt_all_total : 0.0
-        float all_avg = bt_all_total > 0 ? bt_all_pnl_sum / bt_all_total : 0.0
-        float all_var = bt_all_total > 1 ? bt_all_m2 / (bt_all_total - 1) : 0.0
-        float all_sharpe = all_var > 0 ? all_avg / math.sqrt(all_var) : 0.0
-        float all_rr = bt_all_mae_sum > 0 ? bt_all_mfe_sum / bt_all_mae_sum : 0.0
+        // Extract metrics from AggResult (computed in Phase 2)
+        float all_wr = not na(bt_agg_all) and bt_agg_all.total > 0 ? bt_agg_all.wins * 100.0 / bt_agg_all.total : 0.0
+        float all_avg = not na(bt_agg_all) ? nz(bt_agg_all.avg_pnl, 0.0) : 0.0
+        float all_sharpe = not na(bt_agg_all) ? nz(bt_agg_all.sharpe, 0.0) : 0.0
+        float all_rr = not na(bt_agg_all) ? nz(bt_agg_all.mfe_mae, 0.0) : 0.0
         // Validated metrics
-        float raw_wr = bt_raw_total > 0 ? bt_raw_wins * 100.0 / bt_raw_total : 0.0
-        float raw_avg = bt_raw_total > 0 ? bt_raw_pnl_sum / bt_raw_total : 0.0
-        float raw_var = bt_raw_total > 1 ? bt_raw_m2 / (bt_raw_total - 1) : 0.0
-        float raw_sharpe = raw_var > 0 ? raw_avg / math.sqrt(raw_var) : 0.0
-        float raw_rr = bt_raw_mae_sum > 0 ? bt_raw_mfe_sum / bt_raw_mae_sum : 0.0
+        float raw_wr = not na(bt_agg_validated) and bt_agg_validated.total > 0 ? bt_agg_validated.wins * 100.0 / bt_agg_validated.total : 0.0
+        float raw_avg = not na(bt_agg_validated) ? nz(bt_agg_validated.avg_pnl, 0.0) : 0.0
+        float raw_sharpe = not na(bt_agg_validated) ? nz(bt_agg_validated.sharpe, 0.0) : 0.0
+        float raw_rr = not na(bt_agg_validated) ? nz(bt_agg_validated.mfe_mae, 0.0) : 0.0
         // MC Conf metrics
-        float filt_wr = bt_filt_total > 0 ? bt_filt_wins * 100.0 / bt_filt_total : 0.0
-        float filt_avg = bt_filt_total > 0 ? bt_filt_pnl_sum / bt_filt_total : 0.0
-        float filt_var = bt_filt_total > 1 ? bt_filt_m2 / (bt_filt_total - 1) : 0.0
-        float filt_sharpe = filt_var > 0 ? filt_avg / math.sqrt(filt_var) : 0.0
-        float filt_rr = bt_filt_mae_sum > 0 ? bt_filt_mfe_sum / bt_filt_mae_sum : 0.0
+        float filt_wr = not na(bt_agg_mcconf) and bt_agg_mcconf.total > 0 ? bt_agg_mcconf.wins * 100.0 / bt_agg_mcconf.total : 0.0
+        float filt_avg = not na(bt_agg_mcconf) ? nz(bt_agg_mcconf.avg_pnl, 0.0) : 0.0
+        float filt_sharpe = not na(bt_agg_mcconf) ? nz(bt_agg_mcconf.sharpe, 0.0) : 0.0
+        float filt_rr = not na(bt_agg_mcconf) ? nz(bt_agg_mcconf.mfe_mae, 0.0) : 0.0
         table.cell(tbl, 0, 0, "kNN+MC Backtest", bgcolor=hdr_bg, text_color=color.white, text_size=size.small)
         table.cell(tbl, 1, 0, "All Setups", bgcolor=hdr_bg, text_color=color.gray, text_size=size.small, tooltip="All fired setups (no validation)")
         string val_filters = "kNN≥" + str.tostring(bt_confidence_thresh, "#") + "%"
@@ -4321,9 +4318,9 @@ f_render_bt_summary_table(table tbl) =>
         
         // Setups count
         table.cell(tbl, 0, 5, "Setups", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
-        table.cell(tbl, 1, 5, str.tostring(bt_all_total), bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
-        table.cell(tbl, 2, 5, str.tostring(bt_raw_total), bgcolor=row_bg, text_color=color.yellow, text_size=size.tiny)
-        table.cell(tbl, 3, 5, str.tostring(bt_filt_total), bgcolor=row_bg, text_color=color.aqua, text_size=size.tiny)
+        table.cell(tbl, 1, 5, not na(bt_agg_all) ? str.tostring(bt_agg_all.total) : "0", bgcolor=row_bg, text_color=color.gray, text_size=size.tiny)
+        table.cell(tbl, 2, 5, not na(bt_agg_validated) ? str.tostring(bt_agg_validated.total) : "0", bgcolor=row_bg, text_color=color.yellow, text_size=size.tiny)
+        table.cell(tbl, 3, 5, not na(bt_agg_mcconf) ? str.tostring(bt_agg_mcconf.total) : "0", bgcolor=row_bg, text_color=color.aqua, text_size=size.tiny)
         
         // Criteria
         table.cell(tbl, 0, 6, "Criteria", bgcolor=row_bg, text_color=color.white, text_size=size.tiny)
