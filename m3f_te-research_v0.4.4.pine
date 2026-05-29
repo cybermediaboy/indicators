@@ -1,0 +1,2529 @@
+//@version=6
+// Product: m3f_te-research (Macro Factor Fusion — Transfer Entropy Research)
+// Version: v0.4.5
+// Lineage: Independent product. Not to be merged with m3f_sssm.
+// Features: Dual-speed TE (fast/slow blend), carry-forward decay with age counters, live mask quality gate, adaptive Kalman betas, β-leak defense (BLD), liquidity-grab detector (LGD), macro coherence score (MCS), shock strength tiering (SSS)
+// Absent: SSSM regime-switching, Hamilton filter, K-means clustering, Kim smoother (see m3f_sssm)
+// Last verified: 2026-05-28 — v0.4.4 determinism MD5 b5e842eadac5685d2f1dc10700c57d66; v0.4.5 adds SSS 5-tier system, FX/Equity confirmers (USDJPY/ES/DXY), sync-score, Kalman-divergence flag, LIQ category
+indicator("Crypto Macro 3-Factor Expectations v0.4.5", shorttitle="3-Macro implied v0.4.5", overlay=false, precision=2, max_labels_count=500)
+// v0.4.4 — Dirty Ticker Data Hardening (CyberCausalityLib/8 Layers 2-4):
+//   NEW) Bar activity filter: classifies each factor bar as live/stale
+//   NEW) Live-mask parallel arrays for TE pipeline — stale bars excluded from
+//        joint probability estimation, preventing zero-variance contamination
+//   NEW) Variance-gated Granger correlation: carry-forward on low-variance bars
+//   NEW) Auto-LTF calculation for spike engine (removes manual dropdown)
+// v0.4.3.3 base hotfixes preserved (A-K)
+import cybermediaboy/CyberCausalityLib/10 as CL
+import cybermediaboy/BasketLib/5 as BL
+import cybermediaboy/CyberVisLib/1 as CVL
+
+// ─── INPUTS ───────────────────────────────────────────────────────────────────
+// FIX v0.4: Dual-speed TE (fast 20 + slow 60, blended by sign-agreement weight)
+te_win_fast = input.int(20,  "TE Fast Window", minval=15, maxval=60,  group="Transfer Entropy")
+te_win_slow = input.int(60,  "TE Slow Window", minval=40, maxval=200, group="Transfer Entropy")
+te_bins          = input.int(4,   "TE Bins",         minval=3,  maxval=8,   group="Transfer Entropy")
+te_lag_min_vix   = input.int(1,   "VIX Lag Min",  minval=1, maxval=20, group="Transfer Entropy")
+te_lag_max_vix   = input.int(14,  "VIX Lag Max",  minval=1, maxval=30, group="Transfer Entropy")
+te_lag_min_horc  = input.int(6,   "HORC Lag Min", minval=1, maxval=20, group="Transfer Entropy")
+te_lag_max_horc  = input.int(16,  "HORC Lag Max", minval=1, maxval=30, group="Transfer Entropy")
+te_lag_min_bei   = input.int(1,   "BEI Lag Min",  minval=1, maxval=20, group="Transfer Entropy")
+te_lag_max_bei   = input.int(6,   "BEI Lag Max",  minval=1, maxval=20, group="Transfer Entropy")
+te_coupling_floor= input.float(0.0,  "TE Coupling Floor",  minval=0.0, maxval=1.0,    step=0.05,  group="Transfer Entropy", tooltip="Minimum coupling_damping to allow TE signal through. 0 = always pass.")
+te_temp          = input.float(1.5,  "TE Softmax Temp",    minval=0.5, maxval=5.0,    step=0.5,   group="Transfer Entropy")
+te_hist_bars     = input.int(1100,   "TE History Bars",    minval=200, maxval=10000,   step=100,   group="Transfer Entropy",
+                 tooltip="Bars of history to run TE on. Larger = more context for Kalman + NTE opacity, slower load. Default 1100 ≈ 23 days on 30m (raised for macro shock retroactive labeling).")
+
+vix_fast  = input.int(10,    "Fast SS",        minval=3,  group="VIX Contango")
+vix_slow  = input.int(100,   "Slow SS",        minval=20, group="VIX Contango")
+vix_zlen  = nz(input.int(100,   "Z-Score Len",    minval=20, group="VIX Contango"), 100)
+asset_class   = input.string("Crypto", "Asset Class",          options=["Crypto", "Shares", "Commodities"], group="VIX Contango",
+              tooltip="Selects the spot-vol proxy that blends with the VX1!/VX2! term structure. Crypto = DVOL (BTC implied vol). Shares = VIX spot; still uses VX contango + level blend. Commodities = OVX (oil) or GVZ (gold) fed directly into MACD — no VX ratio scaling.")
+dvol_tk        = input.string("VOLMEX:BVIV",  "Crypto Vol Ticker",   group="VIX Contango",
+              tooltip="VOLMEX:BVIV (BTC 30D IV, real-time 24/7) or VOLMEX:EVIV (ETH). Methodologically equivalent to VIX — constant 30D forward IV from multi-exchange option flow.")
+vol_shares_tk  = input.string("CBOE:VIX9D",  "Shares Vol Near",     group="VIX Contango",
+              tooltip="Front-end cash VIX (9-day). Most sensitive stress detector: VIX9D/VIX3M term ratio > 1 = backwardation = acute fear.")
+vol_shares2_tk = input.string("CBOE:VIX3M",  "Shares Vol Far",      group="VIX Contango",
+              tooltip="Far-end cash VIX (3-month). Combined with near ticker as VIX_near/VIX_far term ratio — analogous to VX1!/VX2! but on cash curve.")
+vol_comm_tk    = input.string("CBOE:OVX",    "Commodity Vol Ticker", group="VIX Contango",
+              tooltip="CBOE:OVX (crude oil) or CBOE:GVZ (gold). Fed as vol/EMA(200)−1 deviation into the MACD. Sign adapted via rolling vol-price correlation (fear-like vs momentum-like).")
+
+horc_fast = input.int(14,    "Fast SS",        minval=3,  group="HORC (Rate Cuts)")
+horc_slow = input.int(100,   "Slow SS",        minval=20, group="HORC (Rate Cuts)")
+horc_zlen = nz(input.int(100,   "Z-Score Len",    minval=20, group="HORC (Rate Cuts)"), 100)
+horc_kq   = input.float(0.00001,  "SOFR Kalman Q", minval=0.000001, step=0.000001, group="HORC (Rate Cuts)", tooltip="Process noise for SOFR tick pre-filter. Smaller = smoother, more lag.")
+horc_kr   = input.float(0.000025, "SOFR Kalman R", minval=0.000001, step=0.000001, group="HORC (Rate Cuts)", tooltip="Observation noise ≈ (tick/2)² for SOFR spread. Default = 4×(0.005/2)².")
+
+bei_fast  = input.int(10,    "Fast SS",        minval=3,  group="BEI (Inflation)")
+bei_slow  = input.int(100,   "Slow SS",        minval=20, group="BEI (Inflation)")
+bei_zlen  = nz(input.int(100,   "Z-Score Len",    minval=20, group="BEI (Inflation)"), 100)
+
+base_Q    = input.float(0.005, "Kalman Q",     minval=0.0001, step=0.001, group="Kalman")
+base_R    = input.float(0.1,   "Kalman R",     minval=0.01,   step=0.01,  group="Kalman")
+adap_q    = input.bool(false,  "Adaptive Q (vol-scaled)", group="Kalman")
+
+show_comp   = input.bool(true,  "Show Factor Components", group="Display")
+show_te     = input.bool(true,  "Show TE Weights",         group="Display")
+show_debug  = input.bool(true,  "Debug (Data Window)",     group="Display")
+show_activity = input.bool(true,  "Show Model Activity (MAS)", group="Display",
+              tooltip="Realtime-only. Measures whether the last N 1-min BTC moves are aligned with and trending in the current macro model direction. Green (>65) = macro actively driving intrabar moves — counter-moves are noise. Red (<35) = macro inactive intrabar — any move can persist.")
+mas_granules  = input.int(90,    "MAS 1m Lookback",         minval=20, maxval=200, step=10, group="Display",
+              tooltip="Number of 1-min bars for the Model Activity Score. 90 = last 90 min ≈ 3 bars on 30m chart. Score combines: directional alignment of 1m moves with macro direction (70%) + return autocorrelation / trending quality (30%).")
+show_mas_hist  = input.bool(true,  "Show MAS on History",     group="Display",
+               tooltip="Historical MAS: per-bar directional alignment of LTF sub-bar returns vs macro direction, computed on every bar within the last te_hist_bars range. Unlike the 1m realtime MAS (realtime-only), this works on full history.")
+
+// Three-stage macro shock lifecycle v0.4.6
+int   stage_c_confirm_bars = input.int(6,    "Stage C Confirm Window",  minval=3,    maxval=12,  step=1,    group="Macro Shock Labels", tooltip="Bars after Stage B classify before Stage C BTC reaction check fires. Default 6 = 3h on 30m.")
+float ltf_onset_sigma      = input.float(3.0, "Stage A \u03c3 threshold",    minval=1.5,  maxval=5.0, step=0.1,  group="Macro Shock Labels", tooltip="5m LTF flash-z sigma to fire Stage A ONSET label. 3.0 = recommended (64% grad rate, 4 false onsets). Lower to 2.25 for more onset coverage (62% grad rate, 6 false onsets).")
+int   ltf_dwell_subbars    = input.int(2,    "LTF dwell (5m sub-bars)", minval=1,    maxval=6,   step=1,    group="Macro Shock Labels", tooltip="Consecutive 5m sub-bars the flash-z must hold ≥ σ threshold. 2 = recommended (kills single-bar flash artifacts). Higher = stricter gate, fewer onsets.")
+int   onset_window_min     = input.int(180,  "Onset→classify window (min)", minval=30, maxval=360, step=15,   group="Macro Shock Labels", tooltip="Wall-clock time (minutes) allowed for onset to graduate to Stage B. 180 min = 3h constant across all timeframes (12 bars on 15m, 6 on 30m, 3 on 1h). Tighter than legacy 20-bar fixed count.")
+float stage_c_atr_thr      = input.float(0.5, "Stage C ATR threshold",  minval=0.25, maxval=2.0, step=0.25, group="Macro Shock Labels", tooltip="BTC move (close-to-close from onset) / ATR(20) threshold to count as obeyed or defied.")
+float stage_c_vol_thr      = input.float(0.7, "Stage C VOL magnitude floor", minval=0.1, maxval=2.0, step=0.1,  group="Macro Shock Labels", tooltip="ATR-sigma magnitude threshold for VOL-category confirm. ~0.8x directional (VOL events run ~22% smaller median move).")
+
+// Auto-calculate LTF from chart timeframe with 4-8x ratio
+// CTF → LTF mapping: 30m→5m (6x), 60m→10m (6x), 240m→30m (8x), 1D→240m (6x)
+int _ctf_minutes = timeframe.in_seconds() / 60
+string mas_hist_tf = 
+     _ctf_minutes >= 1440 ? "240" :  // Daily → 4H
+     _ctf_minutes >= 240  ? "60"  :  // 4H → 1H (4x)
+     _ctf_minutes >= 60   ? "15"  :  // 1H → 15m (4x)
+     _ctf_minutes >= 30   ? "5"   :  // 30m → 5m (6x)
+     _ctf_minutes >= 15   ? "5"   :  // 15m → 5m (3x)
+     "5"                             // <15m → 5m
+show_pred      = input.bool(false,  "Show Predictive Overlay", group="Display",
+              tooltip="Three overlay lines: (1) purple = per-factor lagged predictor (historical alignment); (2) aqua circles = VIX+BEI near-term fwd at offset=te_lag_min_vix (30m); (3) blue circles = HORC medium-term fwd at offset=te_lag_min_horc (3H).")
+show_near_fwd  = input.bool(false,  "Show Near-term Fwd (aqua, +1 bar)", group="Display",
+              tooltip="Aqua circles: VIX+BEI projected 1 bar ahead. Independent toggle — can be hidden while keeping the purple lagged predictor and HORC medium-term fwd visible.")
+clamp_mode  = input.string("atan", "Soft-Clamp Mode", options=["tanh", "atan", "algebraic"], group="Display",
+              tooltip="tanh: hyperbolic tangent (aggressive clamp near ±1). atan: arctan/π (gentler, slower saturation). algebraic: x/√(1+x²) (softest, most linear in mid-range).")
+clamp_sigma = input.float(1.5,  "Clamp Sigma", minval=0.5, maxval=5.0, step=0.5, group="Display",
+              tooltip="Width after RMS normalization. 1.5 ≈ saturation at ±2σ of raw_osc; higher = wider linear region.")
+
+// ─── FIX 3 — BTC-UP SIGN CONVENTION on legacy legs ──────────────────────────────
+bool _flip_vix  = input.bool(true,  "Flip VIX leg sign",  group="Sign Audit", tooltip="VIX up → BTC down → leg must be negative. True = apply sign flip to enforce BTC-up convention.")
+bool _flip_horc = input.bool(false, "Flip HORC leg sign", group="Sign Audit", tooltip="HORC (rate cuts) directional sign. Toggle if HORC composite points wrong way during clean macro shifts.")
+bool _flip_bei  = input.bool(true,  "Flip BEI leg sign",  group="Sign Audit", tooltip="BEI (inflation) up → risk-off → BTC down. True = apply sign flip.")
+
+// ─── FIX 1 — MACRO-AWARE SLOW PATH ──────────────────────────────────────────────
+float _macro_w = input.float(0.40, "Macro factor weight in slow osc", minval=0.0, maxval=1.0, step=0.05, group="Macro Blend",
+              tooltip="Weight of DXY/ES/USDJPY macro composite in slow-path oscillator. 0.4 = 40% macro factors, 60% VIX/HORC/BEI. Degrades to 0 when macro feeds unavailable.")
+
+// ─── VELOCITY & ACCELERATION (v0.4.1) ─────────────────────────────────────────
+// First and second derivatives of macro3f / MAS — surface regime flips 2-4 bars early.
+show_velo  = input.bool(true,  "Show Macro Velocity",  group="Velocity (v0.4.1)", tooltip="Histogram around 50 showing per-bar slope of macro3f. Bars colored by 3-bar smoothed NetTE alignment — vivid green/red = macro-confirmed, gray = unconfirmed.")
+show_accel = input.bool(false, "Show Macro Accel",     group="Velocity (v0.4.1)", tooltip="Dots showing 2nd derivative. When sign opposes velocity → early reversal warning (triangle marker). Off by default — enable for regime-flip detection.")
+show_velo_burst= input.bool(true, "Flash on Velocity Burst", group="Velocity (v0.4.1)", tooltip="Background flash when |velocity| > flash_thr × stdev(velocity, 200).")
+velo_len   = input.int(3,    "Velocity Smoothing",   group="Velocity (v0.4.1)", minval=1, maxval=10, tooltip="EMA length applied to bar-to-bar delta. 1 = raw, 3 = recommended for 15m-30m BTC.")
+accel_len  = input.int(2,    "Accel Smoothing",      group="Velocity (v0.4.1)", minval=1, maxval=5,  tooltip="Accel is naturally noisy — keep low (1-2).")
+velo_amp   = input.float(5.0,"Velocity Display ×",   group="Velocity (v0.4.1)", minval=1.0, maxval=20.0, step=0.5, tooltip="Visual amplification of histogram. Pure cosmetic.")
+flash_thr  = input.float(2.0,"Flash σ Threshold",    group="Velocity (v0.4.1)", minval=1.0, maxval=5.0, step=0.5, tooltip="Flash background when |velocity| > thr × stdev(velocity, 200). 2.0 fires on top ~5%.")
+accel_pct  = input.float(70.0,"Reversal Accel %ile", group="Velocity (v0.4.1)", minval=50.0, maxval=95.0, step=5.0, tooltip="Reversal arrows only when |accel| above this percentile of last 100 bars.")
+
+// ─── FACTOR SPIKE DOT ENGINE (v0.4.1) ────────────────────────────────────
+show_spike  = input.bool(true,  "Show Factor Spike Dots",  group="Velocity (v0.4.1)", tooltip="Tiny dot when raw factor tickers (BVIV / ZQ1 / RINF) show a sudden weighted directional move at MAS-LTF resolution. Threshold = top quantile of last N bars' |combined impact|. Green = bullish for BTC, red = bearish.")
+spike_qntl  = input.float(90.0, "Spike Quantile %",        group="Velocity (v0.4.1)", minval=70.0, maxval=99.0, step=1.0, tooltip="Top percentile of rolling |impact| buffer required to trigger. 90 = top 10% of recent bars.")
+spike_lkbk  = input.int(50,     "Spike Lookback Bars",     group="Velocity (v0.4.1)", minval=20, maxval=200,    step=10,  tooltip="Rolling window of |impact| values used for the quantile threshold. 50 ≈ 1 day on 30m.")
+spike_persist_min = input.int(1, "Min Persist LTF Candles", group="Velocity (v0.4.1)", minval=1, maxval=5, step=1, tooltip="Require spike to persist across N consecutive LTF candles before firing. 1 = instant (any single sub-bar spike), 2+ = filters single-candle noise, shows only sustained moves.")
+
+ramp_alpha   = input.float(0.10, "Handover Ramp α", minval=0.01, maxval=0.50, step=0.01, group="Soft Handover", tooltip="EMA speed for primary↔proxy transition. 0.10 ≈ 30-bar ramp.")
+sofr_far_tk  = input.string("CME:SR31!",  "SOFR Far (3M)",  group="Soft Handover")
+sofr_near_tk = input.string("CME:SR11!",  "SOFR Near (1M)", group="Soft Handover")
+
+// ─── MACRO COHERENCE SCORE (v0.4.2 Module A) ─────────────────────────────────
+// Per-bar 0..1 score: how aligned BTC return is with what factor Z + β predict.
+// Used to gate β-update in BLD (Module C) and to drive macro-pure blend (Module D).
+group_mcs  = "Macro Coherence Score (v0.4.2)"
+mcs_enable = input.bool(true,  "Enable MCS",                       group=group_mcs)
+mcs_btc_w  = input.float(0.4,  "Weight: BTC vs predicted",         minval=0.0, maxval=1.0, step=0.05, group=group_mcs)
+mcs_z_w    = input.float(0.3,  "Weight: factor Z activity",        minval=0.0, maxval=1.0, step=0.05, group=group_mcs)
+mcs_te_w   = input.float(0.3,  "Weight: TE lag agreement",         minval=0.0, maxval=1.0, step=0.05, group=group_mcs)
+mcs_smooth = input.int(4,      "EMA smoothing (slow ch)",          minval=2,   maxval=10,  group=group_mcs, tooltip="v0.4.3: dual-channel MCS. SLOW = this value. FAST = max(1, slow/2). mcs_val = min(fast, slow) — reacts quickly to sweeps while filtering noise.")
+mcs_show   = input.bool(true, "Show MCS in Subpane",             group=group_mcs)
+
+// ─── OBEDIENCE BACKGROUND GRADIENT ──────────────────────────────────────────
+ob_lookback = input.int(120, "Obedience lookback (bars)",     minval=50, group="Obedience BG")
+ob_ema      = input.int(10,  "Obedience EMA span",            minval=2,  group="Obedience BG")
+ob_band     = input.float(0.15, "Obedience hysteresis band",  minval=0.0, step=0.05, group="Obedience BG")
+ob_snap_thr = input.float(0.40, "Snap-back ROC threshold (3-bar)", minval=0.10, step=0.05, group="Obedience BG")
+ob_alpha    = input.int(92, "BG transparency (0=opaque, 100=invisible)", minval=70, maxval=99, group="Obedience BG")
+ob_clamp    = input.float(2.0, "BG saturation z-cap",         minval=0.5, step=0.1,  group="Obedience BG")
+
+// ─── SHOCK TIERING v0.4.5 ────────────────────────────────────────────────────
+groupshock = "Shock Tiering v0.4.5"
+shock_sensitivity = input.string("Normal", "Sensitivity preset", 
+                                 options=["Conservative","Normal","Aggressive"], group=groupshock,
+                                 tooltip="Conservative: fewer T3/T4 (thresholds 0.60/0.75/0.87/0.95). Normal: balanced (0.50/0.65/0.80/0.92). Aggressive: more sensitive (0.40/0.55/0.72/0.88).")
+shock_show_tiers  = input.string("T1+", "Minimum tier shown", 
+                                 options=["T1+","T2+","T3+"], group=groupshock,
+                                 tooltip="Filter label rendering by tier. T1+ = all tiers, T2+ = moderate+, T3+ = only extreme shocks.")
+shock_cooldown    = input.int(6, "Cooldown bars per category", minval=0, maxval=20, group=groupshock,
+                               tooltip="Minimum bars between labels of same category (VOL/RATE/INFL/MIX/LG/LIQ). Prevents label spam.")
+shock_show_legend = input.bool(true, "Show tier legend on last bar", group=groupshock,
+                                tooltip="Display tier threshold table in top-right corner.")
+shock_enable_confirmers = input.bool(true, "Enable FX/Equity confirmers (USDJPY, ES, DXY)", group=groupshock,
+                                     tooltip="Add 3 confirmer channels for sync-score. Toggle OFF for invariance test or if request.security budget is tight.")
+// DC thresholds as inputs (updated for weighted-sum DC formula)
+// Weighted-sum DC has wider range than multiplicative, so thresholds raised to 0.45/0.60
+dc_grey_thr_in = input.float(0.45, "DC grey threshold", minval=0.05, maxval=0.80, step=0.05, group=groupshock,
+                             tooltip="Minimum DC for grey '?'-suffixed label. Lower = more labels. Default 0.45 for weighted-sum DC.")
+dc_pass_thr_in = input.float(0.60, "DC confident threshold", minval=0.10, maxval=0.95, step=0.05, group=groupshock,
+                             tooltip="Minimum DC for full-color confident label. Lower = more confident labels. Default 0.60 for weighted-sum DC.")
+dc_grey_thr_liq_in = input.float(0.25, "DC grey threshold (LIQ/LG)", minval=0.05, maxval=0.60, step=0.05, group=groupshock,
+                             tooltip="DC threshold for liquidity-grab/sweep categories. Lower because grab signatures by definition have macro disagreement → lower coherence.")
+// Issue C fix: Category dominance threshold as input, lowered from 0.60 to 0.50
+dom_thr_in = input.float(0.50, "Category dominance threshold", minval=0.40, maxval=0.70, step=0.05, group=groupshock,
+                         tooltip="Minimum factor contribution fraction to assign single-factor category (VOL/RATE/INFL). Lower = more specific categories, less MIX. Default 0.50.")
+
+// Sensitivity preset → SSS thresholds (recomputed on input change)
+float t1_thr = shock_sensitivity == "Conservative" ? 0.60 : shock_sensitivity == "Aggressive" ? 0.40 : 0.50
+float t2_thr = shock_sensitivity == "Conservative" ? 0.75 : shock_sensitivity == "Aggressive" ? 0.55 : 0.65
+float t3_thr = shock_sensitivity == "Conservative" ? 0.87 : shock_sensitivity == "Aggressive" ? 0.72 : 0.80
+float t4_thr = shock_sensitivity == "Conservative" ? 0.95 : shock_sensitivity == "Aggressive" ? 0.88 : 0.92
+
+// ─── LIQUIDITY-GRAB DETECTOR (v0.4.2 Module B) ───────────────────────────────
+// Window-level detector with adaptive bar-count scan (§13.2). Identifies periods
+// where BTC moves substantially while factors stay flat OR move opposite to BTC.
+group_lgd      = "Liquidity-Grab Detector (v0.4.2)"
+lgd_enable     = input.bool(true,  "Enable LGD",                                group=group_lgd)
+lgd_win_min    = input.int(3,      "LGD Min Window (bars)",  minval=2, maxval=8,  group=group_lgd, tooltip="Minimum bars for grab detection. Manipulations <3 bars are too noisy to discriminate.")
+lgd_win_max    = input.int(12,     "LGD Max Window (bars)",  minval=6, maxval=20, group=group_lgd, tooltip="Maximum bars. Beyond this — likely genuine trend, not grab.")
+lgd_win_mode   = input.string("auto", "LGD Window Mode", options=["fixed","auto"], group=group_lgd, tooltip="auto: scans win_min..win_max each bar, fires on best-fit; fixed: uses win_max.")
+lgd_zdrift_max = input.float(0.6,  "Max Σ|ΔZ| over window",     minval=0.1, maxval=3.0, step=0.1, group=group_lgd, tooltip="Total combined factor-Z drift below this = factors silent")
+lgd_btc_min    = input.float(1.0,  "Min |Σ btc_z| over window", minval=0.5, maxval=4.0, step=0.1, group=group_lgd, tooltip="v0.4.3.3: lowered 1.5 → 1.0 after pack_AGE decode showed sinceLG=99 (LGD silent) across 5h with a textbook 13:00 sweep. BTC moved meaningfully despite silent factors.")
+lgd_osc_swing  = input.float(12.0, "Min macro3f swing",         minval=5.0, maxval=30.0, step=1.0, group=group_lgd)
+lgd_anticoh    = input.bool(true,  "Anti-Coherence Mode",       group=group_lgd, tooltip="Stricter: factor consensus must point OPPOSITE to BTC direction")
+lgd_te_floor   = input.float(0.0004, "TE Lag Comp Persistence", minval=0.0001, step=0.0001, group=group_lgd, tooltip="te_lag_comp must hold same sign for 80% of window above this magnitude (relaxed from 100%)")
+lgd_beta_amp   = input.float(0.30, "Min β Oscillation",         minval=0.10, maxval=1.0, step=0.05, group=group_lgd, tooltip="At least one β oscillates by this amplitude (signature of innovation feedback)")
+lgd_mcs_max    = input.float(0.55, "Max MCS during grab",       minval=0.20, maxval=0.80, step=0.05, group=group_lgd, tooltip="v0.4.3.3: raised 0.45 → 0.55. Forensic _pure_w_sm peaked at 0.405 (implies MCS dropped only to ~0.6, never below 0.45 threshold). MCS must average BELOW this for grab to qualify.")
+lgd_post_grab_freeze_bars = input.int(3, "Post-Grab Freeze Tail (bars)", minval=0, maxval=20, group=group_lgd, tooltip="v0.4.3 Fix C: bars to keep BLD L3 freeze active AFTER lg_active flips off. Prevents Kalman from re-engaging with still-decayed P on the first recovery shock, which causes catastrophic sign-flips. 0 = legacy v0.4.2 behavior.")
+lgd_show       = input.bool(true,  "Show Grab Zones (bgcolor + onset markers)", group=group_lgd)
+
+// ─── β-LEAK DEFENSE (v0.4.2 Module C) ────────────────────────────────────────
+// 4-layer defense replacing the standard Kalman update:
+//   L1 — Innovation clipping (robust MAD σ)
+//   L2 — MCS gating (skip when BTC↔macro incoherent)
+//   L3 — Freeze during active liquidity grab
+//   L4 — Adaptive macro-orthogonal skip (§13.3, σ-scaled per factor)
+group_bld    = "β-Leak Defense (v0.4.2)"
+bld_enable   = input.bool(true, "Enable BLD",                       group=group_bld, tooltip="When OFF, falls back to v0.4.1 unprotected Kalman update for backward compatibility.")
+bld_l1_clip  = input.bool(true, "L1: Innovation Clipping",          group=group_bld)
+bld_l1_k     = input.float(2.0, "  L1 Clip σ",         minval=1.0, maxval=4.0, step=0.25, group=group_bld)
+bld_l1_win   = input.int(100,   "  L1 σ Window",       minval=30,  maxval=500,  group=group_bld)
+bld_l2_mcs   = input.bool(true, "L2: MCS Gating",                   group=group_bld)
+bld_l2_thr   = input.float(0.40,"  L2 MCS Threshold",  minval=0.20, maxval=0.70, step=0.05, group=group_bld)
+bld_l3_lg    = input.bool(true, "L3: Freeze on LG",                 group=group_bld)
+bld_l4_orth  = input.bool(true, "L4: Macro-Orthogonal Skip",        group=group_bld)
+bld_l4_k     = input.float(0.7, "  L4 |obs_train| Min (σ)", minval=0.2, maxval=2.0, step=0.1, group=group_bld, tooltip="Minimum |obs_train| in σ-units of obs history. Adaptive per-factor.")
+bld_l4_win   = input.int(200,   "  L4 σ Window",       minval=50,  maxval=1000, group=group_bld)
+bld_decay    = input.float(0.99,"P Decay When Frozen", minval=0.95, maxval=1.0, step=0.005, group=group_bld)
+bld_show     = input.bool(false,"Show BLD Diagnostics", group=group_bld)
+
+// ─── MACRO-PURE OSCILLATOR (v0.4.2 Module D) ─────────────────────────────────
+// Alternate raw_osc path that uses long-EMA(β) instead of instantaneous β.
+// Insulates oscillator from idiosynkratic BTC moves during low-coherence periods.
+group_pure   = "Macro-Pure Oscillator (v0.4.2)"
+pure_mode    = input.string("auto", "Pure Mode", options=["off","auto","always"], group=group_pure, tooltip="off=std raw_osc only; auto=blend pure during LG/low-MCS; always=use pure")
+pure_blend   = input.float(0.0, "Manual Blend (0=std, 1=pure)", minval=0.0, maxval=1.0, step=0.1, group=group_pure, tooltip="Only used when pure_mode='off' AND manually > 0.")
+pure_ema_len = input.int(50,    "Pure β EMA Length",  minval=10, maxval=200, group=group_pure)
+
+// ─── v0.4.2 WARMUP GATE ──────────────────────────────────────────────────────
+// All v0.4.2 modules (MCS / LGD / BLD / Pure) consume NTE outputs (te_lag_comp,
+// nte-weighted β). Before NTE has measured anything they produce noise AND burn
+// compute (LGD multi-window scan is ~10× per-bar). Gate keeps the unprotected
+// v0.4.1 Kalman path active during warmup so β trains normally — modules engage
+// only once NTE has produced stable measurements + extra bars for β to settle.
+v042_warm_extra = input.int(100, "v0.4.2 Extra Warmup Bars",  minval=0,  maxval=500, group="v0.4.2 Warmup",
+                  tooltip="Bars to wait AFTER NTE first becomes valid (te_win_slow+eff_max+5) before MCS/LGD/BLD/Pure engage. Gives β time to converge under NTE-modulated weights. 0 = engage immediately on first NTE bar.")
+v042_force_off  = input.bool(false, "Force OFF (bypass v0.4.2 entirely)", group="v0.4.2 Warmup",
+                  tooltip="When ON, v0.4.2 modules stay disabled regardless of warmup state — matches v0.4.1 behaviour exactly. Useful for A/B regression testing.")
+
+// ─── LTF DATA (Model Activity Score) ─────────────────────────────────────────
+// 1m returns for each 1m bar within each CTF bar. Guard: only request if chart > 1m.
+array<float> _ltf_rets = request.security_lower_tf(syminfo.tickerid, "1", close / close[1] - 1)
+// Historical MAS LTF — coarser resolution, available on every confirmed bar
+array<float> _ltf_h = request.security_lower_tf(syminfo.tickerid, mas_hist_tf, close / close[1] - 1)
+
+// Factor Spike Engine LTF: raw factor ticker sub-bar deltas at mas_hist_tf resolution.
+// 5m-compatible 23/5 tickers (all have native 5m intraday data):
+//   VIX  side → dvol_tk (BVIV; 24/7 crypto-IV index, native 5m)
+//   HORC side → CBOT:ZN1! (10Y T-Note futures; CME Globex 23/5, native 5m)
+//               Sign: −1 (price↑ = yields↓ = cuts priced-in = bullish)
+//               Semantically equivalent to ZQ1! direction, but ZN1! has better 5m coverage
+//   BEI  side → COMEX:GC1! (gold; Globex 23/5, native 5m, inflation hedge)
+//               Sign: +1 (rising gold = inflation expectations up)
+// Note: AMEX:RINF and TVC:US02Y lack 5m data → removed. ZN1! and GC1! are both
+//       primary tickers with full 23/5 coverage, no proxy failover needed.
+array<float> _ltf_spike_vix       = request.security_lower_tf(dvol_tk,      mas_hist_tf, close - nz(close[1], close))
+array<float> _ltf_spike_horc      = request.security_lower_tf("CBOT:ZN1!",  mas_hist_tf, close - nz(close[1], close))
+array<float> _ltf_spike_horc_prx  = array.new<float>(0)  // No proxy needed — ZN1! is 23/5
+array<float> _ltf_spike_bei       = request.security_lower_tf("COMEX:GC1!", mas_hist_tf, close - nz(close[1], close))
+array<float> _ltf_spike_bei_prx   = array.new<float>(0)  // No proxy needed — GC1! is primary
+// Macro shock confirmers — LTF tracking for DXY, USDJPY, ES (added for two-phase shock labeling)
+array<float> _ltf_spike_dxy       = request.security_lower_tf("TVC:DXY",    mas_hist_tf, close - nz(close[1], close))
+array<float> _ltf_spike_usdjpy    = request.security_lower_tf("FX:USDJPY",  mas_hist_tf, close - nz(close[1], close))
+array<float> _ltf_spike_es        = request.security_lower_tf("CME_MINI:ES1!", mas_hist_tf, close - nz(close[1], close))
+
+// ─── DATA ─────────────────────────────────────────────────────────────────────
+vx1   = request.security("CBOE:VX1!",    timeframe.period, close, gaps=barmerge.gaps_off, ignore_invalid_symbol=true)
+vx2   = request.security("CBOE:VX2!",    timeframe.period, close, gaps=barmerge.gaps_off, ignore_invalid_symbol=true)
+dvol        = request.security(dvol_tk,       timeframe.period, close, gaps=barmerge.gaps_off, ignore_invalid_symbol=true)
+vol_shares  = request.security(vol_shares_tk,  timeframe.period, close, gaps=barmerge.gaps_off, ignore_invalid_symbol=true)
+vol_shares2 = request.security(vol_shares2_tk, timeframe.period, close, gaps=barmerge.gaps_off, ignore_invalid_symbol=true)
+vol_comm    = request.security(vol_comm_tk,    timeframe.period, close, gaps=barmerge.gaps_off, ignore_invalid_symbol=true)
+zq1   = request.security("CBOT:ZQ1!",    timeframe.period, close, gaps=barmerge.gaps_off, ignore_invalid_symbol=true)
+zq3   = request.security("CBOT:ZQ3!",    timeframe.period, close, gaps=barmerge.gaps_off, ignore_invalid_symbol=true)
+us2y  = request.security("TVC:US02Y",     timeframe.period, close, gaps=barmerge.gaps_off, ignore_invalid_symbol=true)
+us10y = request.security("TVC:US10Y",     timeframe.period, close, gaps=barmerge.gaps_off, ignore_invalid_symbol=true)
+tips  = request.security("TVC:US10YIEF",  timeframe.period, close, gaps=barmerge.gaps_off, ignore_invalid_symbol=true)
+gold     = request.security("COMEX:GC1!",    timeframe.period, close, gaps=barmerge.gaps_off, ignore_invalid_symbol=true)
+fred_bei = request.security("FRED:T10YIE",   timeframe.period, close, gaps=barmerge.gaps_off, ignore_invalid_symbol=true)
+sr3_far  = request.security(sofr_far_tk,  timeframe.period, close, gaps=barmerge.gaps_off, ignore_invalid_symbol=true)
+sr3_near = request.security(sofr_near_tk, timeframe.period, close, gaps=barmerge.gaps_off, ignore_invalid_symbol=true)
+zn       = request.security("CBOT:ZN1!",  timeframe.period, close, gaps=barmerge.gaps_off, ignore_invalid_symbol=true)
+rinf     = request.security("AMEX:RINF",  timeframe.period, close, gaps=barmerge.gaps_off, ignore_invalid_symbol=true)
+cl       = request.security("NYMEX:CL1!", timeframe.period, close, gaps=barmerge.gaps_off, ignore_invalid_symbol=true)
+t5y5     = request.security("FRED:T5YIFR","D",              close, gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+
+// ─── SHOCK TIERING v0.4.5: FX/EQUITY CONFIRMERS ──────────────────────────────
+// Three additional channels for multi-factor sync-score (toggle-gated by shock_enable_confirmers)
+// Phase 1 macro shock detector ALWAYS needs these — loaded unconditionally
+float _p1_usdjpy = request.security("FX:USDJPY",    timeframe.period, close, gaps=barmerge.gaps_off, ignore_invalid_symbol=true)
+float _p1_es     = request.security("CME_MINI:ES1!", timeframe.period, close, gaps=barmerge.gaps_off, ignore_invalid_symbol=true)
+float _p1_dxy    = request.security("TVC:DXY",       timeframe.period, close, gaps=barmerge.gaps_off, ignore_invalid_symbol=true)
+// SSS tier engine: only load if toggle is on (uses same data via alias)
+usdjpy = shock_enable_confirmers ? _p1_usdjpy : na
+es     = shock_enable_confirmers ? _p1_es     : na
+dxy    = shock_enable_confirmers ? _p1_dxy    : na
+
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
+// tanh: not in v6 stdlib — inline via exp identity
+f_tanh(float x) =>
+    float e2 = math.exp(2.0 * x)
+    (e2 - 1.0) / (e2 + 1.0)
+
+// MAD-based z-score normalization (v0.4.5 SSS helper)
+// Median Absolute Deviation: robust to outliers, matches v0.4.4 style
+f_mad_z(float src, int len) =>
+    float m = ta.sma(src, len)
+    float mad = ta.sma(math.abs(src - m), len) * 1.4826  // 1.4826 = 1/Φ^(-1)(0.75) for Gaussian consistency
+    (src - m) / math.max(mad, 1e-10)
+
+// Soft-clamp dispatcher: maps x ∈ ℝ → (-1, 1)
+// sigma scales the input: higher sigma = wider linear region before saturation
+f_softclamp(float x, string mode, float sigma) =>
+    float u = x / math.max(sigma, 1e-8)
+    float r = 0.0
+    if mode == "atan"
+        r := math.atan(u) / (math.pi / 2.0)
+    else if mode == "algebraic"
+        r := u / math.sqrt(1.0 + u * u)
+    else
+        float e2 = math.exp(2.0 * u)
+        r := (e2 - 1.0) / (e2 + 1.0)
+    r
+
+// Ehlers 2-pole SuperSmoother — var is per-call-site in Pine v6
+f_ss(float src, int len) =>
+    float a  = math.exp(-1.41421356 * math.pi / len)
+    float b  = 2.0 * a * math.cos(1.41421356 * math.pi / len)
+    float c2 = b
+    float c3 = -(a * a)
+    float c1 = 1.0 - c2 - c3
+    var float filt = 0.0
+    filt := c1 * (nz(src) + nz(src[1])) * 0.5 + c2 * nz(filt[1]) + c3 * nz(filt[2])
+    filt
+
+// Wake/sleep weight: +0.15/bar when primary moves, -0.05/bar on gaps
+f_factor_w(float val) =>
+    var float w = 0.0
+    bool alive = not na(val) and math.abs(nz(val) - nz(val[1])) > 1e-8
+    if alive
+        w := math.min(1.0, w + 0.15)
+    else
+        w := math.max(0.0, w - 0.05)
+    w
+
+// Log-quant a signed float to integer bucket 0..99 via atan compression.
+// 50 = zero, >50 = positive (scaled by `scale`), <50 = negative. Reversible:
+//   value ≈ scale * tan((q - 50) * π / 98)
+f_q99(float x, float scale) =>
+    float u = math.atan(x / math.max(scale, 1e-8)) / 1.5707963267948966
+    int(math.max(0.0, math.min(99.0, math.round(50.0 + 49.0 * u))))
+
+// Pack 6 quantized values (each 0..99) into one float via base-100 concat.
+// Decode: q1=floor(p)%100, q2=floor(p/100)%100, ..., q6=floor(p/1e10)%100.
+// Max packed value ≈ 9.9e11, well within float53 mantissa (2^53 ≈ 9e15).
+f_pack6q(int q1, int q2, int q3, int q4, int q5, int q6) =>
+    float(q1) + float(q2) * 100.0 + float(q3) * 10000.0 + float(q4) * 1000000.0 + float(q5) * 100000000.0 + float(q6) * 10000000000.0
+
+// Scalar Kalman pre-filter: smooths tick-discrete series (position-only model)
+// Eliminates step-function artifacts from min-tick rounding before Ehlers SS input
+f_kalman_smooth(float raw, float Q_pre, float R_pre) =>
+    var float x_est = 0.0
+    var float P_est = 1.0
+    float x_pred = x_est
+    float P_pred = P_est + Q_pre
+    float K      = P_pred / (P_pred + R_pre)
+    x_est := x_pred + K * (nz(raw, x_pred) - x_pred)
+    P_est := (1.0 - K) * P_pred
+    x_est
+
+// ─── FACTOR 1: VIX CONTANGO ───────────────────────────────────────────────────
+// VX1!/VX2! term structure blended with asset-class-specific spot vol proxy.
+// Crypto: BVIV (VOLMEX 30D IV, 24/7). Shares: VIX9D/VIX3M cash term ratio.
+// Commodities: OVX/GVZ as vol/EMA(200)-1 normalised deviation (dimensionless).
+float vx_ratio = not na(vx1) and not na(vx2) and vx2 > 0.0 ? vx1 / vx2 : na
+var float vx_hold = na
+if not na(vx_ratio)
+    vx_hold := vx_ratio
+float vix_w   = f_factor_w(vx_ratio)
+
+// Spot-vol source by asset class
+// Shares: VIX9D/VIX3M cash term ratio (dimensionless ~0.7-1.2; >1 = backwardation = stress)
+float vol_sh_near  = nz(vol_shares,  20.0)
+float vol_sh_far   = math.max(nz(vol_shares2, vol_sh_near * 1.15), 0.1)
+float vol_spot_val = asset_class == "Shares"      ? vol_sh_near / vol_sh_far :
+                     asset_class == "Commodities"  ? nz(vol_comm,  35.0) :
+                     nz(dvol, 50.0)   // Crypto: BVIV
+
+// Fast smoother (SS5) + universal 200-bar EMA for normalisation
+float vol_spot_ss  = f_ss(vol_spot_val, 5)
+float vol_ema200   = nz(ta.ema(vol_spot_val, 200), vol_spot_val)
+
+// VX long-term EMA tracking (used in vol_proxy blend for Crypto/Shares)
+var float mu_vxr = na
+bool vx_awake = not na(vx_ratio) and math.abs(nz(vx_ratio) - nz(vx_ratio[1])) > 1e-8
+if vx_awake
+    mu_vxr := na(mu_vxr) ? nz(vx_hold, 1.0) : mu_vxr * 0.999 + nz(vx_hold, 1.0) * 0.001
+
+// Level proxy: VX-trend × (200-EMA / fast-SS)— when current vol > 200-EMA, proxy < VX_trend = fear
+float vol_proxy = nz(mu_vxr, 1.0) * (vol_ema200 / math.max(vol_spot_ss, 0.1))
+// Normalised deviation for Commodities MACD: vol/EMA(200)-1 (dimensionless regime score)
+float vol_spot_norm = vol_spot_val / math.max(vol_ema200, 1e-10) - 1.0
+// vix_src: Crypto/Shares blend VX ratio with vol proxy; Commodities = normalised deviation
+float vix_src = nz(vx_hold, 1.0) * vix_w + vol_proxy * (1.0 - vix_w)
+if asset_class == "Commodities"
+    vix_src := vol_spot_norm
+
+float vix_fast_ss = f_ss(vix_src, vix_fast)
+float vix_slow_ss = f_ss(vix_src, vix_slow)
+float vix_macd    = vix_fast_ss - vix_slow_ss
+float vix_mean    = ta.sma(vix_macd, vix_zlen)
+float vix_mad     = math.max(ta.rma(math.abs(vix_macd - vix_mean), vix_zlen) * 1.2533, 1e-10)
+float z_vix       = (vix_macd - vix_mean) / vix_mad
+
+// ─── FACTOR 2: HORC (implied policy path → rate-cut expectations) ───────────────
+// Primary: ZQ3!−ZQ1! Fed Funds futures spread (CME; no 30m data → ramp→0 on intraday)
+// Proxy:   SR31!−SR1! SOFR futures spread (Globex 23/5; same implied policy path)
+float zq_spread   = not na(zq3) and not na(zq1) ? zq3 - zq1 : na
+// Kalman pre-filter: removes SOFR min-tick (0.005) step artifacts before Ehlers SS
+// (step-input into SS causes ringing; Kalman smooths each leg separately)
+float sr3_far_sm  = f_kalman_smooth(sr3_far,  horc_kq, horc_kr)
+float sr3_near_sm = f_kalman_smooth(sr3_near, horc_kq, horc_kr)
+float sr3_spread  = not na(sr3_far_sm) and not na(sr3_near_sm) ? sr3_far_sm - sr3_near_sm : na
+// BL.TickerState: hysteresis FSM — ZQ na on 30m → immediately asleep → SOFR proxy takes over
+// Wakes on daily TF when ZQ publishes; SLEEP=3, WAKE=2, WARMUP=14 (cubic ramp)
+var BL.TickerState st_horc = BL.TickerState.new()
+st_horc.update(BL.f_is_active_close(zq_spread, 1e-5), 3, 2, 14)
+// Calibration delta: anchors SOFR proxy to ZQ level when primary is live
+var float horc_delta = na
+if st_horc.is_live() and not na(sr3_spread)
+    float _hd = nz(zq_spread) - nz(sr3_spread)
+    horc_delta := na(horc_delta) ? _hd : horc_delta * 0.999 + _hd * 0.001
+float sr3_adj   = nz(sr3_spread) + nz(horc_delta, 0.0)
+float horc_ramp = BL.f_sw_ramp(st_horc.is_live())
+float horc_src  = BL.f_sw_blend(nz(zq_spread, sr3_adj), sr3_adj, horc_ramp)
+
+float horc_fast_ss = f_ss(horc_src, horc_fast)
+float horc_slow_ss = f_ss(horc_src, horc_slow)
+float horc_macd    = horc_fast_ss - horc_slow_ss
+float horc_mean    = ta.sma(horc_macd, horc_zlen)
+float horc_mad     = math.max(ta.rma(math.abs(horc_macd - horc_mean), horc_zlen) * 1.2533, 1e-10)
+float z_horc       = (horc_macd - horc_mean) / horc_mad
+
+// ─── FACTOR 3: BEI (implied breakeven inflation) — 3-level cascade ──────────
+// L1 Primary (RTH): AMEX:RINF (30Y implied BEI ETF, 9:30–16:00 ET)
+//                   → FRED:T10YIE (daily anchor) → TVC:US10Y−TIPS (daily)
+// L2 Proxy (23/5):  GC1! detrended + ZN1! nominal yield + CL1! oil momentum weight
+// L3 Anchor (daily): FRED:T5YIFR — 5Y5Y forward, slow EMA baseline
+
+// L1: RTH primary — RINF preferred (pure 30Y BEI), then FRED, then TVC spread
+float rinf_norm    = nz(rinf, 25.0) / math.max(ta.ema(nz(rinf, 25.0), 500), 0.01) - 1.0
+float bei_rth_rinf = not na(rinf) and math.abs(nz(rinf) - nz(rinf[1])) > 1e-6
+                     ? rinf_norm * 20.0 : na
+float bei_raw      = not na(us10y) and not na(tips) ? us10y - tips : na
+float bei_prim     = not na(bei_rth_rinf) ? bei_rth_rinf
+                     : not na(fred_bei)   ? fred_bei
+                     : bei_raw
+
+// L2: 23/5 GC+ZN synthetic proxy with CL oil momentum blend weight
+float gc_ln        = math.log(math.max(nz(gold, 1800.0), 1e-5))
+float gc_trend     = ta.ema(gc_ln, 200)
+float gc_detrended = gc_ln - gc_trend
+float zn_yield     = not na(zn) ? (100.0 - nz(zn, 110.0)) / 6.6 : 2.0
+float zn_yield_dev = zn_yield - ta.ema(zn_yield, 200)
+float bei_gc_raw   = gc_detrended - zn_yield_dev * 0.3
+float bei_gc_prox  = ta.ema(nz(bei_gc_raw), 20)
+float cl_mom       = not na(cl) ? ta.ema(nz(cl), 10) / math.max(ta.ema(nz(cl), 100), 0.01) - 1.0 : 0.0
+float oil_weight   = math.max(0.0, math.min(0.4, math.abs(cl_mom) * 10.0))
+float bei_proxy    = bei_gc_prox * (1.0 - oil_weight) + cl_mom * oil_weight
+
+// L3: T5YIFR slow EMA anchor (delta in f_blend auto-calibrates proxy to primary level)
+var float t5y5_anchor = na
+if not na(t5y5)
+    t5y5_anchor := na(t5y5_anchor) ? t5y5 : t5y5_anchor * 0.999 + t5y5 * 0.001
+
+// BL.TickerState: hysteresis FSM — primary ticks during NYSE hours (RINF) or once/day (FRED/TVC)
+// SLEEP=3, WAKE=2, WARMUP=14; f_sw_ramp fades in/out smoothly (+0.15/−0.05 per bar)
+var BL.TickerState st_bei = BL.TickerState.new()
+st_bei.update(BL.f_is_active_close(bei_prim, 1e-5), 3, 2, 14)
+// Calibration delta: anchors GC/ZN/CL proxy to primary BEI level at handover
+var float bei_delta = na
+if st_bei.is_live() and not na(bei_proxy)
+    float _bd = nz(bei_prim) - nz(bei_proxy)
+    bei_delta := na(bei_delta) ? _bd : bei_delta * 0.999 + _bd * 0.001
+float bei_proxy_adj = nz(bei_proxy) + nz(bei_delta, 0.0)
+float bei_ramp = BL.f_sw_ramp(st_bei.is_live())
+float bei_src  = BL.f_sw_blend(nz(bei_prim, bei_proxy_adj), bei_proxy_adj, bei_ramp)
+
+float bei_fast_ss = f_ss(bei_src, bei_fast)
+float bei_slow_ss = f_ss(bei_src, bei_slow)
+float bei_macd    = bei_fast_ss - bei_slow_ss
+float bei_mean    = ta.sma(bei_macd, bei_zlen)
+float bei_mad     = math.max(ta.rma(math.abs(bei_macd - bei_mean), bei_zlen) * 1.2533, 1e-10)
+float z_bei       = (bei_macd - bei_mean) / bei_mad
+
+// ─── ROLLING ARRAYS FOR TE ────────────────────────────────────────────────────
+// FIX: use separate var declarations instead of a struct to prevent Pine v6
+// struct-field aliasing where te.vix and te.horc could reference the same array
+// object (causing TE of a signal vs itself → w_vix == w_horc exactly every bar).
+var array<float> te_btc  = array.new<float>()
+var array<float> te_vix  = array.new<float>()
+var array<float> te_horc = array.new<float>()
+var array<float> te_bei  = array.new<float>()
+// v0.4.4: Live-mask arrays (parallel to TE arrays) for dirty data filtering.
+// 1.0 = bar had meaningful factor movement; 0.0 = stale/flat bar.
+var array<float> lm_btc  = array.new<float>()
+var array<float> lm_vix  = array.new<float>()
+var array<float> lm_horc = array.new<float>()
+var array<float> lm_bei  = array.new<float>()
+
+// FIX: max_arr = te_win_slow + eff_max + 10 ensures slow TE has enough data.
+// Old value (te_win_slow + 10 = 70) was smaller than te_win_slow + eff_horc = 76 → slow TE zeroed.
+float btc_ret = math.log(math.max(close / math.max(nz(close[1]), 1e-5), 1e-5))
+float btc_vol = ta.rma(math.abs(btc_ret), 20)
+// Note: eff_vix/horc/bei not yet computed here; use te_lag_max inputs directly
+int max_arr = te_win_slow + math.max(te_lag_max_vix, math.max(te_lag_max_horc, te_lag_max_bei)) + 10
+
+// v0.4.4: Layer 2 — Bar activity detection per factor.
+// BTC is always live (crypto 24/7). Factor tickers may be stale on weekends/gaps.
+float _abs_ret_v = math.abs(nz(z_vix)  - nz(z_vix[1]))
+float _abs_ret_h = math.abs(nz(z_horc) - nz(z_horc[1]))
+float _abs_ret_b = math.abs(nz(z_bei)  - nz(z_bei[1]))
+float _ret_ma_v  = ta.ema(_abs_ret_v, 20)
+float _ret_ma_h  = ta.ema(_abs_ret_h, 20)
+float _ret_ma_b  = ta.ema(_abs_ret_b, 20)
+// Knob 3: loosened from 0.05/0.10 to 0.02/0.05 — increases live% feeding TE.
+// Safe because /10 triple-level gate already rejects bad (i, i-lag) pairs.
+bool _live_v = CL.f_bar_is_live(0.0, _abs_ret_v, 0.0, _ret_ma_v, 0.02, 0.05)
+bool _live_h = CL.f_bar_is_live(0.0, _abs_ret_h, 0.0, _ret_ma_h, 0.02, 0.05)
+bool _live_b = CL.f_bar_is_live(0.0, _abs_ret_b, 0.0, _ret_ma_b, 0.02, 0.05)
+
+array.push(te_btc,  btc_ret)
+array.push(te_vix,  nz(z_vix))
+array.push(te_horc, nz(z_horc))
+array.push(te_bei,  nz(z_bei))
+array.push(lm_btc,  1.0)
+array.push(lm_vix,  _live_v ? 1.0 : 0.0)
+array.push(lm_horc, _live_h ? 1.0 : 0.0)
+array.push(lm_bei,  _live_b ? 1.0 : 0.0)
+
+if array.size(te_btc) > max_arr
+    array.shift(te_btc)
+    array.shift(te_vix)
+    array.shift(te_horc)
+    array.shift(te_bei)
+    array.shift(lm_btc)
+    array.shift(lm_vix)
+    array.shift(lm_horc)
+    array.shift(lm_bei)
+
+// ─── NET TE + PEARSON DIRECTION (confirmed, history-limited) ──────────────────
+// FIX v0.4: TE only on last 500 history bars + realtime — avoids O(N³) on full bar load.
+// var state persists: earlier bars carry the last computed TE value (correct for macro signal).
+// Dual-speed: fast(20) + slow(60) windows blended by sign-agreement weight (0.7 agree / 0.3 disagree).
+var float nte_vix  = 0.0
+var float nte_horc = 0.0
+var float nte_bei  = 0.0
+var float dir_vix  = 1.0
+var float dir_horc = 1.0
+var float dir_bei  = 1.0
+var int   lag_vix  = 1
+var int   lag_horc = 1
+var int   lag_bei  = 1
+// Knob 1: age counters for NTE carry-forward decay (bars since last live NTE)
+var int   _nte_age_v = 0
+var int   _nte_age_h = 0
+var int   _nte_age_b = 0
+// Knob 1b: last computed raw NTE (from te_tick block) for carry-forward
+var float _last_nte_v = 0.0
+var float _last_nte_h = 0.0
+var float _last_nte_b = 0.0
+
+int   eff_vix  = math.max(te_lag_min_vix,  te_lag_max_vix)
+int   eff_horc = math.max(te_lag_min_horc, te_lag_max_horc)
+int   eff_bei  = math.max(te_lag_min_bei,  te_lag_max_bei)
+int   eff_max  = math.max(eff_vix, math.max(eff_horc, eff_bei))
+bool te_tick = barstate.isconfirmed and (bar_index >= last_bar_index - te_hist_bars or barstate.isrealtime) and bar_index > te_win_slow + eff_max + 5
+
+if te_tick
+    // coupling_damping: use normalised btc_vol as a proxy for signal strength
+    float coup = math.min(nz(btc_vol) * 50.0, 1.0)
+
+    // v0.4.4.1: Robust TE with live_mask as quality gate (library v19 fix:
+    // live_mask checks fraction only, full arrays passed to TE scorer preserving
+    // lag alignment). Tier 2: factor mask on both directions for symmetric NTE.
+    float _min_live = 0.15
+
+    // ─ VIX ─ (symmetric: lm_vix on both directions)
+    [tv_ff, dv_f, lv_f_] = CL.f_calculate_te_gated_robust(te_btc, te_vix, lm_vix, te_win_fast, te_bins, eff_vix, coup, te_coupling_floor, _min_live)
+    [tv_rf, vrf_, lvrf_]  = CL.f_calculate_te_gated_robust(te_vix, te_btc, lm_vix, te_win_fast, te_bins, eff_vix, coup, te_coupling_floor, _min_live)
+    [tv_fs, dvs_, lvsf_]  = CL.f_calculate_te_gated_robust(te_btc, te_vix, lm_vix, te_win_slow, te_bins, eff_vix, coup, te_coupling_floor, _min_live)
+    [tv_rs, vrs_, lvrs_]  = CL.f_calculate_te_gated_robust(te_vix, te_btc, lm_vix, te_win_slow, te_bins, eff_vix, coup, te_coupling_floor, _min_live)
+    float ntev_f = nz(tv_ff - tv_rf)
+    float ntev_s = nz(tv_fs - tv_rs)
+    bool  agrv   = (ntev_f >= 0.0 and ntev_s >= 0.0) or (ntev_f < 0.0 and ntev_s < 0.0)
+    float _nte_v_new = ntev_f * (agrv ? 0.7 : 0.3) + ntev_s * (agrv ? 0.3 : 0.7)
+    dir_vix  := nz(dv_f, 1.0)
+    lag_vix  := math.max(te_lag_min_vix, nz(lv_f_, te_lag_min_vix))
+
+    // ─ HORC ─ (symmetric: lm_horc on both directions)
+    [th_ff, dh_f, lh_f_] = CL.f_calculate_te_gated_robust(te_btc, te_horc, lm_horc, te_win_fast, te_bins, eff_horc, coup, te_coupling_floor, _min_live)
+    [th_rf, hrf_, lhrf_]  = CL.f_calculate_te_gated_robust(te_horc, te_btc, lm_horc, te_win_fast, te_bins, eff_horc, coup, te_coupling_floor, _min_live)
+    [th_fs, dhs_, lhsf_]  = CL.f_calculate_te_gated_robust(te_btc, te_horc, lm_horc, te_win_slow, te_bins, eff_horc, coup, te_coupling_floor, _min_live)
+    [th_rs, hrs_, lhrs_]  = CL.f_calculate_te_gated_robust(te_horc, te_btc, lm_horc, te_win_slow, te_bins, eff_horc, coup, te_coupling_floor, _min_live)
+    float nteh_f = nz(th_ff - th_rf)
+    float nteh_s = nz(th_fs - th_rs)
+    bool  agrh   = (nteh_f >= 0.0 and nteh_s >= 0.0) or (nteh_f < 0.0 and nteh_s < 0.0)
+    float _nte_h_new = nteh_f * (agrh ? 0.7 : 0.3) + nteh_s * (agrh ? 0.3 : 0.7)
+    dir_horc := nz(dh_f, 1.0)
+    lag_horc := math.max(te_lag_min_horc, nz(lh_f_, te_lag_min_horc))
+
+    // ─ BEI ─ (symmetric: lm_bei on both directions)
+    [tb_ff, db_f, lb_f_] = CL.f_calculate_te_gated_robust(te_btc, te_bei, lm_bei, te_win_fast, te_bins, eff_bei, coup, te_coupling_floor, _min_live)
+    [tb_rf, brf_, lbrf_]  = CL.f_calculate_te_gated_robust(te_bei, te_btc, lm_bei, te_win_fast, te_bins, eff_bei, coup, te_coupling_floor, _min_live)
+    [tb_fs, dbs_, lbsf_]  = CL.f_calculate_te_gated_robust(te_btc, te_bei, lm_bei, te_win_slow, te_bins, eff_bei, coup, te_coupling_floor, _min_live)
+    [tb_rs, brs_, lbrs_]  = CL.f_calculate_te_gated_robust(te_bei, te_btc, lm_bei, te_win_slow, te_bins, eff_bei, coup, te_coupling_floor, _min_live)
+    float nteb_f = nz(tb_ff - tb_rf)
+    float nteb_s = nz(tb_fs - tb_rs)
+    bool  agrb   = (nteb_f >= 0.0 and nteb_s >= 0.0) or (nteb_f < 0.0 and nteb_s < 0.0)
+    float _nte_b_new = nteb_f * (agrb ? 0.7 : 0.3) + nteb_s * (agrb ? 0.3 : 0.7)
+    dir_bei  := nz(db_f, 1.0)
+    lag_bei  := math.max(te_lag_min_bei, nz(lb_f_, te_lag_min_bei))
+
+    // Store raw NTE to _last_nte_* for carry-forward logic outside te_tick
+    _last_nte_v := _nte_v_new
+    _last_nte_h := _nte_h_new
+    _last_nte_b := _nte_b_new
+
+// ─── CARRY-FORWARD NTE WITH AGE DECAY (runs EVERY bar) ───────────────────────
+// Surgical fix: TE computation stays inside te_tick, but carry-forward/decay
+// runs every bar. On te_tick bars: _last_nte_* holds fresh raw NTE. On non-te_tick
+// bars: _last_nte_* persists from last te_tick, decay continues.
+float _nte_tau = 30.0
+
+// VIX carry-forward
+// Debug: track which branch fires
+float _dbg_cf_v_branch = 0.0  // 1.0=reset, 2.0=decay, 0.0=neither
+if te_tick and not na(_last_nte_v)
+    nte_vix    := _last_nte_v
+    _nte_age_v := 0
+    _dbg_cf_v_branch := 1.0
+else if not na(_last_nte_v)
+    _nte_age_v := _nte_age_v + 1
+    nte_vix    := _last_nte_v * math.exp(-float(_nte_age_v) / _nte_tau)
+    _dbg_cf_v_branch := 2.0
+
+// HORC carry-forward
+if te_tick and not na(_last_nte_h)
+    nte_horc   := _last_nte_h
+    _nte_age_h := 0
+else if not na(_last_nte_h)
+    _nte_age_h := _nte_age_h + 1
+    nte_horc   := _last_nte_h * math.exp(-float(_nte_age_h) / _nte_tau)
+
+// BEI carry-forward
+if te_tick and not na(_last_nte_b)
+    nte_bei    := _last_nte_b
+    _nte_age_b := 0
+else if not na(_last_nte_b)
+    _nte_age_b := _nte_age_b + 1
+    nte_bei    := _last_nte_b * math.exp(-float(_nte_age_b) / _nte_tau)
+
+// BUG-5 FIX v2: shared pool scale preserves relative NTE magnitudes across factors.
+float nte_vix_s  = math.max(ta.rma(math.abs(nte_vix  - ta.sma(nte_vix,  100)), 100) * 1.2533, 1e-8)
+float nte_horc_s = math.max(ta.rma(math.abs(nte_horc - ta.sma(nte_horc, 100)), 100) * 1.2533, 1e-8)
+float nte_bei_s  = math.max(ta.rma(math.abs(nte_bei  - ta.sma(nte_bei,  100)), 100) * 1.2533, 1e-8)
+float nte_pool   = math.max((nte_vix_s + nte_horc_s + nte_bei_s) / 3.0, 1e-8)
+float e1    = math.exp((math.abs(nte_vix)  / nte_pool) * te_temp)
+float e2    = math.exp((math.abs(nte_horc) / nte_pool) * te_temp)
+float e3    = math.exp((math.abs(nte_bei)  / nte_pool) * te_temp)
+float e_sum = math.max(e1 + e2 + e3, 1e-10)
+float sw_vix  = e1 / e_sum
+float sw_horc = e2 / e_sum
+float sw_bei  = e3 / e_sum
+// Structural prior fallback: ONLY when no NTE history exists at all (cold start).
+// Once any factor has ever produced a live NTE, carry-forward keeps flowing —
+// the degenerate dead-band is REMOVED to prevent killing decayed values.
+// Structural prior: once all factors have been stale for >150 bars (~75h on 30m),
+// carry-forward is practically zero (exp(-150/30)=0.007). Snap to prior cleanly.
+bool _no_nte_history = _nte_age_v > 150 and _nte_age_h > 150 and _nte_age_b > 150
+bool  nte_active = math.abs(nte_vix) + math.abs(nte_horc) + math.abs(nte_bei) > 1e-10
+float w_vix  = (nte_active and not _no_nte_history) ? sw_vix  : 0.50
+float w_horc = (nte_active and not _no_nte_history) ? sw_horc : 0.30
+float w_bei  = (nte_active and not _no_nte_history) ? sw_bei  : 0.20
+
+// v0.4.2 master gate — modules engage only after NTE warmup + buffer (and not forced off)
+bool _v042_ready = (not v042_force_off) and nte_active and bar_index > te_win_slow + eff_max + 5 + v042_warm_extra
+
+// ─── ADAPTIVE KALMAN BETAS — state ────────────────────────────────────────────
+var float beta_vix  = 0.0
+var float P_vix     = 1.0
+var float beta_horc = 0.0
+var float P_horc    = 1.0
+var float beta_bei  = 0.0
+var float P_bei     = 1.0
+// macro3f declared as var so LGD (which references macro3f[1]) can read the
+// previous bar's value before this bar's assignment near end of file.
+var float macro3f   = na
+
+// Normalize btc_ret to z-score units so it matches obs_* scale (~1.0 std).
+// Without this, beta collapses to zero on 30m: btc_ret std ~0.003 vs obs std ~1.0.
+float btc_ret_z = nz(btc_vol) > 1e-8 ? btc_ret / btc_vol : 0.0
+
+// Shock-adaptive Q; optional btc vol-scaling (adap_q=true: q_base = base_Q × (1 + vol×10))
+float q_base = adap_q ? base_Q * (1.0 + nz(btc_vol) * 10.0) : base_Q
+float Q_vix  = q_base * (1.0 + math.abs(nte_vix  - nz(nte_vix[1])))
+float Q_horc = q_base * (1.0 + math.abs(nte_horc - nz(nte_horc[1])))
+float Q_bei  = q_base * (1.0 + math.abs(nte_bei  - nz(nte_bei[1])))
+
+// Sign-corrected observations (VIX inverse; Commodities adaptive)
+float _cdv = asset_class == "Commodities" and not na(vol_comm) and not na(vol_comm[1]) and vol_comm[1] > 0.0 ? vol_comm / vol_comm[1] - 1.0 : na
+float comm_corr = ta.correlation(_cdv, close / close[1] - 1.0, 50)
+// FIX F — obs_* hard clamp ±OBS_CLAMP. Forensic showed obs_horc reached +3.79
+// during a 12-bar window; with β_horc ≈ −1, predicted btc_z would be −3.79, but
+// when β flips toward 0 the Kalman gain on a +3.79 observation poisons β fast.
+// Clamping z-scaled observations at ±2.5σ caps the per-bar Kalman gain.
+float OBS_CLAMP = 2.5
+float obs_vix = math.max(-OBS_CLAMP, math.min(OBS_CLAMP, -z_vix))
+if asset_class == "Commodities"
+    obs_vix := math.max(-OBS_CLAMP, math.min(OBS_CLAMP, z_vix * (nz(comm_corr, -1.0) >= 0.0 ? 1.0 : -1.0)))
+float obs_horc = math.max(-OBS_CLAMP, math.min(OBS_CLAMP, z_horc))
+float obs_bei  = math.max(-OBS_CLAMP, math.min(OBS_CLAMP, z_bei))
+
+// ─── TE LAG COMPOSITE (moved up from §debug — needed by MCS & LGD) ───────────
+float te_lag_vix  = nz(nte_vix[lag_vix])  * (nz(nte_vix[lag_vix])  >= 0.0 ? -1.0 : 1.0)
+float te_lag_horc = nz(nte_horc[lag_horc]) * (nz(dir_horc[lag_horc], 1.0) == 0.0 ? -1.0 : 1.0)
+float te_lag_bei  = nz(nte_bei[lag_bei])   * (nz(dir_bei[lag_bei],   1.0) == 0.0 ? -1.0 : 1.0)
+float te_lag_comp = te_lag_vix  * nz(w_vix[lag_vix]) +
+                  te_lag_horc * nz(w_horc[lag_horc]) +
+                  te_lag_bei  * nz(w_bei[lag_bei])
+
+// ─── MODULE A — MACRO COHERENCE SCORE (v0.4.2) ───────────────────────────────
+// Predicted btc_ret_z from current macro structure
+float _btc_predicted = w_vix * obs_vix * beta_vix +
+                     w_horc * obs_horc * beta_horc +
+                     w_bei * obs_bei  * beta_bei
+// (A) Prediction-vs-reality alignment
+float _pred_abs = math.abs(_btc_predicted)
+float _real_abs = math.abs(btc_ret_z)
+float _agree_raw = 0.5 + 0.5 * (_btc_predicted * btc_ret_z) / math.max(_pred_abs * _real_abs, 1e-8)
+float _mcs_agree = _pred_abs > 1e-6 and _real_abs > 1e-6 ? math.max(0.0, math.min(1.0, _agree_raw)) : 0.5
+// (B) Factor Z activity — are factors actually moving this bar?
+float _zd_now = math.abs(z_vix - nz(z_vix[1])) + math.abs(z_horc - nz(z_horc[1])) + math.abs(z_bei - nz(z_bei[1]))
+float _mcs_z_act = math.min(1.0, _zd_now / 0.30)
+// (C) TE lag-composite agreement with btc_ret direction
+float _te_dir    = nz(te_lag_comp) >  1e-5 ? 1.0 : nz(te_lag_comp) < -1e-5 ? -1.0 : 0.0
+float _btc_dir_z = btc_ret_z       >  0.05 ? 1.0 : btc_ret_z       < -0.05 ? -1.0 : 0.0
+float _mcs_te_agr = _te_dir == 0.0 or _btc_dir_z == 0.0 ? 0.5 : _te_dir == _btc_dir_z ? 1.0 : 0.0
+// Weighted composite
+float _mcs_raw = mcs_btc_w * _mcs_agree + mcs_z_w * _mcs_z_act + mcs_te_w * _mcs_te_agr
+// FIX D — Dual-channel EMA. Fast catches sweeps quickly; slow catches sustained
+// regime drift. Take MIN ("pessimistic") so any channel dropping below threshold
+// trips L2 gate. mcs_smooth becomes the SLOW length; fast = max(1, slow/2).
+int   _mcs_slow_len = math.max(1, mcs_smooth)
+int   _mcs_fast_len = math.max(1, int(mcs_smooth / 2))
+float _mcs_fast = ta.ema(nz(_mcs_raw, 0.5), _mcs_fast_len)
+float _mcs_slow = ta.ema(nz(_mcs_raw, 0.5), _mcs_slow_len)
+float mcs_val   = (mcs_enable and _v042_ready) ? math.min(_mcs_fast, _mcs_slow) : 0.5
+
+// ─── MODULE B — LIQUIDITY-GRAB DETECTOR (v0.4.2, §13.2 adaptive scan) ────────
+// Uses macro3f[1] (previous bar) for osc swing — current macro3f isn't assigned
+// yet at this point in the bar (declared var above, assigned near file end).
+// CRITICAL: All historical offsets MUST be static literals so Pine's static
+// analysis can allocate buffers. Pine v6 `ta.highest(series, dynamic_W)` only
+// allocates buffer for the W seen on the FIRST historical bar (often 1),
+// then crashes on realtime when W grows. Same issue with `series[dynamic_idx]`.
+// Fix: use static-bound for-loop over [0..LGD_WIN_HARD_MAX-1] with `_j < W`
+// mask to compute highest/lowest/sum manually. LGD_WIN_HARD_MAX = input maxval.
+f_check_grab(int W) =>
+    int   _LGD_MAX = 20  // ← MUST match lgd_win_max input maxval
+    float _zd_v   = math.abs(z_vix  - nz(z_vix[W]))
+    float _zd_h   = math.abs(z_horc - nz(z_horc[W]))
+    float _zd_b   = math.abs(z_bei  - nz(z_bei[W]))
+    float _zd_tot = _zd_v + _zd_h + _zd_b
+    // Manual rolling extrema/sums over [0 .. _LGD_MAX-1], masked by _j < W.
+    // Pine sees static literal upper bound on series[_j] → allocates correctly.
+    float _osc_hi = -1e30
+    float _osc_lo =  1e30
+    float _bv_hi  = -1e30
+    float _bv_lo  =  1e30
+    float _bh_hi  = -1e30
+    float _bh_lo  =  1e30
+    float _bb_hi  = -1e30
+    float _bb_lo  =  1e30
+    float _te_hi  = -1e30
+    float _te_lo  =  1e30
+    float _btc_cum = 0.0
+    float _mcs_avg = 0.0
+    for _j = 0 to 19  // static bound = _LGD_MAX - 1
+        if _j < W
+            float _m = nz(macro3f[_j])
+            float _bv_ = nz(beta_vix[_j])
+            float _bh_ = nz(beta_horc[_j])
+            float _bb_ = nz(beta_bei[_j])
+            float _te_ = nz(te_lag_comp[_j])
+            _osc_hi := math.max(_osc_hi, _m)
+            _osc_lo := math.min(_osc_lo, _m)
+            _bv_hi  := math.max(_bv_hi,  _bv_)
+            _bv_lo  := math.min(_bv_lo,  _bv_)
+            _bh_hi  := math.max(_bh_hi,  _bh_)
+            _bh_lo  := math.min(_bh_lo,  _bh_)
+            _bb_hi  := math.max(_bb_hi,  _bb_)
+            _bb_lo  := math.min(_bb_lo,  _bb_)
+            _te_hi  := math.max(_te_hi,  _te_)
+            _te_lo  := math.min(_te_lo,  _te_)
+            _btc_cum += nz(btc_ret_z[_j])
+            _mcs_avg += nz(mcs_val[_j], 0.5)
+    _mcs_avg /= float(W)
+    float _osc_rng = _osc_hi - _osc_lo
+    float _bv = _bv_hi - _bv_lo
+    float _bh = _bh_hi - _bh_lo
+    float _bb = _bb_hi - _bb_lo
+    float _b_amp = math.max(_bv, math.max(_bh, _bb))
+    // Relaxed te_persist: 80% sign consistency instead of 100% (was too strict)
+    int _te_same_sign = 0
+    float _te_ref = nz(te_lag_comp)
+    int _te_sign_ref = _te_ref > 0 ? 1 : _te_ref < 0 ? -1 : 0
+    for _j = 0 to 19
+        if _j < W
+            float _te_ = nz(te_lag_comp[_j])
+            int _te_sign = _te_ > 0 ? 1 : _te_ < 0 ? -1 : 0
+            if _te_sign == _te_sign_ref and math.abs(_te_) > lgd_te_floor * 0.5
+                _te_same_sign += 1
+    bool  _te_persist = _te_same_sign >= int(W * 0.8)
+    int _vs = -(z_vix > nz(z_vix[W]) ? 1 : z_vix < nz(z_vix[W]) ? -1 : 0)
+    int _hs =  z_horc > nz(z_horc[W]) ? 1 : z_horc < nz(z_horc[W]) ? -1 : 0
+    int _bs =  z_bei  > nz(z_bei[W])  ? 1 : z_bei  < nz(z_bei[W])  ? -1 : 0
+    int _cons = _vs + _hs + _bs
+    bool _ac  = _btc_cum < -1e-6 ? _cons >= 1 : _btc_cum > 1e-6 ? _cons <= -1 : false
+    bool _hit_a = _zd_tot < lgd_zdrift_max or (lgd_anticoh and _ac)
+    bool _hit_b = math.abs(_btc_cum) >= lgd_btc_min and _osc_rng > lgd_osc_swing
+    bool _hit_c = _b_amp >= lgd_beta_amp and _te_persist and _mcs_avg < lgd_mcs_max
+    bool _hit   = _hit_a and _hit_b and _hit_c
+    float _quality = (_b_amp / 0.3) * (1.0 - _mcs_avg) * (math.abs(_btc_cum) / math.max(lgd_btc_min, 1e-8))
+    [_hit, _quality, _btc_cum, _zd_tot, _osc_rng, _b_amp, _mcs_avg, _ac, _te_persist]
+
+// History-buffer hints for the z_*[W] / nz(z_*[W]) references in f_check_grab
+// (the static-bound loop above handles macro3f / beta_* / te_lag_comp / btc_ret_z
+//  / mcs_val automatically via _j literal upper bound). For z_vix/horc/bei the
+// references still use the dynamic W index, so max_bars_back is needed.
+max_bars_back(z_vix,  25)
+max_bars_back(z_horc, 25)
+max_bars_back(z_bei,  25)
+
+bool  lg_active        = false
+int   lg_window_actual = 0
+float lg_quality       = 0.0
+float _lgd_btc_cum     = 0.0
+float _lgd_zd_tot      = 0.0
+float _lgd_osc_rng     = 0.0
+float _lgd_b_amp       = 0.0
+float _lgd_mcs_avg     = 0.5
+bool  _lgd_ac          = false
+bool  _lgd_te_persist  = false
+
+// CRITICAL FIX: Always populate _lgd_* diagnostics on every bar for pack_B/C visibility
+// Even when lgactive=false, we need to see WHY (which gate failed)
+if _v042_ready and barstate.isconfirmed
+    if lgd_win_mode == "fixed"
+        [_h, _q, _bc, _zd, _orng, _ba, _ma, _ac_, _tp] = f_check_grab(lgd_win_max)
+        // Always update diagnostics for pack_B/C
+        _lgd_btc_cum     := _bc
+        _lgd_zd_tot      := _zd
+        _lgd_osc_rng     := _orng
+        _lgd_b_amp       := _ba
+        _lgd_mcs_avg     := _ma
+        _lgd_ac          := _ac_
+        _lgd_te_persist  := _tp
+        // Only set lg_active if LGD enabled AND hit detected
+        if lgd_enable and _h
+            lg_active        := true
+            lg_window_actual := lgd_win_max
+            lg_quality       := _q
+        else
+            lg_active        := false
+            lg_window_actual := 0
+            lg_quality       := 0.0
+    else
+        // Scan all windows; fire on the highest-quality hit
+        lg_active := false
+        lg_quality := 0.0
+        for W = lgd_win_min to lgd_win_max
+            [_h, _q, _bc, _zd, _orng, _ba, _ma, _ac_, _tp] = f_check_grab(W)
+            // Always update diagnostics with last window's values
+            _lgd_btc_cum     := _bc
+            _lgd_zd_tot      := _zd
+            _lgd_osc_rng     := _orng
+            _lgd_b_amp       := _ba
+            _lgd_mcs_avg     := _ma
+            _lgd_ac          := _ac_
+            _lgd_te_persist  := _tp
+            // Only set lg_active if LGD enabled AND hit detected with better quality
+            if lgd_enable and _h and _q > lg_quality
+                lg_active        := true
+                lg_window_actual := W
+                lg_quality       := _q
+
+// LGD diagnostics: log.info on every confirmed bar after warmup to debug why lgactive never fires
+if barstate.isconfirmed and bar_index > te_hist_bars and lgd_enable
+    [_h_a, _q_a, _bc_a, _zd_a, _orng_a, _ba_a, _ma_a, _ac_a, _tp_a] = f_check_grab(lgd_win_max)
+    bool _hit_a_dbg = _zd_a < lgd_zdrift_max or (lgd_anticoh and _ac_a)
+    bool _hit_b_dbg = math.abs(_bc_a) >= lgd_btc_min and _orng_a > lgd_osc_swing
+    bool _hit_c_dbg = _ba_a >= lgd_beta_amp and _tp_a and _ma_a < lgd_mcs_max
+    log.info("LGD_DIAG | bar={0} lgactive={1} hit_a={2} hit_b={3} hit_c={4} z_drift={5} btc_cum={6} osc_rng={7} b_amp={8} te_persist={9} mcs_avg={10}",
+             bar_index, lg_active, _hit_a_dbg, _hit_b_dbg, _hit_c_dbg, _zd_a, _bc_a, _orng_a, _ba_a, _tp_a, _ma_a)
+
+// Onset = first bar of new grab window
+var bool _lg_active_state = false
+bool lg_onset = lg_active and not _lg_active_state
+_lg_active_state := lg_active
+int lg_reversal_dir = _lgd_btc_cum < 0 ? 1 : _lgd_btc_cum > 0 ? -1 : 0
+
+// ─── MODULE C — β-LEAK DEFENSE (v0.4.2) ──────────────────────────────────────
+// Persistent innovation history per factor (MAD σ) for L1 clipping.
+var array<float> _iv_buf = array.new<float>(0)
+var array<float> _ih_buf = array.new<float>(0)
+var array<float> _ib_buf = array.new<float>(0)
+
+f_buf_push(array<float> b, float v, int maxsz) =>
+    array.push(b, v)
+    while array.size(b) > maxsz
+        array.shift(b)
+    1
+// Robust σ via MAD × 1.4826. Falls back to 1.0 below 30 samples.
+f_buf_sigma(array<float> b) =>
+    int n = array.size(b)
+    n < 30 ? 1.0 : math.max(array.stdev(b) * 1.4826, 0.1)
+
+f_protected_update(float btc_z, float obs_train, float beta_prev,
+                   array<float> ibuf, bool clip_on, float clip_k, int clip_win) =>
+    float raw_innov = btc_z - beta_prev * obs_train
+    float sig       = f_buf_sigma(ibuf)
+    float cap       = clip_k * sig
+    float clipped   = clip_on ? math.max(-cap, math.min(cap, raw_innov)) : raw_innov
+    bool  was_clip  = math.abs(raw_innov - clipped) > 1e-9
+    float synth_z   = beta_prev * obs_train + clipped
+    f_buf_push(ibuf, raw_innov, clip_win)
+    [synth_z, was_clip]
+
+// §13.3 adaptive L4 thresholds — σ-scaled per factor
+float _obs_v_sigma = math.max(ta.stdev(obs_vix,  bld_l4_win), 0.1)
+float _obs_h_sigma = math.max(ta.stdev(obs_horc, bld_l4_win), 0.1)
+float _obs_b_sigma = math.max(ta.stdev(obs_bei,  bld_l4_win), 0.1)
+float _l4_thr_v = bld_l4_k * _obs_v_sigma
+float _l4_thr_h = bld_l4_k * _obs_h_sigma
+float _l4_thr_b = bld_l4_k * _obs_b_sigma
+
+// ─── FIX C — Post-grab freeze tail ───────────────────────────────────────────
+// Track bars since last lg_active=true. While bars_since_lg <= tail, BLD L3
+// keeps Kalman frozen even though lg_active itself has flipped off. Prevents
+// the first post-grab Kalman update from re-engaging on a still-substantial
+// P with a misaligned (lagged) obs vs current (live) btc_z — the exact root
+// cause of v0.4.2's catastrophic β sign-flip on recovery shocks.
+var int _bars_since_lg = 9999
+if lg_active
+    _bars_since_lg := 0
+else
+    _bars_since_lg := math.min(_bars_since_lg + 1, 9999)
+bool _lg_freeze_eff = lg_active or _bars_since_lg <= lgd_post_grab_freeze_bars
+
+// Master gate: L2 (MCS) and L3 (LG freeze, now with post-grab tail)
+bool _l2_pass     = (not bld_l2_mcs) or nz(mcs_val, 0.5) >= bld_l2_thr
+bool _l3_pass     = (not bld_l3_lg)  or not _lg_freeze_eff
+// During warmup (_v042_ready=false), bypass protection layers → unprotected Kalman
+// trains β normally. After warmup, gates apply.
+bool _master_pass = (not bld_enable) or (not _v042_ready) or (_l2_pass and _l3_pass)
+
+// ─── FIX A — Diagnostic flags now fresh-per-bar (was: var bool latched) ──────
+// Plain (non-var) bools so they default to false each bar; conditional sets
+// below mark only the events that actually occurred on THIS bar. Pack_D now
+// shows true per-bar activity, not "ever-since-warmup" history.
+bool dbg_skip_global = false
+bool dbg_clip_v = false, dbg_clip_h = false, dbg_clip_b = false
+bool dbg_l4_v   = false, dbg_l4_h   = false, dbg_l4_b   = false
+bool dbg_cap_v  = false, dbg_cap_h  = false, dbg_cap_b  = false   // FIX B — β cap hit
+bool dbg_signflip_damp_v = false, dbg_signflip_damp_h = false, dbg_signflip_damp_b = false
+
+// ─── FIX B — β magnitude cap + B' selective Δβ rate-limiter ──────────────────
+// v0.4.3.2 forensic re-recalibration (after over-suppression observed in 0.4.3.1):
+//   BETA_CAP 1.2  — kept (economic ceiling)
+//   BETA_MAX_DELTA_HORC 0.30 — RELAXED from 0.20; ONLY applied to β_horc.
+//                              Forensic: 0.20/bar global rate-limit collapsed
+//                              all 3 βs toward 0 (macro3f flat-lined at 56±5).
+//                              HORC needs the rate-limit (Δ=-0.69 cascade in
+//                              v0.4.3); VIX/BEI tracked correctly without it.
+//   BETA_MAX_DELTA_OFF (≥99)  — sentinel value disabling rate-limit for
+//                                vix/bei calls (clean way to keep one helper)
+//   SIGN_AGE_GUARD 50 — bars of same-sign β required for flip-dampening
+float BETA_CAP            = 1.2
+float BETA_MAX_DELTA_HORC = 0.30
+float BETA_MAX_DELTA_OFF  = 99.0
+int   SIGN_AGE_GUARD      = 50
+
+var int _bv_sign_age = 0
+var int _bh_sign_age = 0
+var int _bb_sign_age = 0
+
+// FIX B helper — v0.4.3.3 rewrite using EXPLICIT BOOLEAN gate instead of magic
+// sentinel. Previous version (v0.4.3.2) used max_dbeta=99 as "disable" sentinel,
+// but forensic pack_BETA decode showed all 3 βs frozen → sentinel didn't disable
+// the limiter as intended. Root cause: Pine v6 evaluates math.min/max on `99`
+// rate-limit correctly, BUT the sign-stability dampener (step 3) still kicks
+// in and forces 0.95×prev_β whenever a sign flip occurs after warmup — which
+// for β_vix and β_bei IS the natural training trajectory from 0 → −0.5 etc.
+//
+// Fix: take `apply_rate_limit` and `apply_sign_damp` as explicit bools. Vix/bei
+// get both off (raw Kalman with magnitude cap only). Horc gets both on.
+//   1) Magnitude cap (±BETA_CAP) — ALWAYS applied
+//   2) Rate-limit (±max_dbeta) — ONLY if apply_rate_limit
+//   3) Sign-stability dampener — ONLY if apply_sign_damp
+// Returns [new_beta, magnitude_or_rate_hit, sign_damp_hit].
+f_beta_guard(float prev_beta, float proposed, int sign_age, float max_dbeta,
+             bool apply_rate_limit, bool apply_sign_damp) =>
+    float p = nz(proposed, prev_beta)
+    // (1) magnitude cap — always
+    float capped   = math.max(-BETA_CAP, math.min(BETA_CAP, p))
+    bool  hit_cap  = math.abs(capped - p) > 1e-9
+    // (2) rate-limit
+    float dbeta    = capped - prev_beta
+    float dbeta_lim = apply_rate_limit ? math.max(-max_dbeta, math.min(max_dbeta, dbeta)) : dbeta
+    float rated    = prev_beta + dbeta_lim
+    bool  hit_rate = apply_rate_limit and math.abs(dbeta_lim - dbeta) > 1e-9
+    // (3) sign-stability dampener
+    float prev_sign = math.sign(prev_beta)
+    float new_sign  = math.sign(rated)
+    bool  flip_now  = prev_sign != 0.0 and new_sign != 0.0 and prev_sign != new_sign
+    bool  damp = apply_sign_damp and flip_now and sign_age > SIGN_AGE_GUARD
+    float final    = damp ? prev_beta * 0.95 : rated
+    [final, hit_cap or hit_rate, damp]
+
+if barstate.isconfirmed
+    float obs_vix_train  = nz(obs_vix[lag_vix])
+    float obs_horc_train = nz(obs_horc[lag_horc])
+    float obs_bei_train  = nz(obs_bei[lag_bei])
+
+    if _master_pass
+        // (dbg_skip_global already false from per-bar default)
+        // ─── VIX update ─────────────────────────────────────────────
+        bool _l4_v_pass = (not bld_l4_orth) or math.abs(obs_vix_train) >= _l4_thr_v
+        dbg_l4_v := not _l4_v_pass
+        if math.abs(obs_vix_train) > 1e-6 and _l4_v_pass
+            // FIX E — L1 clipping ALWAYS ON (ignores bld_l1_clip toggle when BLD enabled)
+            // with hard κ cap to prevent user setting bld_l1_k > 1.5 from defeating clip.
+            float _clip_k_eff_v = math.min(bld_l1_k, 1.5)
+            [_zv, _cv] = f_protected_update(btc_ret_z, obs_vix_train, beta_vix,
+                                              _iv_buf, bld_enable, _clip_k_eff_v, bld_l1_win)
+            dbg_clip_v := _cv
+            [kbv, kpv, _, _] = CL.f_kalman_hedge_ratio(_zv, obs_vix_train, beta_vix, P_vix, Q_vix, base_R)
+            // FIX B — apply β cap + sign-stability dampener
+            [_bv_new, _cap_v, _damp_v] = f_beta_guard(beta_vix, nz(kbv), _bv_sign_age, BETA_MAX_DELTA_OFF, false, false)
+            dbg_cap_v := _cap_v
+            dbg_signflip_damp_v := _damp_v
+            beta_vix := _bv_new
+            P_vix    := math.min(nz(kpv), 10.0)
+        // ─── HORC update ───────────────────────────────────────────
+        bool _l4_h_pass = (not bld_l4_orth) or math.abs(obs_horc_train) >= _l4_thr_h
+        dbg_l4_h := not _l4_h_pass
+        if math.abs(obs_horc_train) > 1e-6 and _l4_h_pass
+            float _clip_k_eff_h = math.min(bld_l1_k, 1.5)
+            [_zh, _ch] = f_protected_update(btc_ret_z, obs_horc_train, beta_horc,
+                                              _ih_buf, bld_enable, _clip_k_eff_h, bld_l1_win)
+            dbg_clip_h := _ch
+            [kbh, kph, _, _] = CL.f_kalman_hedge_ratio(_zh, obs_horc_train, beta_horc, P_horc, Q_horc, base_R)
+            [_bh_new, _cap_h, _damp_h] = f_beta_guard(beta_horc, nz(kbh), _bh_sign_age, BETA_MAX_DELTA_HORC, true, true)
+            dbg_cap_h := _cap_h
+            dbg_signflip_damp_h := _damp_h
+            beta_horc := _bh_new
+            P_horc    := math.min(nz(kph), 10.0)
+        // ─── BEI update ────────────────────────────────────────────
+        bool _l4_b_pass = (not bld_l4_orth) or math.abs(obs_bei_train) >= _l4_thr_b
+        dbg_l4_b := not _l4_b_pass
+        if math.abs(obs_bei_train) > 1e-6 and _l4_b_pass
+            float _clip_k_eff_b = math.min(bld_l1_k, 1.5)
+            [_zb, _cb] = f_protected_update(btc_ret_z, obs_bei_train, beta_bei,
+                                              _ib_buf, bld_enable, _clip_k_eff_b, bld_l1_win)
+            dbg_clip_b := _cb
+            [kbb, kpb, _, _] = CL.f_kalman_hedge_ratio(_zb, obs_bei_train, beta_bei, P_bei, Q_bei, base_R)
+            [_bb_new, _cap_b, _damp_b] = f_beta_guard(beta_bei, nz(kbb), _bb_sign_age, BETA_MAX_DELTA_OFF, false, false)
+            dbg_cap_b := _cap_b
+            dbg_signflip_damp_b := _damp_b
+            beta_bei := _bb_new
+            P_bei    := math.min(nz(kpb), 10.0)
+    else
+        dbg_skip_global := true
+        // FIX C — also during post-grab tail: continue decaying P so when the
+        // tail expires, the first un-frozen update has a small gain.
+        P_vix  := math.max(P_vix  * bld_decay, 0.01)
+        P_horc := math.max(P_horc * bld_decay, 0.01)
+        P_bei  := math.max(P_bei  * bld_decay, 0.01)
+        dbg_clip_v := false
+        dbg_clip_h := false
+        dbg_clip_b := false
+
+// FIX B post-step — update sign-age counters for next bar.
+// If β kept same sign as previous bar, increment; if flipped, reset to 0.
+if barstate.isconfirmed
+    _bv_sign_age := math.sign(beta_vix)  == math.sign(nz(beta_vix[1],  beta_vix))  ? _bv_sign_age + 1 : 0
+    _bh_sign_age := math.sign(beta_horc) == math.sign(nz(beta_horc[1], beta_horc)) ? _bh_sign_age + 1 : 0
+    _bb_sign_age := math.sign(beta_bei)  == math.sign(nz(beta_bei[1],  beta_bei))  ? _bb_sign_age + 1 : 0
+
+// ─── MODULE D — COMPOSITE OSCILLATOR (std + macro-pure blend) ────────────────
+// FIX 3: Apply BTC-up sign convention to each leg BEFORE entering raw_osc
+float _s_vix  = (_flip_vix  ? -1.0 : 1.0)
+float _s_horc = (_flip_horc ? -1.0 : 1.0)
+float _s_bei  = (_flip_bei  ? -1.0 : 1.0)
+
+// Standard path (legacy v0.4.1 raw_osc — uses instantaneous β, now sign-corrected)
+float raw_osc_std2 = obs_vix  * beta_vix  * w_vix  * _s_vix +
+                     obs_horc * beta_horc * w_horc * _s_horc +
+                     obs_bei  * beta_bei  * w_bei  * _s_bei
+// Macro-pure path: EMA(β, pure_ema_len) is much less reactive to single-bar idiosync
+float _bv_pure = ta.ema(beta_vix,  pure_ema_len)
+float _bh_pure = ta.ema(beta_horc, pure_ema_len)
+float _bb_pure = ta.ema(beta_bei,  pure_ema_len)
+float raw_osc_pure2 = obs_vix  * _bv_pure * w_vix  * _s_vix +
+                      obs_horc * _bh_pure * w_horc * _s_horc +
+                      obs_bei  * _bb_pure * w_bei  * _s_bei
+// Pure-blend weight from mode
+float _pure_w_target = not _v042_ready ? 0.0
+                     : pure_mode == "off"    ? pure_blend
+                     : pure_mode == "always" ? 1.0
+                     : lg_active ? 1.0
+                       : nz(mcs_val, 0.5) < 0.40 ? 0.7
+                       : 0.0
+// Smooth pure_w transitions (15%/85% EMA) to avoid osc jumps on LG flip
+var float _pure_w_sm = 0.0
+_pure_w_sm := _pure_w_sm * 0.85 + _pure_w_target * 0.15
+
+float raw_osc_raw2 = raw_osc_std2 * (1.0 - _pure_w_sm) + raw_osc_pure2 * _pure_w_sm
+// ─── FIX H (v0.4.3.3) — Rolling DC removal on raw_osc ────────────────────────
+// Forensic 5h window: raw_osc was bearish 81% of bars during +1.4% bullish move.
+// Mean = -0.087, median = -0.074. Structural bias upstream (likely z_bei has
+// systematic negative mean over rolling baseline). Without DC removal, the
+// 50-baseline of macro3f is shifted to ~38, making indicator chronically
+// bearish-prone in bullish trends.
+//
+// Solution: subtract 200-bar SMA of raw_osc. This is mathematically equivalent
+// to detrending: raw_osc_centered = raw_osc - E[raw_osc | last 200 bars].
+// Symmetrises the distribution around 0 → macro3f honestly anchored at 50.
+// Bypassed during warmup (_v042_ready=false) — needs full 200 bars to be valid.
+// Bug 1 fix: Compute burst variables HERE (before slow path and plot)
+// dxy/usdjpy/es are available from L277 (request.security at top of script)
+float _z_dxy_early    = shock_enable_confirmers and not na(dxy)    ? f_mad_z(dxy,    100) : 0.0
+float _z_usdjpy_early = shock_enable_confirmers and not na(usdjpy) ? f_mad_z(usdjpy, 100) : 0.0
+float _z_es_early     = shock_enable_confirmers and not na(es)     ? f_mad_z(es,     100) : 0.0
+float _zvix_fl_early  = f_mad_z(z_vix,  4)
+float _z_burst_early  = math.max(math.max(math.abs(_zvix_fl_early), math.abs(f_mad_z(z_horc, 4))),
+                         math.max(math.abs(f_mad_z(z_bei, 4)),
+                         math.max(math.abs(_z_dxy_early), math.max(math.abs(_z_usdjpy_early), math.abs(_z_es_early)))))
+bool  _burst_now_early = _z_burst_early > 3.0
+float _macro_imp_early = _z_es_early - _zvix_fl_early - _z_usdjpy_early - _z_dxy_early
+float _m3f_fast_early  = 50.0 + 50.0 * math.sign(_macro_imp_early) * math.min(1.0, _z_burst_early / 6.0)
+
+// ─── PART A — MACRO FEED AVAILABILITY ────────────────────────────────────────
+// _z_es/dxy/usdjpy_early are gated on (shock_enable_confirmers and not na(...)).
+// Track whether the macro feeds are genuinely live so we degrade gracefully.
+bool _macro_live = shock_enable_confirmers and not na(dxy) and not na(es) and not na(usdjpy)
+
+// Sign-normalized macro composite — BTC-UP convention (POS = bullish for BTC):
+//   ES up → bull (+) | VIX up → bear (−) | USDJPY up → bear (−) | DXY up → bear (−)
+// Identical sign convention to the fast path's _macro_imp_early (proven correct).
+float _macro_imp_slow = _z_es_early - _zvix_fl_early - _z_usdjpy_early - _z_dxy_early
+
+// ─── PART C — FIX 1: INJECT MACRO FACTORS INTO SLOW PATH ─────────────────────
+// Blend sign-corrected legacy osc with the sign-normalized macro composite.
+// /6.0 scales _macro_imp_slow (≈ ±6σ envelope) into raw_osc's units.
+float _eff_macro_w = _macro_live ? _macro_w : 0.0          // graceful degrade
+float raw_osc_full = raw_osc_raw2 * (1.0 - _eff_macro_w) +
+                   (_macro_imp_slow / 6.0) * _eff_macro_w
+
+// ─── PART D — FIX H (revised) — residual DC removal on BLENDED osc ───────────
+// With Parts B+C the structural bias should be near 0. This now only mops up
+// residual drift. If you see the SMA term is large, a sign leg is still wrong.
+float _raw_osc_dc = ta.sma(raw_osc_full, 200)
+float raw_osc    = _v042_ready ? (raw_osc_full - nz(_raw_osc_dc, 0.0)) : raw_osc_full
+float raw_rms = math.max(math.sqrt(ta.rma(raw_osc * raw_osc, 200)), 1e-8)
+// Slow path — only when NOT in burst mode
+if not _burst_now_early
+    macro3f := 50.0 + 50.0 * f_softclamp(raw_osc / raw_rms, clamp_mode, clamp_sigma)
+else
+    macro3f := _m3f_fast_early
+
+// ─── LGD VISUAL OUTPUTS ──────────────────────────────────────────────────────
+// LGD background removed - replaced with gradient background based on MCS+MAS Hist average
+plotshape(lgd_show and lg_onset and lg_reversal_dir > 0, "Grab → Up",   shape.diamond, location.top,    color.new(#FFAA00, 0), size=size.small)
+plotshape(lgd_show and lg_onset and lg_reversal_dir < 0, "Grab → Down", shape.diamond, location.bottom, color.new(#FF6600, 0), size=size.small)
+alertcondition(lg_onset, "LG Onset", "Liquidity grab detected; expect reversal")
+
+// MCS pane plot (if enabled, visualised on osc pane scale via ×100)
+// DISABLED v0.4.3.4: MCS now plotted in quality subpane only (line ~1523)
+// plot(mcs_show and mcs_enable ? mcs_val * 100.0 : na, "MCS ×100", color=color.new(#9C27B0, 50))
+
+// ─── DEBUG PLOTS — Macro blend weight + residual bias ────────────────────────
+plot(_eff_macro_w * 100.0, "Macro Blend Weight %", color=color.new(color.aqua, 0), display=display.data_window)
+plot(_raw_osc_dc,          "Residual DC Bias",    color=color.new(color.orange, 0), display=display.data_window)
+
+// ─── v0.4.2 MODULE DIAGNOSTICS — PACKED (4 slots = 22 channels) ──────────────
+// Decode each pack: q1=floor(p)%100, q2=floor(p/1e2)%100, ..., q6=floor(p/1e10)%100
+//   value ≈ scale × tan((q-50) × π/98)   for signed atan-compressed channels
+//   bool:   q > 62  ≡ true,  q < 38  ≡ false   (scale=1, 0/1 input)
+//   small-int (e.g. window): scale provided, integer reconstructed via round()
+bool _v042_show = mcs_show or lgd_show or bld_show
+
+// Pack_A — Module A (MCS) + Module D pure-blend [5 ch, 1 spare]
+float dbg_pack_A = _v042_show ?
+     f_pack6q(
+         f_q99(mcs_val,     1.0),   // ch1 [right, scale=1.0]   — mcs_val (0..1)
+         f_q99(_mcs_agree,  1.0),   // ch2 [scale=1.0]          — _mcs_agree (0..1)
+         f_q99(_mcs_z_act,  1.0),   // ch3 [scale=1.0]          — _mcs_z_act (0..1)
+         f_q99(_mcs_te_agr, 1.0),   // ch4 [scale=1.0]          — _mcs_te_agr (0..1)
+         f_q99(_pure_w_sm,  1.0),   // ch5 [scale=1.0]          — pure_w_sm (0..1)
+         50                          // ch6 [left, spare]
+     ) : na
+plot(dbg_pack_A, "dbg.pack_A [mcs|agree|z_act|te_agr|pure_w|_]", display=display.data_window)
+
+// Pack_B — Module B (LGD continuous aggregates) [6 ch]
+float dbg_pack_B = _v042_show ?
+     f_pack6q(
+         f_q99(_lgd_zd_tot,  1.5),  // ch1 [scale=1.5]   — Σ|ΔZ| over window
+         f_q99(_lgd_btc_cum, 3.0),  // ch2 [scale=3.0]   — Σ btc_ret_z over window (signed)
+         f_q99(_lgd_osc_rng, 25.0), // ch3 [scale=25]    — macro3f swing over window
+         f_q99(_lgd_b_amp,   1.0),  // ch4 [scale=1.0]   — max β oscillation
+         f_q99(_lgd_mcs_avg, 1.0),  // ch5 [scale=1.0]   — mean MCS over window (0..1)
+         f_q99(lg_quality,   5.0)   // ch6 [scale=5.0]   — grab quality score
+     ) : na
+plot(dbg_pack_B, "dbg.pack_B [zd|btc_cum|osc_rng|b_amp|mcs_avg|qual]", display=display.data_window)
+
+// Pack_C — Module B (LGD discrete + window) [6 ch]
+// Booleans encoded with scale=1: 0→q=50, 1→q=75. Decode: q>62 ≡ true.
+// lg_reversal_dir is -1/0/1 with scale=1.5: -1→q=32, 0→q=50, 1→q=68.
+float dbg_pack_C = _v042_show ?
+     f_pack6q(
+         f_q99(lg_active       ? 1.0 : 0.0, 1.0),  // ch1 — lg_active (bool)
+         f_q99(lg_onset        ? 1.0 : 0.0, 1.0),  // ch2 — lg_onset  (bool)
+         f_q99(_lgd_ac         ? 1.0 : 0.0, 1.0),  // ch3 — anti-coherence flag
+         f_q99(_lgd_te_persist ? 1.0 : 0.0, 1.0),  // ch4 — te_lag persistence flag
+         f_q99(float(lg_window_actual),    15.0),  // ch5 [scale=15] — int 0..20 grab window
+         f_q99(float(lg_reversal_dir),      1.5)   // ch6 [scale=1.5] — reversal dir -1/0/+1
+     ) : na
+plot(dbg_pack_C, "dbg.pack_C [active|onset|antiCoh|tePers|win|revDir]", display=display.data_window)
+
+// Pack_D — Module C (BLD layer flags) [6 ch, all bools except ch6]
+// ch6 packs two l4 bits: q = f_q99(2×l4_h + l4_b, 3.0). Values 0/1/2/3.
+// Decode: u = 3 × tan((q-50)·π/98); val = round(u); l4_h = (val>>1)&1; l4_b = val&1.
+float dbg_pack_D = _v042_show ?
+     f_pack6q(
+         f_q99(dbg_skip_global ? 1.0 : 0.0, 1.0),  // ch1 — bld_skip_global
+         f_q99(dbg_clip_v      ? 1.0 : 0.0, 1.0),  // ch2 — bld_clip_vix
+         f_q99(dbg_clip_h      ? 1.0 : 0.0, 1.0),  // ch3 — bld_clip_horc
+         f_q99(dbg_clip_b      ? 1.0 : 0.0, 1.0),  // ch4 — bld_clip_bei
+         f_q99(dbg_l4_v        ? 1.0 : 0.0, 1.0),  // ch5 — bld_l4_vix
+         f_q99((dbg_l4_h ? 2.0 : 0.0) + (dbg_l4_b ? 1.0 : 0.0), 3.0) // ch6 — l4_h<<1 | l4_b
+     ) : na
+plot(dbg_pack_D, "dbg.pack_D [skip|cl_v|cl_h|cl_b|l4_v|l4_hb]", display=display.data_window)
+
+// TE tick diagnostic: plot 1.0 when te_tick fires, 0.0 otherwise
+float te_tick_diag = show_debug ? (te_tick ? 1.0 : 0.0) : na
+// REMOVED: TE Tick Fire plot (redundant with pack_A te_agr field)
+// REMOVED: CF Branch VIX plot (niche diagnostic, fold into pack if needed)
+
+// ─── VELOCITY & ACCELERATION (v0.4.1) ─────────────────────────────────────────
+// First derivative: per-bar slope. EMA-smoothed to dampen single-bar noise.
+float m3f_velo_raw  = macro3f - nz(macro3f[1], macro3f)
+float m3f_velo      = ta.ema(m3f_velo_raw, int(velo_len))
+// Second derivative: slope of velocity (acceleration).
+float m3f_accel_raw = m3f_velo - nz(m3f_velo[1], m3f_velo)
+float m3f_accel     = ta.ema(m3f_accel_raw, int(accel_len))
+// Rolling stdev and percentile for burst/reversal detection.
+float m3f_velo_std  = ta.stdev(m3f_velo, 200)
+float m3f_accel_med = ta.percentile_linear_interpolation(math.abs(m3f_accel), 100, accel_pct)
+bool  m3f_velo_burst= math.abs(m3f_velo) > flash_thr * math.max(m3f_velo_std, 1e-8)
+bool  m3f_flip_up   = m3f_velo < 0.0 and m3f_accel > 0.0 and math.abs(m3f_accel) > m3f_accel_med
+bool  m3f_flip_down = m3f_velo > 0.0 and m3f_accel < 0.0 and math.abs(m3f_accel) > m3f_accel_med
+
+// ─── FACTOR SPIKE DOT ENGINE ────────────────────────────────────────────────────
+// For each LTF sub-bar in the current CTF bar, compute a sign-corrected,
+// TE-weighted, vol-normalized combined factor impact. Take the most extreme
+// (max |impact|) sub-bar in the CTF window. Compare to the top quantile of a
+// rolling buffer of past bars' max |impact|. If exceeded → dot fires.
+//
+// Sign convention matches obs_*:  VIX = -1 (inverse),  HORC = +1,  BEI = +1.
+// CTF running stdev of each underlying → used to z-normalize LTF deltas so the
+// three factors are summed on a common scale.
+float _vix_sigma       = math.max(ta.stdev(nz(dvol) - nz(dvol[1]),   100), 1e-8)
+float _horc_sigma      = math.max(ta.stdev(nz(zq1)  - nz(zq1[1]),    100), 1e-8)
+float _horc_proxy_sigma= math.max(ta.stdev(nz(us2y) - nz(us2y[1]),   100), 1e-8)
+float _bei_sigma       = math.max(ta.stdev(nz(rinf) - nz(rinf[1]),   100), 1e-8)
+float _bei_proxy_sigma = math.max(ta.stdev(nz(gold) - nz(gold[1]),   100), 1e-8)
+
+// Limit heavy LTF-loop work to the last `_spike_active_bars` bars to avoid
+// scan timeouts on long histories. min(2000, te_hist_bars) caps the active
+// window — earlier bars skip the engine entirely (no dots, no buffer push).
+int _spike_active_bars = math.min(2000, te_hist_bars)
+bool _spike_active     = bar_index >= last_bar_index - _spike_active_bars
+
+// Per-bar source selection: primary if its LTF array is non-empty, else 23/5 proxy.
+int _nv     = _spike_active ? array.size(_ltf_spike_vix)      : 0
+int _nh_pri = _spike_active ? array.size(_ltf_spike_horc)     : 0
+int _nh_prx = _spike_active ? array.size(_ltf_spike_horc_prx) : 0
+int _nb_pri = _spike_active ? array.size(_ltf_spike_bei)      : 0
+int _nb_prx = _spike_active ? array.size(_ltf_spike_bei_prx)  : 0
+bool _horc_use_prx = _nh_pri == 0 and _nh_prx > 0
+bool _bei_use_prx  = _nb_pri == 0 and _nb_prx > 0
+int _nh = _horc_use_prx ? _nh_prx : _nh_pri
+int _nb = _bei_use_prx  ? _nb_prx : _nb_pri
+
+// BUG-5 FIX: require at least 1 sub-bar from any factor. Original ≥2 guard
+// avoided session-edge artifacts, but blocks spikes when CTF=LTF (e.g., 15m/15m).
+// Compromise: allow ≥1, but spike threshold percentile will naturally filter noise.
+bool _spike_enough = (_nv >= 1) or (_nh >= 1) or (_nb >= 1)
+
+float _spike_signed = 0.0
+int   _spike_persist_count = 0  // Count of consecutive LTF candles with same-sign impact
+string _spike_ticker = ""       // Dominant factor ticker
+float _spike_contrib_v = 0.0    // VIX contribution
+float _spike_contrib_h = 0.0    // HORC contribution
+float _spike_contrib_b = 0.0    // BEI contribution
+int _nmax = math.max(_nv, math.max(_nh, _nb))
+if _nmax > 0 and _spike_enough
+    // Track consecutive same-sign impacts across LTF candles
+    int _consec_up = 0
+    int _consec_dn = 0
+    float _max_impact = 0.0
+    float _sum_v = 0.0, _sum_h = 0.0, _sum_b = 0.0  // Cumulative contributions
+    for _i = 0 to _nmax - 1
+        float _zv = _i < _nv ? nz(array.get(_ltf_spike_vix, _i)) / _vix_sigma : 0.0
+        // HORC: ZN1! (10Y T-Note), sign −1 (price↑ = yields↓ = cuts priced-in = bullish)
+        float _zh = _i < _nh ? -nz(array.get(_ltf_spike_horc, _i)) / _horc_sigma : 0.0
+        // BEI: GC1! (gold), sign +1 (rising = inflation expectations up)
+        float _zb = _i < _nb ? nz(array.get(_ltf_spike_bei, _i)) / _bei_sigma : 0.0
+        // Sign-corrected, TE-weighted combined directional impact
+        float _imp = -_zv * w_vix + _zh * w_horc + _zb * w_bei
+        // Accumulate factor contributions
+        _sum_v += math.abs(_zv * w_vix)
+        _sum_h += math.abs(_zh * w_horc)
+        _sum_b += math.abs(_zb * w_bei)
+        // Track max impact for magnitude
+        if math.abs(_imp) > math.abs(_max_impact)
+            _max_impact := _imp
+        // Count consecutive same-sign candles
+        if _imp > 1e-6
+            _consec_up += 1
+            _consec_dn := 0  // Reset opposite counter
+        else if _imp < -1e-6
+            _consec_dn += 1
+            _consec_up := 0  // Reset opposite counter
+    // Take the longer streak and its corresponding max impact
+    _spike_persist_count := math.max(_consec_up, _consec_dn)
+    _spike_signed := _consec_up > _consec_dn ? _max_impact : -math.abs(_max_impact)
+    // Determine dominant factor
+    _spike_contrib_v := _sum_v
+    _spike_contrib_h := _sum_h
+    _spike_contrib_b := _sum_b
+    if _sum_v >= _sum_h and _sum_v >= _sum_b
+        _spike_ticker := "BVIV"
+    else if _sum_h >= _sum_v and _sum_h >= _sum_b
+        _spike_ticker := "ZN1!"
+    else
+        _spike_ticker := "GC1!"
+
+// Rolling |impact| buffer for quantile threshold.
+// BUG-3 FIX: skip pushing zero-impact bars (frozen tickers across all factors)
+// so the percentile threshold doesn't collapse to 0 and fire on noise.
+var array<float> _spike_buf = array.new<float>(0)
+if barstate.isconfirmed and _nmax > 0 and _spike_active and _spike_enough and math.abs(_spike_signed) > 1e-10
+    array.push(_spike_buf, math.abs(_spike_signed))
+    while array.size(_spike_buf) > spike_lkbk
+        array.shift(_spike_buf)
+
+// FIX: Use median of existing buffer if < 10 samples, instead of blocking all spikes with 1e10
+int _spike_buf_sz = array.size(_spike_buf)
+float _spike_thr = _spike_buf_sz >= 10 ? array.percentile_linear_interpolation(_spike_buf, spike_qntl) : _spike_buf_sz >= 3 ? array.median(_spike_buf) * 1.5 : 0.1
+bool  _spike_persist_ok = _spike_persist_count >= spike_persist_min
+bool  _spike_fire = show_spike and math.abs(_spike_signed) >= _spike_thr and not na(_spike_signed) and _spike_enough and _spike_persist_ok
+bool  _spike_up   = _spike_fire and _spike_signed > 0.0
+bool  _spike_dn   = _spike_fire and _spike_signed < 0.0
+
+// Spike engine diagnostics (bitpacked: 11 channels → 2 slots)
+// Pack A: nv[ch1], nh[ch2], nb[ch3], spike_signed[ch4], persist_count[ch5], thr[ch6]
+float dbg_pack_spike_a = show_debug ? f_pack6q(f_q99(float(_nv), 10.0), f_q99(float(_nh), 10.0), f_q99(float(_nb), 10.0), f_q99(_spike_signed, 0.5), f_q99(float(_spike_persist_count), 5.0), f_q99(_spike_thr, 0.5)) : na
+plot(dbg_pack_spike_a, "pack_SPIKE_A", display=display.data_window)
+
+// Pack B: buf_size[ch1], enough[ch2], active[ch3], persist_ok[ch4], fire[ch5]
+float dbg_pack_spike_b = show_debug ? f_pack6q(f_q99(float(array.size(_spike_buf)), 50.0), f_q99(_spike_enough ? 1.0 : 0.0, 1.0), f_q99(_spike_active ? 1.0 : 0.0, 1.0), f_q99(_spike_persist_ok ? 1.0 : 0.0, 1.0), f_q99(_spike_fire ? 1.0 : 0.0, 1.0), f_q99(0.0, 1.0)) : na
+plot(dbg_pack_spike_b, "pack_SPIKE_B", display=display.data_window)
+
+// ─── PREDICTIVE OVERLAY ──────────────────────────────────────────────────────
+// Three overlay lines, all using per-lag-calibrated betas (Issue-C):
+// (1) Purple — lagged predictor: obs[own_lag] × beta × w per factor, offset=0.
+//     Reconstructs the composite signal that was available lag-bars ago for today.
+// (2) Aqua circles — near-term fwd: VIX+BEI at offset=te_lag_min_vix (=1, 30m).
+//     BEI dominates (1.65× VIX RMS); valid prediction horizon = 1 bar ahead.
+// (3) Blue circles — medium-term fwd: HORC at offset=te_lag_min_horc (=6, 3H).
+//     Only HORC has valid predictive information at the 6-bar horizon.
+float raw_lag = nz(obs_vix[lag_vix])   * beta_vix  * w_vix +
+              nz(obs_horc[lag_horc]) * beta_horc * w_horc +
+              nz(obs_bei[lag_bei])   * beta_bei  * w_bei
+float rms_lag = math.max(math.sqrt(ta.rma(raw_lag * raw_lag, 200)), 1e-8)
+float macro3f_lag = 50.0 + 50.0 * f_softclamp(raw_lag / rms_lag, clamp_mode, clamp_sigma)
+
+// Near-term (VIX + BEI, lag=1): current obs, each factor at its own valid horizon
+float c_near = obs_vix * beta_vix * w_vix + obs_bei * beta_bei * w_bei
+float rms_near = math.max(math.sqrt(ta.rma(c_near * c_near, 200)), 1e-8)
+float macro3f_fwd_near = 50.0 + 50.0 * f_softclamp(c_near / rms_near, clamp_mode, clamp_sigma)
+
+// Medium-term (HORC, lag=6): current obs_horc × beta_horc → predicts 6 bars ahead
+float c_horc_fwd = obs_horc * beta_horc * w_horc
+float rms_horc_fwd = math.max(math.sqrt(ta.rma(c_horc_fwd * c_horc_fwd, 200)), 1e-8)
+float macro3f_fwd_horc = 50.0 + 50.0 * f_softclamp(c_horc_fwd / rms_horc_fwd, clamp_mode, clamp_sigma)
+
+// Opacity of HORC forward circles — normalized against rolling 200-bar MAX of positive NTE.
+// At rolling peak → fully opaque. Negative → completely transparent.
+// Exponential curve ensures it only solidifies when approaching recent top readings.
+float horc_nte_max    = math.max(ta.highest(nte_horc, 200), 1e-8)
+float horc_nte_ratio  = nte_horc > 0.0 ? math.min(nte_horc / horc_nte_max, 1.0) : 0.0
+float horc_exp_factor = (math.exp(horc_nte_ratio * 3.0) - 1.0) / (math.exp(3.0) - 1.0)
+int   horc_fwd_transp = nte_horc < 0.0 ? 100 : int(math.max(0.0, 90.0 - horc_exp_factor * 90.0))
+color horc_fwd_base   = macro3f_fwd_horc >= 50.0 ? color.new(#00E676, 0) : color.new(#FF1744, 0)
+color horc_fwd_col    = color.new(horc_fwd_base, horc_fwd_transp)
+
+// ─── PLOTS ────────────────────────────────────────────────────────────────────
+hline(50, "Neutral", color.gray,               linestyle=hline.style_dashed)
+hline(75, "Bullish", color.new(color.green, 70))
+hline(25, "Bearish", color.new(color.red,   70))
+
+// Bug 1 fix: Fast-path override will be applied later (after burst_now/m3f_fast are computed at L1806-1810)
+// Cannot compute here because z_dxy/z_usdjpy/z_es are declared later at L1795-1797
+
+float m3f_top = ta.highest(nz(macro3f, 50.0), 500)
+float m3f_bot = ta.lowest(nz(macro3f, 50.0),  500)
+color osc_col = macro3f >= 50.0
+              ? color.from_gradient(macro3f, 50.0, math.max(m3f_top, 50.01), color.new(color.gray, 30), color.new(#00E676, 0))
+              : color.from_gradient(macro3f, math.min(m3f_bot, 49.99), 50.0,  color.new(#FF1744, 0),   color.new(color.gray, 30))
+
+plot(macro3f, "macro3f", color=osc_col, linewidth=2)
+
+// ─── VELOCITY HISTOGRAM + ACCEL STEPPED LINE + BURST FLASH (v0.4.1) ───────────
+// Velocity: histogram around 50 (off by default).
+// Accel: stepped thin line colored by jerk (= d/dt accel = ROC of accel).
+//   green  → jerk > 0 (acceleration increasing → trend strengthening)
+//   red    → jerk < 0 (acceleration decreasing → trend weakening / flipping)
+//   gray   → jerk ≈ 0 (steady acceleration)
+// Bug 3 fix: Two-track velocity plot:
+//   Data Window — always, raw change value (for CSV export)
+//   Chart pane  — only when show_velo, scaled to oscillator range, symmetric around 50
+float _macro_velo_raw = ta.change(macro3f, velo_len)
+plot(_macro_velo_raw, "Macro Velocity", display=display.data_window)
+// Velocity bars colored by 3-bar smoothed te_lag_comp (LTF fractional NetTE)
+// Vivid green = up velocity + bull macro TE; vivid red = down + bear TE; gray = unconfirmed
+float _velo_nte_sm  = ta.sma(nz(te_lag_comp, 0.0), 3)
+float _vnte_abs     = math.min(math.abs(_velo_nte_sm), 1.0)
+bool  _velo_bull_nte = _velo_nte_sm  > 0.0
+bool  _velo_up_bar   = _macro_velo_raw > 0.0
+color _velo_base = _velo_up_bar and _velo_bull_nte   ? color.lime :
+                   not _velo_up_bar and not _velo_bull_nte ? color.red  : color.gray
+int   _velo_transp  = int(math.max(0.0, 70.0 - _vnte_abs * 70.0))
+color _velo_col     = color.new(_velo_base, _velo_transp)
+float velo_plot = show_velo ? 50.0 + _macro_velo_raw * velo_amp : na
+plot(velo_plot, "Macro Velocity (vis)", color=_velo_col, linewidth=2, style=plot.style_columns, histbase=50.0)
+
+float m3f_jerk   = m3f_accel - nz(m3f_accel[1], m3f_accel)
+color accel_col  = m3f_jerk >  1e-6 ? color.new(color.lime, 0) :
+                   m3f_jerk < -1e-6 ? color.new(color.red,  0) :
+                                      color.new(color.gray, 40)
+float accel_plot = show_accel ? 50.0 + m3f_accel * velo_amp * 2.0 : na
+plot(accel_plot, "Macro Accel",    color=accel_col, linewidth=1, style=plot.style_stepline)
+
+// Reversal arrows: accel opposes velocity AND |accel| above percentile threshold
+plotshape(m3f_flip_up,   "Macro Reversal Up",   shape.triangleup,   location.bottom, color.lime, size=size.tiny)
+plotshape(m3f_flip_down, "Macro Reversal Down", shape.triangledown, location.top,    color.red,  size=size.tiny)
+
+// Factor spike labels — ticker + strength-encoded color intensity
+// Normalize strength: (|spike| - threshold) / threshold → [0, 1+] → map to transparency [80, 0]
+float _spike_strength_norm = _spike_thr > 1e-6 ? math.min((math.abs(_spike_signed) - _spike_thr) / _spike_thr, 1.0) : 0.0
+int   _spike_transp = int(80.0 * (1.0 - _spike_strength_norm))  // 80 = weak, 0 = strong
+string _spike_tooltip_up = "Factor Spike (Bullish)\n" + 
+     "Ticker: " + _spike_ticker + "\n" +
+     "Strength: " + str.tostring(math.round(_spike_strength_norm * 100.0)) + "%\n" +
+     "Persist: " + str.tostring(_spike_persist_count) + " LTF bars\n" +
+     "VIX: " + str.tostring(math.round(_spike_contrib_v * 100.0) / 100.0) + " | " +
+     "HORC: " + str.tostring(math.round(_spike_contrib_h * 100.0) / 100.0) + " | " +
+     "BEI: " + str.tostring(math.round(_spike_contrib_b * 100.0) / 100.0)
+string _spike_tooltip_dn = "Factor Spike (Bearish)\n" + 
+     "Ticker: " + _spike_ticker + "\n" +
+     "Strength: " + str.tostring(math.round(_spike_strength_norm * 100.0)) + "%\n" +
+     "Persist: " + str.tostring(_spike_persist_count) + " LTF bars\n" +
+     "VIX: " + str.tostring(math.round(_spike_contrib_v * 100.0) / 100.0) + " | " +
+     "HORC: " + str.tostring(math.round(_spike_contrib_h * 100.0) / 100.0) + " | " +
+     "BEI: " + str.tostring(math.round(_spike_contrib_b * 100.0) / 100.0)
+// Legacy spike labels removed in v0.4.5 — replaced by SSS tier labels
+
+plot(show_pred ? macro3f_lag       : na, "Macro Lagged Predictor",
+     color=color.new(color.purple, 40), linewidth=1, style=plot.style_line)
+// REMOVED: 2x predictor forward plots (macro3f_fwd_near, macro3f_fwd_horc) - free 2 slots
+
+// ─── OSCILLATOR LABELS (deleted + redrawn each bar close / replay tick) ───────
+var label lbl_m3f  = na
+var label lbl_lag  = na
+var label lbl_near = na
+var label lbl_horc = na
+
+if barstate.isconfirmed
+    label.delete(lbl_m3f)
+    label.delete(lbl_lag)
+    label.delete(lbl_near)
+    label.delete(lbl_horc)
+
+    color m3f_lbl_col   = macro3f      >= 50.0 ? color.new(#00E676, 20) : color.new(#FF1744, 20)
+    color near_lbl_col  = macro3f_fwd_near >= 50.0 ? color.new(color.aqua, 20) : color.new(#FF6B35, 20)
+    color horc_lbl_col  = macro3f_fwd_horc >= 50.0 ? color.new(#00E676, 20) : color.new(#FF1744, 20)
+
+    string _velo_arr = math.abs(m3f_velo) > m3f_velo_std ? (m3f_velo > 0.0 ? " ↑↑" : " ↓↓") : ""
+    string _velo_diag = "\n\nVelo=" + str.tostring(m3f_velo, "+0.00") + "/bar  Accel=" + str.tostring(m3f_accel, "+0.000") + (m3f_flip_up ? "\n⚠ EARLY BULL FLIP" : "") + (m3f_flip_down ? "\n⚠ EARLY BEAR FLIP" : "") + (m3f_velo_burst ? "\n⚡ VELOCITY BURST" : "")
+    lbl_m3f := label.new(
+         x=bar_index + 1, y=macro3f,
+         text="Macro " + str.tostring(math.round(macro3f)) + _velo_arr,
+         color=m3f_lbl_col, textcolor=color.white,
+         style=label.style_label_left, size=size.small,
+         tooltip="Composite macro regime. Above 50 = macro tailwinds for BTC: fear is low (VIX down), rate-cut expectations are building (HORC up), inflation is contained (BEI flat/down). Below 50 = headwinds. Each factor is weighted by its Transfer Entropy to BTC — how much each macro variable is currently informing Bitcoin's price. Updated every 30-minute bar close." + _velo_diag)
+
+    if show_pred
+        lbl_lag := label.new(
+             x=bar_index, y=macro3f_lag,
+             text="Pred",
+             color=color.new(color.purple, 20), textcolor=color.white,
+             style=label.style_label_left, size=size.small,
+             tooltip="Lagged predictor: reconstructs the macro signal each factor was giving at its own structural lead time — VIX 30min ago, HORC 3H ago, BEI 30min ago. This is the composite prediction that existed in the past and was aimed at today's bar. When this line was bullish before a price rally, the model's causal structure was correct. Persistent divergence from price means the lag structure needs recalibration.")
+
+        if show_near_fwd
+            lbl_near := label.new(
+                 x=bar_index + te_lag_min_vix, y=macro3f_fwd_near,
+                 text="30m▶",
+                 color=near_lbl_col, textcolor=color.black,
+                 style=label.style_label_left, size=size.small,
+                 tooltip="Near-term forecast (+30min): VIX fear and BEI inflation expectations projected 1 bar ahead. If above 50 now, the fear/inflation setup suggests upward pressure on BTC in the next 30 minutes. VIX and BEI react immediately — this is the fastest component. High confidence when both VIX is falling (less fear) and BEI is rising (inflation expectations = risk appetite).")
+
+        lbl_horc := label.new(
+             x=bar_index + te_lag_min_horc, y=macro3f_fwd_horc,
+             text="3H▶",
+             color=horc_lbl_col, textcolor=color.white,
+             style=label.style_label_left, size=size.small,
+             tooltip="Medium-term forecast (+3H / 6 bars): rate-cut expectations pressure (HORC) projected 3 hours ahead. If this area is solid green now, HORC is at or near its strongest recent information-transfer to BTC — the 3H forecast is most reliable. Solid green above 50 = rate-cut expectations are building and will likely support BTC in 3H. Solid red below 50 = tightening pressure incoming. Faded/invisible = HORC signal is weak or reversed right now, do not trade on it.")
+
+float vix_comp  = show_comp ? 50.0 + 15.0 * f_tanh(z_vix  / 3.0) : na
+float horc_comp = show_comp ? 50.0 + 15.0 * f_tanh(z_horc / 3.0) : na
+float bei_comp  = show_comp ? 50.0 + 15.0 * f_tanh(z_bei  / 3.0) : na
+
+plot(vix_comp,  "VIX Z",  color=color.new(color.red,    60), linewidth=1)
+plot(horc_comp, "HORC Z", color=color.new(color.blue,   60), linewidth=1)
+plot(bei_comp,  "BEI Z",  color=color.new(color.yellow, 60), linewidth=1)
+
+float te_vix_p  = show_te ? w_vix  * 30.0 : na
+float te_horc_p = show_te ? w_horc * 30.0 : na
+float te_bei_p  = show_te ? w_bei  * 30.0 : na
+
+plot(te_vix_p,  "TE w_vix",  color=color.new(color.red,    40), style=plot.style_columns)
+plot(te_horc_p, "TE w_horc", color=color.new(color.blue,   40), style=plot.style_columns)
+plot(te_bei_p,  "TE w_bei",  color=color.new(color.yellow, 40), style=plot.style_columns)
+
+// ─── MODEL ACTIVITY SCORE (MAS) — realtime only ──────────────────────────────
+// Accumulate 1m returns from the last ceil(mas_granules/30)+5 CTF bars into a
+// rolling buffer. On live bar: compute directional alignment + autocorrelation.
+var array<float> _mas_hist = array.new<float>(0)
+var float        mas_val   = na
+var label        _mas_lbl  = na
+
+// Three-stage shock lifecycle — single active event state
+var label  evt_label     = na   // active event label handle
+var int    evt_stage     = 0    // 0=NONE 1=ONSET 2=CLASSIFY 3=CONFIRM
+var int    evt_onset_bar = 0
+var float  evt_onset_z   = na
+var string evt_direction = na
+var string evt_category  = na
+var float  evt_btc_entry = na
+
+int _mas_ctf_need = int(math.ceil(float(mas_granules) / 30.0)) + 5
+
+// Bug 2 fix: Change gate from last_bar_index to te_hist_bars (same as MAS History fix)
+if barstate.isconfirmed and show_activity and bar_index > te_hist_bars
+    int _sz = array.size(_ltf_rets)
+    if _sz > 0
+        for _i = 0 to _sz - 1
+            float _r = array.get(_ltf_rets, _i)
+            if not na(_r)
+                array.push(_mas_hist, _r)
+    while array.size(_mas_hist) > mas_granules + 120
+        array.shift(_mas_hist)
+
+// Bug 2 fix: Compute MAS on every confirmed bar, not just realtime/last (that gave 1/1177 rows)
+if barstate.isconfirmed and show_activity and array.size(_mas_hist) > 0
+    array<float> _work = array.copy(_mas_hist)
+    int _csz = array.size(_ltf_rets)
+    if _csz > 0
+        for _i = 0 to _csz - 1
+            float _r = array.get(_ltf_rets, _i)
+            if not na(_r)
+                array.push(_work, _r)
+
+    int   _wsz  = array.size(_work)
+    int   _take = math.min(mas_granules, _wsz)
+    int   _from = _wsz - _take
+    float _mdir = macro3f - 50.0
+    // EMA decay: alpha = 2/(N+1) so newest bars weigh ~2× the mean, oldest ~0
+    float _alpha = 2.0 / (float(_take) + 1.0)
+    float _ema_align = 0.0   // EMA of directional alignment signal (±1)
+    float _ema_sq    = 0.0   // EMA of r² (variance proxy for AC normalisation)
+    float _ema_cross = 0.0   // EMA of r*r[1] (lag-1 autocorrelation numerator)
+    float _cnt       = 0.0
+    float _prev      = na    // previous r for lag-1 AC
+    bool  _inited    = false
+    bool  _cross_ok  = false
+
+    for _i = _from to _wsz - 1
+        float _r = array.get(_work, _i)
+        if not na(_r)
+            float _align = _r != 0.0 ? (_mdir * _r > 0.0 ? 1.0 : -1.0) : 0.0
+            if not _inited
+                _ema_align := _align
+                _ema_sq    := _r * _r
+                _inited    := true
+            else
+                _ema_align := _alpha * _align    + (1.0 - _alpha) * _ema_align
+                _ema_sq    := _alpha * (_r * _r) + (1.0 - _alpha) * _ema_sq
+            if not na(_prev)
+                float _cr = _r * _prev
+                if not _cross_ok
+                    _ema_cross := _cr
+                    _cross_ok  := true
+                else
+                    _ema_cross := _alpha * _cr + (1.0 - _alpha) * _ema_cross
+            _prev := _r
+            _cnt  += 1.0
+
+    if _cnt >= 5
+        float _ac = _ema_sq > 1e-10 ? math.max(-1.0, math.min(1.0, _ema_cross / _ema_sq)) : 0.0
+        mas_val := math.max(0.0, math.min(100.0, 50.0 + _ema_align * 35.0 + _ac * 15.0))
+    else
+        mas_val := na
+
+    label.delete(_mas_lbl)
+    if not na(mas_val)
+        // Confirmation strength: how far above 50 (= how much 1m bars agree with macro).
+        // 0 at neutral (50), 1 at full confirmation (100). Direction = macro3f above/below 50.
+        float _str    = math.max(0.0, (mas_val - 50.0) / 50.0)
+        bool  _bull   = macro3f >= 50.0
+        int   _transp = int(math.max(0.0, 80.0 - _str * 80.0))
+        color _mc     = color.new(color.gray, 40)
+        if _str >= 0.15
+            _mc := _bull ? color.new(#00E676, _transp) : color.new(#FF1744, _transp)
+        _mas_lbl := label.new(
+             x=bar_index + 1, y=mas_val,
+             text="MAS " + str.tostring(math.round(mas_val)) + "%",
+             color=_mc, textcolor=color.white,
+             style=label.style_label_left, size=size.small,
+             tooltip="Model Activity Score — last " + str.tostring(mas_granules) + " 1-min BTC bars.\n\nGreen = model predicts long AND 1m bars are confirming it right now.\nRed = model predicts short AND 1m bars are confirming it right now.\nGray = current 1m momentum not explained by the macro model — do not lean on it.\n\nBrightness = confirmation strength (mas near 100 = very strong intrabar follow-through).\nScore = 70% EMA-weighted directional alignment + 30% EMA-weighted autocorrelation.")
+
+// MAS background removed - replaced with gradient background based on MCS+MAS Hist average
+plot(show_activity ? mas_val : na, "Model Activity Score (MAS)",
+     color.new(color.yellow, 50), 1)
+
+// ─── MAS VELOCITY & ACCELERATION (v0.4.1) ────────────────────────────────────
+// MAS velo/accel computed for label diagnostics only — no plots (plot-slot budget).
+// Surfaces via lbl_m3f tooltip and MAS label when realtime mas_val is available.
+float _mas_safe     = nz(mas_val, 50.0)
+float mas_velo_raw  = _mas_safe - nz(_mas_safe[1], _mas_safe)
+float mas_velo      = ta.ema(mas_velo_raw, int(velo_len))
+float mas_accel_raw = mas_velo - nz(mas_velo[1], mas_velo)
+float mas_accel     = ta.ema(mas_accel_raw, int(accel_len))
+bool  mas_flip_up   = show_activity and not na(mas_val) and mas_velo < -2.0 and mas_accel > 0.0
+bool  mas_flip_down = show_activity and not na(mas_val) and mas_velo >  2.0 and mas_accel < 0.0
+
+// ─── HISTORICAL MAS (LTF, last te_hist_bars bars) ─────────────────────────────
+// Per-bar directional alignment + autocorrelation over intra-bar LTF sub-returns.
+// Mirrors realtime MAS formula (70% EMA-weighted alignment + 30% autocorrelation)
+// but scoped to each CTF bar's LTF sub-bars — computable on all historical bars.
+float _mas_h_raw = na
+
+// DIAGNOSTIC: Bug 2 verification plots
+plot(show_debug ? float(te_hist_bars) : na, "DIAG_te_hist_bars", display=display.data_window)
+plot(show_debug ? float(bar_index) : na, "DIAG_bar_index", display=display.data_window)
+plot(show_debug ? (bar_index > te_hist_bars ? 1.0 : 0.0) : na, "DIAG_past_warmup", display=display.data_window)
+
+// Bug 2 fix: Remove last_bar_index gate - MAS history should compute on ALL bars in warmup window
+if show_mas_hist and bar_index > te_hist_bars
+    int   _hsz    = array.size(_ltf_h)
+    float _mdir_h = macro3f - 50.0
+    float _al_h   = 2.0 / (math.max(float(_hsz), 1.0) + 1.0)
+    float _ea_h   = 0.0
+    float _esq_h  = 0.0
+    float _ecr_h  = 0.0
+    float _prev_h = na
+    bool  _init_h = false
+    bool  _cin_h  = false
+    float _cnt_h  = 0.0
+    if _hsz > 0
+        for _i_h = 0 to _hsz - 1
+            float _r_h = array.get(_ltf_h, _i_h)
+            if not na(_r_h)
+                float _aln_h = _r_h != 0.0 ? (_mdir_h * _r_h > 0.0 ? 1.0 : -1.0) : 0.0
+                if not _init_h
+                    _ea_h   := _aln_h
+                    _esq_h  := _r_h * _r_h
+                    _init_h := true
+                else
+                    _ea_h  := _al_h * _aln_h         + (1.0 - _al_h) * _ea_h
+                    _esq_h := _al_h * (_r_h * _r_h)  + (1.0 - _al_h) * _esq_h
+                if not na(_prev_h)
+                    float _cr_h = _r_h * _prev_h
+                    if not _cin_h
+                        _ecr_h := _cr_h
+                        _cin_h := true
+                    else
+                        _ecr_h := _al_h * _cr_h + (1.0 - _al_h) * _ecr_h
+                _prev_h := _r_h
+                _cnt_h  += 1.0
+    // FIX: Allow MAS History with 1 sub-bar (CTF=LTF case, e.g., 15m chart + 15m LTF)
+    // Use alignment-only (no autocorrelation) when _cnt_h < 2
+    if _cnt_h >= 1.0
+        float _ac_h = _cnt_h >= 2.0 and _esq_h > 1e-10 ? math.max(-1.0, math.min(1.0, _ecr_h / _esq_h)) : 0.0
+        _mas_h_raw := math.max(0.0, math.min(100.0, 50.0 + _ea_h * 35.0 + _ac_h * 15.0))
+
+// 3-bar EMA smoothing to reduce single-bar noise
+float mas_hist_val = ta.ema(nz(_mas_h_raw, 50.0), 3)
+
+// Bug 3 fix: Add macroVelocity and macroAccel (were never declared, always NaN in exports)
+float macroVelocity = ta.change(macro3f, velo_len)
+float macroAccel = ta.change(macroVelocity, accel_len)
+
+// DIAGNOSTIC: Bug 3 verification plots
+plot(show_debug ? macroVelocity : na, "DIAG_macroVelocity_at_decl", display=display.data_window)
+plot(show_debug ? macroAccel : na, "DIAG_macroAccel_at_decl", display=display.data_window)
+
+// NOTE: MAS History plot moved to lower subpane (lines 1532-1534)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LOWER SUBPANE: Model Quality & Activity Metrics
+// ═══════════════════════════════════════════════════════════════════════════
+// Displays MCS (Macro Coherence Score) and MAS metrics in a dedicated lower band
+// to avoid cluttering the main macro3f oscillator pane.
+
+// Initialize subpane manager (STACK_BOTTOM = first registered appears at bottom)
+var CVL.SubPaneManager _qual_mgr = CVL.f_panemgr_new(CVL.SubPanePolicy.STACK_BOTTOM, 0.02)
+
+// Register oscillators (on first bar only)
+if barstate.isfirst
+    // MCS: Macro Coherence Score [0, 1] — quality gate for Kalman filter
+    _qual_mgr.register(CVL.MiniOscMeta.new(
+        id = "mcs",
+        label = "MCS",
+        scale = CVL.OscScale.UNIPOLAR_01,
+        hue = color.new(#9C27B0, 30),
+        range_min = 0.0,
+        range_max = 1.0))
+    
+    // MAS (realtime): Model Activity Score [0, 100] — 1m intrabar confirmation
+    _qual_mgr.register(CVL.MiniOscMeta.new(
+        id = "mas_rt",
+        label = "MAS RT",
+        scale = CVL.OscScale.UNIPOLAR_0100,
+        hue = color.new(color.yellow, 30),
+        range_min = 0.0,
+        range_max = 100.0))
+    
+    // MAS History (LTF): Historical MAS [0, 100] — per-bar LTF alignment
+    _qual_mgr.register(CVL.MiniOscMeta.new(
+        id = "mas_hist",
+        label = "MAS Hist",
+        scale = CVL.OscScale.UNIPOLAR_0100,
+        hue = color.new(color.aqua, 30),
+        range_min = 0.0,
+        range_max = 100.0))
+    
+    // Finalize pane allocation: 4x vertical scale (-110 to -10 = 100 units, was 20)
+    // Visual scaling only - logic still reads correct 0-100 range from meta.to_unit()
+    _qual_mgr.finalize(-110.0, -10.0)
+
+// Get individual panes
+CVL.MiniSubPane _pane_mcs      = _qual_mgr.get_pane("mcs")
+CVL.MiniSubPane _pane_mas_rt   = _qual_mgr.get_pane("mas_rt")
+CVL.MiniSubPane _pane_mas_hist = _qual_mgr.get_pane("mas_hist")
+
+// Plot MCS in the same subpane as MAS History (×100 to map [0,1] → [0,100])
+// Logic reads correct 0-100 range via meta.to_unit(), visual Y is scaled 4x
+// Always compute plot value (never na) so fill works continuously
+float _mcs_raw_val = mcs_val * 100.0  // Store raw 0-100 value for logic
+float _mcs_plot = _pane_mas_hist.band_y(_pane_mas_hist.meta.to_unit(_mcs_raw_val))
+color _mcs_color = _mcs_raw_val >= 50.0 ? color.new(color.yellow, 0) : color.new(#8B4513, 0)  // yellow/brown
+float _mcs_plot_visible = mcs_show and mcs_enable ? _mcs_plot : na
+plot(_mcs_plot_visible, "MCS (Quality Gate)", color=_mcs_color, linewidth=1, display=display.data_window)
+
+// Plot MAS realtime (only on realtime/last bar)
+float _mas_rt_plot = show_activity and not na(mas_val) ? _pane_mas_rt.band_y(_pane_mas_rt.meta.to_unit(mas_val)) : na
+plot(_mas_rt_plot, "MAS (1m Realtime)", color=_pane_mas_rt.meta.hue, linewidth=1, display=display.data_window)
+
+// Plot MAS History (LTF)
+// Always compute plot value (never na) so fill works continuously
+float _mas_hist_raw_val = mas_hist_val  // Store raw 0-100 value for logic
+float _mas_hist_plot = _pane_mas_hist.band_y(_pane_mas_hist.meta.to_unit(_mas_hist_raw_val))
+color _mas_hist_color = _mas_hist_raw_val >= 50.0 ? color.new(color.green, 0) : color.new(color.red, 0)  // green/red
+float _mas_hist_plot_visible = show_mas_hist ? _mas_hist_plot : na
+plot(_mas_hist_plot_visible, "MAS History (LTF)", color=_mas_hist_color, linewidth=1, display=display.data_window)
+
+// Dynamic reference lines: compute once after NTE warmup, cache, plot every bar
+var float _qual_pane_floor = na
+var float _qual_pane_ceil  = na
+var float _qual_pane_mid   = na
+if na(_qual_pane_floor) and _v042_ready
+    _qual_pane_floor := _pane_mas_hist.band_low
+    _qual_pane_ceil  := _pane_mas_hist.band_high
+    _qual_pane_mid   := (_pane_mas_hist.band_low + _pane_mas_hist.band_high) / 2.0
+// REMOVED: floor/ceil plots (replaced with hline - no plot slot cost)
+
+// Oscillator labels: redraw each bar close at offset=1
+if barstate.islast and not na(_qual_pane_mid)
+    // MCS label (brown/yellow)
+    label.new(bar_index + 1, _mcs_plot, "MCS", 
+              color=color.new(_mcs_color, 80), 
+              textcolor=_mcs_color,
+              style=label.style_label_left,
+              size=size.small,
+              tooltip="Macro Coherence Score: Measures alignment between BTC returns and macro factor predictions. High (>60) = strong model-reality agreement, safe for trading signals. Low (<40) = model breakdown, Kalman filter paused to prevent bad beta updates.")
+    
+    // MAS History label (green/red)
+    label.new(bar_index + 1, _mas_hist_plot, "MAS Hist", 
+              color=color.new(_mas_hist_color, 80), 
+              textcolor=_mas_hist_color,
+              style=label.style_label_left,
+              size=size.small,
+              tooltip="Model Activity Score (Historical): Directional alignment of LTF sub-bar returns vs macro direction. High (>60) = strong intrabar confirmation, macro trend is reliable. Low (<40) = weak intrabar follow-through, expect chop or reversal.")
+
+// ─── OBEDIENCE BACKGROUND GRADIENT ───────────────────────────────────────────
+// Obedience score: z-scored blend of MAS History (LTF) and MCS (Quality Gate)
+// Positive obedience → green tint, negative → red tint, intensity ∝ |z-score|
+float mas_z_ob = (_mas_hist_raw_val - ta.sma(_mas_hist_raw_val, ob_lookback)) / ta.stdev(_mas_hist_raw_val, ob_lookback)
+float mcs_z_ob = (_mcs_raw_val - ta.sma(_mcs_raw_val, ob_lookback)) / ta.stdev(_mcs_raw_val, ob_lookback)
+float ob_raw   = 0.5 * mas_z_ob + 0.5 * mcs_z_ob
+float ob_smo   = ta.ema(ob_raw, ob_ema)
+
+// Snap-back logic: bypass hysteresis on sharp 3-bar reversals opposing current state
+float ob_roc3 = ob_smo - ob_smo[3]
+var float ob_state = 0.0
+var int snap_bars_left = 0  // Counter for yellow flash duration
+bool snap = math.abs(ob_roc3) >= ob_snap_thr and math.sign(ob_roc3) != math.sign(ob_state) and ob_state != 0.0
+ob_state := na(ob_smo) ? ob_state
+         : snap ? ob_smo
+         : (ob_state >= 0 and ob_smo < -ob_band) ? ob_smo
+         : (ob_state <= 0 and ob_smo >  ob_band) ? ob_smo
+         : (math.sign(ob_state) == math.sign(ob_smo)) ? ob_smo
+         : ob_state
+
+// Yellow flash counter: 3 bars after snap-back
+snap_bars_left := snap ? 3 : math.max(0, snap_bars_left - 1)
+
+// Saturation: cap |ob_state| to ob_clamp for intensity scaling
+float ob_mag = math.min(math.abs(ob_state), ob_clamp) / ob_clamp  // 0..1
+
+// Background gradient: yellow flash during snap-back, else normal green/red
+int bg_alpha = math.round(ob_alpha - (ob_alpha - 70) * ob_mag)
+color bg_col = snap_bars_left > 0 ? color.new(color.yellow, 85) 
+             : ob_state >= 0 ? color.new(color.green, bg_alpha) 
+             : color.new(color.red, bg_alpha)
+bgcolor(bg_col, title="Obedience BG", editable=true)
+
+// Plot obedience score on subpane 2 (former MAS/MCS pane)
+// Map ob_state (typically -3 to +3 z-score) to subpane Y coordinates
+float ob_plot_y = _pane_mas_hist.band_y(_pane_mas_hist.meta.to_unit(50.0 + ob_state * 10.0))  // z=0 → 50, z=±3 → 20/80
+color ob_plot_color = ob_state >= 0 ? color.new(color.green, 0) : color.new(color.red, 0)
+plot(ob_plot_y, "Obedience Score", color=ob_plot_color, linewidth=2)
+
+// ─── SHOCK STRENGTH SCORE (SSS) v0.4.5 ──────────────────────────────────────
+// Seven-component composite: impact, persistence, velocity, acceleration, coherence, NTE opacity, sync
+// Outputs: SSS ∈ [0,1], tier ∈ {0,1,2,3,4}, direction ∈ {bull, bear, none}, category ∈ {VOL,RATE,INFL,MIX,LG,LIQ}
+
+// NTE Opacity: average absolute NTE magnitude, scaled to 0-100
+float nte_avg = (math.abs(nte_vix) + math.abs(nte_horc) + math.abs(nte_bei)) / 3.0
+float nte_opacity = math.min(nte_avg * 10000.0, 100.0)  // Scale: 0.01 NTE → 100 opacity
+
+// Confirmer z-scores (MAD-normalized, 100-bar window)
+float z_usdjpy = shock_enable_confirmers and not na(usdjpy) ? f_mad_z(usdjpy, 100) : 0.0
+float z_es     = shock_enable_confirmers and not na(es)     ? f_mad_z(es, 100)     : 0.0
+float z_dxy    = shock_enable_confirmers and not na(dxy)    ? f_mad_z(dxy, 100)    : 0.0
+
+// Flash z-windows for existing factors (4-bar, early initiation detection)
+float zvix_flash  = f_mad_z(z_vix, 4)
+float zhorc_flash = f_mad_z(z_horc, 4)
+float zbei_flash  = f_mad_z(z_bei, 4)
+
+// Bug 1 fix: Fast-path for extreme z-bursts (7σ events should move oscillator to extremes)
+// Compute max flash z across ALL factors (3 core + 3 confirmers)
+float z_burst = math.max(math.max(math.abs(zvix_flash), math.abs(zhorc_flash)), math.max(math.abs(zbei_flash), math.max(math.abs(z_dxy), math.max(math.abs(z_usdjpy), math.abs(z_es)))))
+bool burst_now = z_burst > 3.0
+// Macro implied direction: ES up + VIX down + JPY down + DXY down = bullish for BTC
+float macro_implied_raw = z_es - zvix_flash - z_usdjpy - z_dxy
+float m3f_fast = 50.0 + 50.0 * math.sign(macro_implied_raw) * math.min(1.0, z_burst / 6.0)
+
+// Bug 1 fix: Apply fast-path override HERE (after all variables computed, before any further macro3f usage)
+if burst_now
+    macro3f := m3f_fast
+
+// Bug 1 verification (packed 4→1 slot)
+float _dbg_b1_pack = show_debug ? f_pack6q(f_q99(z_burst, 5.0), f_q99(burst_now ? 1.0 : 0.0, 1.0), f_q99(m3f_fast, 50.0), f_q99(macro3f, 50.0), 50, 50) : na
+plot(_dbg_b1_pack, "dbg.pack_BUG1 [z_burst|burst|m3f_fast|macro3f_pp|—|—]", display=display.data_window)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PHASE 1 — MACRO SHOCK ONSET (MAS-independent, fires on flash-z aggregate)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// 4-factor aggregate z-burst (DXY, USDJPY, VIX, ES) — unconditional
+float _p1_z_dxy    = not na(_p1_dxy)    ? f_mad_z(_p1_dxy,    100) : 0.0
+float _p1_z_usdjpy = not na(_p1_usdjpy) ? f_mad_z(_p1_usdjpy, 100) : 0.0
+float _p1_z_es     = not na(_p1_es)     ? f_mad_z(_p1_es,     100) : 0.0
+float z_max_4      = math.max(math.abs(_p1_z_dxy), math.max(math.abs(_p1_z_usdjpy), math.max(math.abs(z_vix), math.abs(_p1_z_es))))
+float z_burst_4f   = math.sqrt(_p1_z_dxy*_p1_z_dxy + _p1_z_usdjpy*_p1_z_usdjpy + z_vix*z_vix + _p1_z_es*_p1_z_es)
+
+// LTF flash-z — max sub-bar z-score from existing 5m spike arrays
+// Normalize max delta per array by rolling MAD of 30m abs-returns / sqrt(n_subbars)
+float _s30_dxy    = math.abs(_p1_dxy    - nz(_p1_dxy[1],    _p1_dxy))
+float _s30_usdjpy = math.abs(_p1_usdjpy - nz(_p1_usdjpy[1], _p1_usdjpy))
+float _s30_es     = math.abs(_p1_es     - nz(_p1_es[1],     _p1_es))
+float _s30_dvol   = math.abs(dvol       - nz(dvol[1],       dvol))
+float _ltf_mad_dxy    = ta.sma(_s30_dxy,    60) * 1.4826
+float _ltf_mad_usdjpy = ta.sma(_s30_usdjpy, 60) * 1.4826
+float _ltf_mad_es     = ta.sma(_s30_es,     60) * 1.4826
+float _ltf_mad_dvol   = ta.sma(_s30_dvol,   60) * 1.4826
+float _nb_sb          = math.max(float(array.size(_ltf_spike_dxy)), 1.0)
+float _ltf_z_dxy_max    = array.size(_ltf_spike_dxy)    > 0 ? math.max(math.abs(array.max(_ltf_spike_dxy)),    math.abs(array.min(_ltf_spike_dxy)))    / math.max(_ltf_mad_dxy    / math.sqrt(_nb_sb), 1e-10) : 0.0
+float _ltf_z_usdjpy_max = array.size(_ltf_spike_usdjpy) > 0 ? math.max(math.abs(array.max(_ltf_spike_usdjpy)), math.abs(array.min(_ltf_spike_usdjpy))) / math.max(_ltf_mad_usdjpy / math.sqrt(_nb_sb), 1e-10) : 0.0
+float _ltf_z_es_max     = array.size(_ltf_spike_es)     > 0 ? math.max(math.abs(array.max(_ltf_spike_es)),     math.abs(array.min(_ltf_spike_es)))     / math.max(_ltf_mad_es     / math.sqrt(_nb_sb), 1e-10) : 0.0
+float _ltf_z_vix_max    = array.size(_ltf_spike_vix)    > 0 ? math.max(math.abs(array.max(_ltf_spike_vix)),    math.abs(array.min(_ltf_spike_vix)))    / math.max(_ltf_mad_dvol   / math.sqrt(_nb_sb), 1e-10) : 0.0
+float ltf_max_abs       = math.max(_ltf_z_dxy_max, math.max(_ltf_z_usdjpy_max, math.max(_ltf_z_es_max, _ltf_z_vix_max)))
+
+// 30m onset signal (kept for DIAG only)
+var bool _shock_in_progress = false
+bool _shock_cond  = z_max_4 > 3.0 and z_burst_4f > 5.0
+bool shock_onset  = _shock_cond and not _shock_in_progress
+_shock_in_progress := _shock_cond
+
+// ─── LTF onset signal — Stage A trigger (true 5m sub-bar dwell) ──────────────
+// Pulls ltf_max_abs on native 5m timeframe and tests dwell condition THERE (intrabar-correct).
+// Requires flash-z ≥ ltf_onset_sigma for ltf_dwell_subbars consecutive 5m bars.
+f_ltf_dwell() =>
+    bool _above = ltf_max_abs >= ltf_onset_sigma
+    bool _held  = _above
+    for i = 1 to ltf_dwell_subbars - 1
+        _held := _held and (ltf_max_abs[i] >= ltf_onset_sigma)
+    _held
+
+bool _ltf_onset_gated = request.security(syminfo.tickerid, "5", f_ltf_dwell(),
+     lookahead = barmerge.lookahead_off)
+
+// Re-point ltf_onset_signal to gated result — THE wiring fix (closes 16× gap)
+bool ltf_onset_signal = _ltf_onset_gated and barstate.isconfirmed
+
+// Phase 1 onset variables (packed 6→1 slot)
+float _dbg_p1_pack = show_debug ? f_pack6q(f_q99(z_max_4, 5.0), f_q99(z_burst_4f, 8.0), f_q99(_p1_z_dxy, 5.0), f_q99(_p1_z_usdjpy, 5.0), f_q99(_p1_z_es, 5.0), f_q99(shock_onset ? 1.0 : 0.0, 1.0)) : na
+plot(_dbg_p1_pack, "dbg.pack_SHOCK_ONSET [z_max4|z_burst4f|z_dxy|z_usdjpy|z_es|onset]", display=display.data_window)
+
+// Macro-implied direction for BTC (unconditional _p1_z_es — not gated on shock_enable_confirmers)
+float macro_implied_shock = _p1_z_es - z_vix - _p1_z_dxy - _p1_z_usdjpy
+string implied_dir = macro_implied_shock > 2.0 ? "bull" : macro_implied_shock < -2.0 ? "bear" : "unclear"
+
+// Component 1: Impact (R_imp) - max flash z-score, normalized
+float max_z_flash = math.max(math.abs(zvix_flash), math.abs(zhorc_flash), math.abs(zbei_flash))
+float R_imp = math.min(max_z_flash / 3.0, 1.0)
+
+// Component 2: Persistence (R_persist) - spike persistence count normalized by minimum
+float R_persist = math.min(_spike_persist_count / math.max(spike_persist_min, 1.0), 1.0)
+
+// Component 3: Velocity (R_vel) - MAD-normalized velocity magnitude
+int vel_lookback = 200
+float vel_mad = ta.sma(math.abs(m3f_velo - ta.sma(m3f_velo, vel_lookback)), vel_lookback) * 1.4826
+float R_vel = math.min(math.abs(m3f_velo) / math.max(2.0 * vel_mad, 1e-10), 1.0)
+
+// Component 4: Acceleration (R_acc) - MAD-normalized acceleration magnitude
+int acc_lookback = 200
+float acc_mad = ta.sma(math.abs(m3f_accel - ta.sma(m3f_accel, acc_lookback)), acc_lookback) * 1.4826
+float R_acc = math.min(math.abs(m3f_accel) / math.max(2.0 * acc_mad, 1e-10), 1.0)
+
+// Component 5: Coherence (R_coh) - from existing MCS
+float R_coh = mcs_val / 100.0
+
+// Component 6: NTE Opacity (R_nte) - from existing nte_opacity
+float R_nte = nte_opacity / 100.0
+
+// Component 7: Sync Score (R_sync) - multi-factor confirmation
+// Issue A fix: lowered from 1.5 to 1.0 — 1.5σ on 4-bar MAD-flash is unreachable in normal conditions
+float sync_thr = 1.0
+int max_factors = shock_enable_confirmers ? 6 : 3
+int sync_bear = (z_vix > sync_thr ? 1 : 0) + (z_horc < -sync_thr ? 1 : 0) + (z_bei < -sync_thr ? 1 : 0) +
+              (shock_enable_confirmers and z_usdjpy < -sync_thr ? 1 : 0) +
+              (shock_enable_confirmers and z_es < -sync_thr ? 1 : 0) +
+              (shock_enable_confirmers and z_dxy > sync_thr ? 1 : 0)
+int sync_bull = (z_vix < -sync_thr ? 1 : 0) + (z_horc > sync_thr ? 1 : 0) + (z_bei > sync_thr ? 1 : 0) +
+              (shock_enable_confirmers and z_usdjpy > sync_thr ? 1 : 0) +
+              (shock_enable_confirmers and z_es > sync_thr ? 1 : 0) +
+              (shock_enable_confirmers and z_dxy < -sync_thr ? 1 : 0)
+float R_sync = math.max(sync_bear, sync_bull) / max_factors
+
+// Bull/Bear SSS (sign-aware R_imp and R_sync, symmetric for others)
+// Issue A fix: direction-symmetric flash-z mapping — both directions exist independently
+float R_imp_bull = math.min(math.max(0.0, math.max(-zvix_flash, math.max(zhorc_flash, zbei_flash))) / 3.0, 1.0)
+float R_imp_bear = math.min(math.max(0.0, math.max(zvix_flash, math.max(-zhorc_flash, -zbei_flash))) / 3.0, 1.0)
+float R_sync_bull = sync_bull / max_factors
+float R_sync_bear = sync_bear / max_factors
+
+float SSS_bull = R_imp_bull * 0.27 + R_persist * 0.09 + R_vel * 0.135 + R_acc * 0.09 + R_coh * 0.135 + R_nte * 0.18 + R_sync_bull * 0.10
+float SSS_bear = R_imp_bear * 0.27 + R_persist * 0.09 + R_vel * 0.135 + R_acc * 0.09 + R_coh * 0.135 + R_nte * 0.18 + R_sync_bear * 0.10
+
+// Direction and final SSS
+string direction = SSS_bull > SSS_bear ? "bull" : SSS_bear > SSS_bull ? "bear" : "none"
+float SSS = math.max(SSS_bull, SSS_bear)
+
+// Direction Confidence (DC) - weighted sum formula (fixed from multiplicative)
+// Multiplicative DC = mcs * (1-pure) * |ob| was too conservative (product of 3 medium values → small number)
+// Weighted sum implements graceful degradation: high confidence if majority components high, partial credit otherwise
+// Weights: 0.40 MCS (primary anchor, highest-quality signal) + 0.30 pure-mode-inverse + 0.30 obedience
+float DC = 0.40 * mcs_val + 0.30 * (1.0 - _pure_w_sm) + 0.30 * math.min(math.abs(ob_state), 1.0)
+
+// Tier classification
+int tier = SSS >= t4_thr ? 4 : SSS >= t3_thr ? 3 : SSS >= t2_thr ? 2 : SSS >= t1_thr ? 1 : 0
+
+// LGD override → minimum T3
+if lg_active and tier > 0 and tier < 3
+    tier := 3
+
+// Liquidity crisis → minimum T3, category="LIQ"
+float v_es = shock_enable_confirmers and not na(es) ? (es - es[4]) / es[4] * 100 : na
+float v_gold = (gold - gold[4]) / gold[4] * 100
+bool sig_liq_crisis = shock_enable_confirmers and not na(v_es) and v_es < -0.2 and v_gold < -0.2
+if sig_liq_crisis and tier > 0 and tier < 3
+    tier := 3
+
+// Kalman-divergence flag → tier bump +1
+float composite_z = (z_vix + z_horc + z_bei) / 3.0
+bool kalman_diverge = math.sign(macro3f - 50) != math.sign(composite_z) and math.abs(composite_z) > 0.5
+if kalman_diverge and tier > 0
+    tier := math.min(tier + 1, 4)
+
+// Category dominance (using spike contributions, not TE weights)
+float contrib_sum = math.abs(_spike_contrib_v) + math.abs(_spike_contrib_h) + math.abs(_spike_contrib_b)
+float contrib_v_frac = contrib_sum > 1e-10 ? math.abs(_spike_contrib_v) / contrib_sum : 0.33
+float contrib_h_frac = contrib_sum > 1e-10 ? math.abs(_spike_contrib_h) / contrib_sum : 0.33
+float contrib_b_frac = contrib_sum > 1e-10 ? math.abs(_spike_contrib_b) / contrib_sum : 0.33
+// Category split: LG (true grab with reversal) vs LIQ (continuation without macro justification)
+// LG = lgactive fired (full LGD signature) → mean-reversion setup
+// LIQ = sig_liq_crisis without lgactive → continuation (macro disengaged, flows-driven)
+string category = lg_active ? "LG" : sig_liq_crisis and not lg_active ? "LIQ" : contrib_v_frac >= dom_thr_in ? "VOL" : contrib_h_frac >= dom_thr_in ? "RATE" : contrib_b_frac >= dom_thr_in ? "INFL" : "MIX"
+if kalman_diverge
+    category := category + "*"
+
+// ─── SHOCK TIER LABELS v0.4.6 ────────────────────────────────────────────
+// Per-category cooldown tracking (prevents label spam)
+// VOL/RATE/INFL are macro categories — separate cooldowns, tier-bypassable
+// LIQ/MIX/LG are flow/grab categories — share one cooldown, no bypass
+var int cooldown_vol  = 0
+var int cooldown_rate = 0
+var int cooldown_infl = 0
+var int cooldown_noise = 0  // shared: LIQ + MIX + LG
+// Track last emitted tier per macro category for tier-bypass logic
+var int last_tier_vol  = 0
+var int last_tier_rate = 0
+var int last_tier_infl = 0
+
+// Decrement cooldowns each bar
+cooldown_vol   := math.max(0, cooldown_vol   - 1)
+cooldown_rate  := math.max(0, cooldown_rate  - 1)
+cooldown_infl  := math.max(0, cooldown_infl  - 1)
+cooldown_noise := math.max(0, cooldown_noise - 1)
+
+// Tier filtering with DC confidence levels
+int min_tier = shock_show_tiers == "T3+" ? 3 : shock_show_tiers == "T2+" ? 2 : 1
+float dc_thr_effective = (str.contains(category, "LG") or str.contains(category, "LIQ")) ? dc_grey_thr_liq_in : dc_grey_thr_in
+bool show_label = tier >= min_tier and DC >= dc_thr_effective
+bool dc_confident = DC >= dc_pass_thr_in
+
+// Cooldown check — VOL/RATE/INFL separate from noise
+bool _is_macro_cat = str.contains(category, "VOL") or str.contains(category, "RATE") or str.contains(category, "INFL")
+bool _is_noise_cat = str.contains(category, "LIQ") or str.contains(category, "MIX") or str.contains(category, "LG")
+int  _cat_cooldown = str.contains(category, "VOL") ? cooldown_vol : str.contains(category, "RATE") ? cooldown_rate : str.contains(category, "INFL") ? cooldown_infl : cooldown_noise
+int  _last_tier    = str.contains(category, "VOL") ? last_tier_vol : str.contains(category, "RATE") ? last_tier_rate : str.contains(category, "INFL") ? last_tier_infl : 0
+bool in_cooldown = _cat_cooldown > 0
+// Tier-aware bypass: T3+ always overrides in-flight cooldown for macro categories
+bool tier_override = _is_macro_cat and tier >= 3 and tier > _last_tier
+
+// DEBUG: packed SSS diagnostics (tier, SSS%, DC%, show_label, cooldown_remaining, category_code)
+// Bug fix: tier, show, cool, cat are raw bounded integers - do NOT apply q99 to them
+int dbg_cat = str.contains(category, "VOL") ? 1 : str.contains(category, "RATE") ? 2 : str.contains(category, "INFL") ? 3 : str.contains(category, "MIX") ? 4 : str.contains(category, "LG") ? 5 : str.contains(category, "LIQ") ? 6 : 0
+int dbg_cool = math.min(cooldown_vol + cooldown_rate + cooldown_infl + cooldown_noise, 99)
+bool dbg_tier_ovrd = tier_override
+float dbg_sss_pack = tier + f_q99(SSS, 1.0)*100 + f_q99(DC, 1.0)*1e4 + (show_label ? 1 : 0)*1e6 + dbg_cool*1e8 + dbg_cat*1e10
+plot(dbg_sss_pack, "dbg.SSS_diag [tier|SSS|DC|show|cool|cat]", display=display.data_window)
+plot(show_debug ? (dbg_tier_ovrd ? 2.0 : (show_label and not in_cooldown ? 1.0 : 0.0)) : na, "dbg.LBL_emitted [0=blocked|1=normal|2=tier_override]", display=display.data_window)
+
+// DEBUG: Issue 2 diagnostics - bull/bear SSS split
+int dbg_dir = direction == "bull" ? 1 : direction == "bear" ? 2 : 0
+float dbg_sss_dir = f_q99(SSS_bull, 1.0) + f_q99(SSS_bear, 1.0)*100 + dbg_dir*1e4
+plot(dbg_sss_dir, "dbg.SSS_dir [bull_q|bear_q|dir|—|—|—]", display=display.data_window)
+
+// DEBUG: Issue 2 log dump on last bar
+if barstate.islast
+    log.info("SSS_DIAG | SSS_bull={0} SSS_bear={1} R_imp_bull={2} R_imp_bear={3} R_sync_bull={4} R_sync_bear={5} direction={6} tier={7} DC={8}",
+             SSS_bull, SSS_bear, R_imp_bull, R_imp_bear, R_sync_bull, R_sync_bear, direction, tier, DC)
+
+// Track label emission for debug
+var bool _lbl_emitted_this_bar = false
+_lbl_emitted_this_bar := false
+
+if false and show_label and (not in_cooldown or tier_override)  // DEPRECATED v0.4.5 label block; cooldown logic preserved
+    _lbl_emitted_this_bar := true
+    // Reset cooldown for this category
+    if str.contains(category, "VOL")
+        cooldown_vol  := shock_cooldown
+        last_tier_vol := tier
+    else if str.contains(category, "RATE")
+        cooldown_rate  := shock_cooldown
+        last_tier_rate := tier
+    else if str.contains(category, "INFL")
+        cooldown_infl  := shock_cooldown
+        last_tier_infl := tier
+    else
+        cooldown_noise := shock_cooldown
+    
+    // Trader-friendly label redesign: category headline + direction + strength + confirmers
+    // Category headline mapping (updated: LIQ = flows-driven continuation, LG = reversal setup)
+    string cat_headline = str.contains(category, "VOL") ? "VOLATILITY SHIFT" : str.contains(category, "RATE") ? "RATE-PATH SHIFT" : str.contains(category, "INFL") ? "INFLATION SHOCK" : str.contains(category, "LG") ? "LiqGrab" : str.contains(category, "LIQ") ? "LiqMove" : "MACRO SHIFT"
+    
+    // Strength word by tier
+    string strength_word = tier == 1 ? "mild" : tier == 2 ? "moderate" : tier == 3 ? "notable" : tier == 4 ? "major" : ""
+    
+    // Direction bias word
+    string bias_word = direction == "bull" ? "↑ bullish" : direction == "bear" ? "↓ bearish" : "direction unclear"
+    
+    // Confirmer flash z-scores (4-bar MAD for early detection)
+    float z_jpy_flash = shock_enable_confirmers ? f_mad_z(z_usdjpy, 4) : 0.0
+    float z_dxy_flash = shock_enable_confirmers ? f_mad_z(z_dxy, 4) : 0.0
+    float z_es_flash  = shock_enable_confirmers ? f_mad_z(z_es, 4) : 0.0
+    
+    // Confirmer phrases
+    string conf = ""
+    if math.abs(z_jpy_flash) > 1.0
+        conf := conf + (z_jpy_flash > 0 ? "JPY unwinding" : "JPY firming")
+    if math.abs(z_dxy_flash) > 1.0
+        conf := (conf == "" ? "" : conf + ", ") + (z_dxy_flash > 0 ? "DXY strengthening" : "DXY weakening")
+    if math.abs(z_es_flash) > 1.0
+        conf := (conf == "" ? "" : conf + ", ") + (z_es_flash > 0 ? "equities risk-on" : "equities risk-off")
+    
+    // Addition 1: Trigger sentence (dominant flash-factor)
+    float zv = math.abs(zvix_flash)
+    float zh = math.abs(zhorc_flash)
+    float zb = math.abs(zbei_flash)
+    string driver_name = zv >= zh and zv >= zb ? "BVIV" : zh >= zb ? "ZN1!" : "BEI"
+    float driver_z = zv >= zh and zv >= zb ? zvix_flash : zh >= zb ? zhorc_flash : zbei_flash
+    string driver_sentence = driver_name + " moved " + (driver_z >= 0 ? "+" : "") + str.tostring(driver_z, "#.#") + "σ"
+    
+    // Addition 2: BTC behavior sentence (3-bar return)
+    float btc_3bar_ret = (close - close[3]) / close[3] * 100.0
+    string btc_sentence = "BTC " + (btc_3bar_ret >= 0 ? "rose " : "dropped ") + str.tostring(math.abs(btc_3bar_ret), "#.##") + "% in last 3 bars"
+    
+    // Addition 3: Category signature line (updated: LG=reversal, LIQ=continuation)
+    string signature = str.contains(category, "VOL") ? "Vol-driven derisking — VIX leads the move." : str.contains(category, "RATE") ? "Yield-curve repricing — rates dominate." : str.contains(category, "INFL") ? "Inflation expectations shifting — BEI leads." : str.contains(category, "MIX") ? "Multi-factor consensus — broad macro shift." : str.contains(category, "LG") ? "Manipulation pattern — factors flat with beta oscillation. Reversal setup." : str.contains(category, "LIQ") ? "Macro disengaged — BTC moving on flows without macro confirmation." : "Macro regime shift."
+    
+    // Correction: Only LG reverses direction (mean-reversion), LIQ is continuation
+    bool reverse_bias = str.contains(category, "LG")
+    string trade_dir = reverse_bias ? (direction == "bull" ? "short" : direction == "bear" ? "long" : "neutral") : (direction == "bull" ? "long" : direction == "bear" ? "short" : "neutral")
+    string horizon = reverse_bias ? "4–8 bars" : "1–4 bars"
+    string mode = reverse_bias ? "mean-reversion" : "continuation"
+    string trade_line = "Trade: " + mode + " " + trade_dir + " bias over next " + horizon + "."
+    
+    // Confirmer clause (if any confirmers active)
+    string confirmer_clause = conf != "" ? "\n" + (str.contains(conf, ",") ? "Confirmers: " : "Confirmer: ") + conf + " — supports the move." : ""
+    
+    // Label text: single-line category headline only (direction/strength encoded in size/color/style)
+    string label_txt = cat_headline
+    
+    // Tooltip: six-line format (headline, trigger+BTC, signature, trade, confirmers, warning)
+    string tip_txt = cat_headline + " — " + strength_word + " strength\n" + driver_sentence + ". " + btc_sentence + ".\n" + signature + "\n" + trade_line + confirmer_clause + (kalman_diverge ? "\n⚠ Model-divergence flagged: validate before sizing." : "")
+    
+    // Color: full color if confident, grey otherwise
+    color lbl_color = direction == "bull" ? (dc_confident ? color.new(color.green, 0) : color.new(color.gray, 0)) : (dc_confident ? color.new(color.red, 0) : color.new(color.gray, 0))
+    float lbl_y = direction == "bull" ? 5 : 95
+    
+    // Tier 1: tiny transparent dots instead of labels
+    if tier == 1
+        label.new(bar_index, lbl_y, "•", 
+                  color=color.new(lbl_color, 85), 
+                  textcolor=color.new(color.white, 85), 
+                  style=direction == "bull" ? label.style_label_up : label.style_label_down, 
+                  size=size.tiny,
+                  tooltip=tip_txt)
+    else
+        label.new(bar_index, lbl_y, label_txt, 
+                  color=lbl_color, 
+                  textcolor=color.white, 
+                  style=direction == "bull" ? label.style_label_up : label.style_label_down, 
+                  size=tier == 4 ? size.normal : tier == 3 ? size.small : size.tiny,
+                  tooltip=tip_txt)
+
+// Velocity burst background removed - replaced with gradient background based on MCS+MAS Hist average
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// THREE-STAGE SHOCK LIFECYCLE v0.4.6  (Onset → Classify → Confirm)
+// A: gray "⚡ ONSET Xσ"  →  B: colored category + tier  →  C: ✓/✗/~ + GRAB arrow
+// ═══════════════════════════════════════════════════════════════════════════════
+
+float btc_atr_pct = ta.atr(20) / math.max(close, 1e-10)
+
+// Bar-history gate: only run engine within the NTE window + warmup (mirrors te_tick at L564)
+// Bars older than last_bar_index - te_hist_bars have no valid NTE/SSS data → no labels
+bool _shock_window = _v042_ready and (bar_index >= last_bar_index - te_hist_bars)
+
+// Stage trigger conditions (evaluated at bar open; isconfirmed guards history-only execution)
+// ─── Timeframe-agnostic onset→classify window ────────────────────────────────
+int _bar_sec       = timeframe.in_seconds()
+int _onset_to_bars = math.max(4, math.round(onset_window_min * 60 / _bar_sec))
+
+bool _stg_a_fire    = ltf_onset_signal and evt_stage == 0                                          and _shock_window
+bool _stg_b_fire    = evt_stage == 1 and tier >= 2 and SSS >= 0.65 and show_label and (bar_index - evt_onset_bar) <= 16 and barstate.isconfirmed and _shock_window
+bool _stg_b_direct  = evt_stage == 0 and not ltf_onset_signal and tier >= 3 and SSS >= 0.65 and show_label and barstate.isconfirmed             and _shock_window
+bool _stg_a_timeout = evt_stage == 1 and (bar_index - evt_onset_bar) > _onset_to_bars and barstate.isconfirmed
+bool _stg_c_fire    = evt_stage == 2 and (bar_index - evt_onset_bar) >= stage_c_confirm_bars and barstate.isconfirmed
+bool _evt_reset     = evt_stage == 3 and (bar_index - evt_onset_bar) > 20
+
+// ─── Stage A: ONSET ───────────────────────────────────────────────────────────
+if _stg_a_fire
+    evt_onset_bar := bar_index
+    evt_onset_z   := ltf_max_abs
+    evt_btc_entry := close
+    evt_stage     := 1
+    evt_direction := macro_implied_shock > 1.5 ? "bull" : "bear"
+    float _ay = evt_direction == "bull" ? 5.0 : 95.0
+    evt_label := label.new(bar_index, _ay,
+        "[!] ONSET " + str.tostring(ltf_max_abs, "#.#") + "s",
+        color     = color.new(color.gray, 30),
+        textcolor = color.white,
+        style     = evt_direction == "bull" ? label.style_label_up : label.style_label_down,
+        size      = size.small,
+        tooltip   = "Stage A onset: LTF flash-z " + str.tostring(ltf_max_abs, "#.##") + "\u03c3. Awaiting SSS classification...")
+
+// ─── Stage B: CLASSIFY (after ONSET) ─────────────────────────────────────────
+if _stg_b_fire
+    evt_category  := category
+    // Flash-event direction: override SSS regime dir when implied shock is clear
+    string _sb_flash_dir = macro_implied_shock > 1.0 ? "bull" : macro_implied_shock < -1.0 ? "bear" : direction
+    // VOL: no FX/rates driver → directionless magnitude event
+    string _sb_dir_vol   = str.contains(category, "VOL") ? "vol" : _sb_flash_dir
+    // P0b: LIQ regime gate — in bull regime (macro3f>55) LIQ/LG events are short-squeeze fuel → bull
+    evt_direction := (str.contains(category, "LIQ") or str.contains(category, "LG")) and macro3f > 55 ? "bull" : _sb_dir_vol
+    evt_stage     := 2
+    string _sb_hl  = str.contains(category,"VOL") ? "VOLATILITY SHOCK" : str.contains(category,"RATE") ? "RATE-PATH SHOCK" : str.contains(category,"INFL") ? "INFLATION SHOCK" : str.contains(category,"LG") ? "LIQ GRAB" : str.contains(category,"LIQ") ? "LIQ CRUNCH" : "MACRO SHOCK"
+    color  _sb_clr = evt_direction == "vol" ? color.new(color.orange, 20) : evt_direction == "bull" ? color.new(color.green, 20) : evt_direction == "bear" ? color.new(color.red, 20) : color.new(color.yellow, 20)
+    label.set_text(evt_label, _sb_hl + " [T" + str.tostring(tier) + "]")
+    label.set_color(evt_label, _sb_clr)
+    if evt_direction == "vol"
+        label.set_style(evt_label, label.style_label_center)
+    label.set_tooltip(evt_label, _sb_hl + " [T" + str.tostring(tier) + "] — classified " + str.tostring(bar_index - evt_onset_bar) + "b after onset. Confirm in " + str.tostring(stage_c_confirm_bars) + "b.")
+
+// ─── Stage B: CLASSIFY (direct — no prior ONSET, LTF data unavailable) ────────
+if _stg_b_direct
+    evt_onset_bar := bar_index
+    evt_btc_entry := close
+    evt_category  := category
+    // Flash-event direction: override SSS regime dir when implied shock is clear
+    string _sbd_flash_dir = macro_implied_shock > 1.0 ? "bull" : macro_implied_shock < -1.0 ? "bear" : direction
+    // VOL: no FX/rates driver → directionless magnitude event
+    string _sbd_dir_vol   = str.contains(category, "VOL") ? "vol" : _sbd_flash_dir
+    // P0b: LIQ regime gate — in bull regime (macro3f>55) LIQ/LG events are short-squeeze fuel → bull
+    evt_direction := (str.contains(category, "LIQ") or str.contains(category, "LG")) and macro3f > 55 ? "bull" : _sbd_dir_vol
+    evt_stage     := 2
+    string _sbd_hl  = str.contains(category,"VOL") ? "VOLATILITY SHOCK" : str.contains(category,"RATE") ? "RATE-PATH SHOCK" : str.contains(category,"INFL") ? "INFLATION SHOCK" : str.contains(category,"LG") ? "LIQ GRAB" : str.contains(category,"LIQ") ? "LIQ CRUNCH" : "MACRO SHOCK"
+    color  _sbd_clr = evt_direction == "vol" ? color.new(color.orange, 20) : evt_direction == "bull" ? color.new(color.green, 20) : evt_direction == "bear" ? color.new(color.red, 20) : color.new(color.yellow, 20)
+    float  _sbd_y   = evt_direction == "vol" ? 50.0 : evt_direction == "bull" ? 5.0 : 95.0
+    evt_label := label.new(bar_index, _sbd_y, _sbd_hl + " [T" + str.tostring(tier) + "]",
+        color=_sbd_clr, textcolor=color.white,
+        style=evt_direction == "vol" ? label.style_label_center : evt_direction == "bull" ? label.style_label_up : label.style_label_down,
+        size=tier == 4 ? size.large : tier == 3 ? size.normal : size.small,
+        tooltip=_sbd_hl + " [T" + str.tostring(tier) + "] — direct classify (no LTF onset). Confirm in " + str.tostring(stage_c_confirm_bars) + "b.")
+
+// ─── Stage A timeout: no classification within time window → mark false onset ─
+if _stg_a_timeout
+    label.set_text(evt_label,  "[!] FALSE ONSET")
+    label.set_color(evt_label, color.new(color.gray, 60))
+    evt_stage := 0
+
+// ─── Stage C: CONFIRM ─────────────────────────────────────────────────────────
+if _stg_c_fire
+    float _bmove  = (close - evt_btc_entry) / math.max(evt_btc_entry, 1e-10)
+    // P0a: direct ATR-sigma — drop double-pct normalization that inflated sigma values
+    float _bsigma = (close - evt_btc_entry) / math.max(ta.atr(20), 1e-10)
+    bool  _is_vol = evt_direction == "vol"
+    // VOL: magnitude-confirm path (directionless — vol expanded / mixed / muted)
+    bool  _vol_confirmed = _is_vol and math.abs(_bsigma) >  stage_c_vol_thr
+    bool  _vol_muted     = _is_vol and math.abs(_bsigma) <  stage_c_vol_thr * 0.3
+    // Directional path
+    bool  _obeyed = not _is_vol and ((evt_direction == "bull" and _bsigma >  stage_c_atr_thr) or (evt_direction == "bear" and _bsigma < -stage_c_atr_thr))
+    bool  _defied = not _is_vol and ((evt_direction == "bull" and _bsigma < -stage_c_atr_thr) or (evt_direction == "bear" and _bsigma >  stage_c_atr_thr))
+    string _csuffix = _is_vol ? (_vol_confirmed ? " [VOL+]" : _vol_muted ? " [VOL-]" : " [VOL~]") : _obeyed ? " [OK]" : _defied ? " [GRAB]" : " [~]"
+    color  _ccolor  = _is_vol ? (_vol_confirmed ? color.orange : _vol_muted ? color.new(color.gray, 0) : color.new(color.yellow, 0)) : _obeyed ? (evt_direction == "bull" ? color.green : color.red) : _defied ? color.new(color.gray, 0) : color.new(color.yellow, 0)
+    label.set_text(evt_label,  label.get_text(evt_label) + _csuffix)
+    label.set_color(evt_label, _ccolor)
+    string _c_reason = _is_vol ? (_vol_confirmed ? "Vol expanded." : _vol_muted ? "Vol muted." : "Vol mixed.") : _obeyed ? "Macro obeyed." : _defied ? "Macro DEFIED - grab pattern." : "Mixed."
+    label.set_tooltip(evt_label, label.get_text(evt_label) + " | BTC " + str.tostring(_bmove * 100.0, "#.##") + "% (" + str.tostring(math.abs(_bsigma), "#.#") + "s ATR). " + _c_reason)
+    if _defied
+        label.new(bar_index, high * 1.005, "GRAB",
+            color=color.new(color.purple, 0), textcolor=color.white,
+            style=label.style_label_down, size=size.tiny,
+            tooltip="BTC defied macro implication. Possible liquidity grab.")
+    evt_stage := 3
+
+// State reset — allows next event after confirmed event ages out
+if _evt_reset
+    evt_stage := 0
+
+// Stage lifecycle (packed 5→1 slot)
+float _dbg_bsigma   = evt_stage >= 2 and not na(evt_btc_entry) ? (close - evt_btc_entry) / math.max(ta.atr(20), 1e-10) : na
+float _dbg_evt_pack = show_debug ? f_pack6q(f_q99(ltf_max_abs, 8.0), f_q99(ltf_onset_signal ? 1.0 : 0.0, 1.0), f_q99(float(evt_stage), 3.0), f_q99(evt_stage > 0 ? float(bar_index - evt_onset_bar) : 0.0, 15.0), f_q99(nz(_dbg_bsigma, 0.0), 3.0), 50) : na
+plot(_dbg_evt_pack, "dbg.pack_SHOCK_EVT [ltf_max|ltf_onset|stage|bars_since|btc_sigma|—]", display=display.data_window)
+
+// ─── DEBUG — DATA WINDOW (8 packed slots = 48 channels) ───────────────────────
+// Channels packed via log-quant atan compression. Decode formula (Python/Pine):
+//   q_ch = floor(packed / 100^(ch-1)) % 100        // ch ∈ {1..6}, ch1=rightmost
+//   value ≈ scale × tan((q_ch - 50) × π / 98)      // signed reconstruction
+//   booleans: q ∈ [0..99]; q > 62 ≡ true, q < 38 ≡ false (scale=1, input 0/1)
+//   small ints: scale provided; recovered = round(scale × tan((q-50)·π/98))
+//
+// Per-channel scale is chosen so typical ranges map to q ∈ [25..75] (low quant error).
+// All packs guarded by `show_debug`; emit `na` when off so chart stays clean.
+
+// Pack_BTC — BTC return / vol / z + composite osc + TE lag aggregate + Q base
+float dbg_pack_BTC = show_debug ? f_pack6q(f_q99(btc_ret, 0.01), f_q99(btc_vol, 0.005), f_q99(btc_ret_z, 2.0), f_q99(raw_osc, 2.0), f_q99(te_lag_comp, 0.5), f_q99(q_base, 0.05)) : na
+plot(dbg_pack_BTC, "dbg.pack_BTC [btc_ret|btc_vol|ret_z|raw_osc|te_comp|q_base]", display=display.data_window)
+
+// Pack_Z — raw factor Z-scores + Kalman observations (sign-corrected)
+float dbg_pack_Z = show_debug ? f_pack6q(f_q99(z_vix, 2.0), f_q99(z_horc, 2.0), f_q99(z_bei, 2.0), f_q99(obs_vix, 2.0), f_q99(obs_horc, 2.0), f_q99(obs_bei, 2.0)) : na
+plot(dbg_pack_Z, "dbg.pack_Z [z_v|z_h|z_b|obs_v|obs_h|obs_b]", display=display.data_window)
+
+// Pack_NTE — Net TE per factor + Pearson direction flags
+// v0.4.4: range tightened 0.05→0.005 so carry-forward decayed values (0.001–0.01) produce visible quantile variation
+float dbg_pack_NTE = show_debug ? f_pack6q(f_q99(nte_vix, 0.005), f_q99(nte_horc, 0.005), f_q99(nte_bei, 0.005), f_q99(dir_vix, 1.0), f_q99(dir_horc, 1.0), f_q99(dir_bei, 1.0)) : na
+plot(dbg_pack_NTE, "dbg.pack_NTE [nte_v|nte_h|nte_b|dir_v|dir_h|dir_b]", display=display.data_window)
+
+// Pack_W — Softmax weights + adaptive lags (int, scale=15 maps 1..30 into 0..99)
+float dbg_pack_W = show_debug ? f_pack6q(f_q99(w_vix, 0.5), f_q99(w_horc, 0.5), f_q99(w_bei, 0.5), f_q99(float(lag_vix), 15.0), f_q99(float(lag_horc), 15.0), f_q99(float(lag_bei), 15.0)) : na
+plot(dbg_pack_W, "dbg.pack_W [w_v|w_h|w_b|lag_v|lag_h|lag_b]", display=display.data_window)
+
+// REMOVED: 9x redundant raw debug plots (already in pack_NTE, pack_W, pack_AGE)
+// - dbg.raw_nte_v/h/b → pack_NTE
+// - dbg.raw_w_v/h/b → pack_W
+// - dbg.nte_age_v/h/b → pack_AGE
+
+// Pack_BETA — Kalman betas + signed TE-lag per factor
+float dbg_pack_BETA = show_debug ? f_pack6q(f_q99(beta_vix, 1.5), f_q99(beta_horc, 1.5), f_q99(beta_bei, 1.5), f_q99(te_lag_vix, 0.5), f_q99(te_lag_horc, 0.5), f_q99(te_lag_bei, 0.5)) : na
+plot(dbg_pack_BETA, "dbg.pack_BETA [b_v|b_h|b_b|tel_v|tel_h|tel_b]", display=display.data_window)
+
+// Pack_DELTA — Soft handover deltas + FIX B β-cap event flags
+// v0.4.3: ch3-6 repurposed to carry per-factor β-cap and sign-flip-damp events.
+// Each is a bool (scale=1.0): q>62 ≡ event fired this bar.
+float dbg_pack_DELTA = show_debug ? f_pack6q(f_q99(horc_delta, 0.5), f_q99(bei_delta, 0.5), f_q99((dbg_cap_v ? 2.0 : 0.0) + (dbg_cap_h ? 1.0 : 0.0), 3.0), f_q99(dbg_cap_b ? 1.0 : 0.0, 1.0), f_q99((dbg_signflip_damp_v ? 2.0 : 0.0) + (dbg_signflip_damp_h ? 1.0 : 0.0), 3.0), f_q99(dbg_signflip_damp_b ? 1.0 : 0.0, 1.0)) : na
+plot(dbg_pack_DELTA, "dbg.pack_DELTA [horc_d|bei_d|cap_vh|cap_b|sd_vh|sd_b]", display=display.data_window)
+
+// Pack_AGE — FIX B sign-age counters + post-grab freeze tail diagnostics
+// ch1-3: β sign-age per factor (atan-compressed, scale=50 → typical 0..200 range)
+// ch4: _bars_since_lg (post-grab tail counter, scale=10)
+// ch5: _lg_freeze_eff (bool, ch high during active grab + tail)
+// ch6: spare
+// FIX G — defensive nz() wraps + non-na initialization. v0.4.3 forensic showed
+// pack_AGE = NaN throughout 5h window. Root cause hypothesis: even though
+// _b*_sign_age were `var int = 0`, the float() cast on certain edge cases could
+// produce na. Wrap each counter input in nz() before float cast. Plot still
+// gated on show_debug — user must enable "Debug (Data Window)" input.
+float dbg_pack_AGE = show_debug ? f_pack6q(f_q99(nz(float(_bv_sign_age), 0.0), 50.0), f_q99(nz(float(_bh_sign_age), 0.0), 50.0), f_q99(nz(float(_bb_sign_age), 0.0), 50.0), f_q99(nz(float(_bars_since_lg), 9999.0), 10.0), f_q99(_lg_freeze_eff ? 1.0 : 0.0, 1.0), 50) : na
+plot(dbg_pack_AGE, "dbg.pack_AGE [age_v|age_h|age_b|sinceLG|frz|_]", display=display.data_window)
+
+// ─── DIAGNOSTIC plots — v0.4.3.2 forensic instrumentation ────────────────────
+// These plot raw scalar values directly (NOT pack-quantized) to verify:
+//   (a) pack_AGE plot reachability — bidx_marker mirrors bar_index. If bidx is
+//       visible but pack_AGE is na, bug is inside f_pack6q args. If bidx is
+//       also na, the show_debug gate is off (user must enable input).
+//   (b) Module D pure-blend mode — if _pure_w_sm stuck near 1.0, raw_osc loses
+//       its standard-channel reactivity (50-bar EMA β kills sweep response).
+//       Expected behaviour: 0.0 in normal regime, ramps to 0.7 only when
+//       mcs_val<0.4, smooth EMA back down after grab clears.
+// ─── Δβ-actual + osc diagnostics (bitpacked: 7 channels → 1 slot) ──────────
+// Forensic v0.4.3.2 pack_BETA showed all 3 βs frozen despite rate-limiter
+// supposedly scoped to horc only. Post-v0.4.3.3 boolean rewrite, β_vix/β_bei
+// should show |Δβ| occasionally > 0.30 in shock zones while β_horc stays ≤ 0.30.
+float dbg_pack_misc = show_debug ? f_pack6q(f_q99(beta_vix - beta_vix[1], 0.5), f_q99(beta_horc - beta_horc[1], 0.5), f_q99(beta_bei - beta_bei[1], 0.5), f_q99(_pure_w_sm, 1.0), f_q99(raw_osc / 100.0, 1.0), f_q99(raw_osc_pure2 / 100.0, 1.0)) : na
+plot(dbg_pack_misc, "pack_MISC", display=display.data_window)
+// Note: bar_index and _raw_osc_dc dropped (bar_index visible in chart, _raw_osc_dc rarely used)
+
+// ─── PACK SHOCK v0.4.5 (SSS tier system) ─────────────────────────────────────
+// 6 channels: tier, SSS, DC, R_sync, R_imp, category_code
+// Max value: cat_code*1e10 + ... ≈ 6e10 + 99e8 + 99e6 + 99e4 + 99e2 + 99 ≈ 7e10 (fits in float64)
+int cat_code = str.contains(category, "VOL") ? 1 
+             : str.contains(category, "RATE") ? 2 
+             : str.contains(category, "INFL") ? 3 
+             : str.contains(category, "MIX") ? 4 
+             : str.contains(category, "LG") ? 5 
+             : str.contains(category, "LIQ") ? 6 
+             : 0
+float pack_shock = f_q99(tier, 5) + f_q99(SSS, 1)*100 + f_q99(DC, 1)*10000 +
+                 f_q99(R_sync, 1)*1e6 + f_q99(R_imp, 1)*1e8 + cat_code*1e10
+plot(pack_shock, "PackSHOCK", display=display.data_window)
+
+// ─── PACKED DEBUG (legacy — Kalman P/Q + MACD/ramp/anchor) ────────────────────
+float dbg_pack_kf = show_debug ? f_pack6q(f_q99(P_vix, 1.0), f_q99(P_horc, 1.0), f_q99(P_bei, 1.0), f_q99(Q_vix, 0.05), f_q99(Q_horc, 0.05), f_q99(Q_bei, 0.05)) : na
+plot(dbg_pack_kf, "dbg.pack_KF [P_v|P_h|P_b|Q_v|Q_h|Q_b]", display=display.data_window)
+
+float dbg_pack_mh = show_debug ? f_pack6q(f_q99(vix_macd, 2.0), f_q99(horc_macd, 2.0), f_q99(bei_macd, 2.0), f_q99(horc_ramp, 0.3), f_q99(bei_ramp, 0.3), f_q99(nz(t5y5_anchor), 0.05)) : na
+plot(dbg_pack_mh, "dbg.pack_MH [v_macd|h_macd|b_macd|h_ramp|b_ramp|t5y5]", display=display.data_window)
+
+// ─── DIAGNOSTIC LAG TABLE ─────────────────────────────────────────────────────
+// Columns: Factor | Lag (bars) | Lag (H) | NTE | Dir | State
+// State: sleep / warm (in warmup ramp) / live / 23/5
+// 7 rows: header | VIX | HORC/P | HORC/X proxy | BEI/P | BEI/X proxy | COMP
+var table tbl_lag = table.new(position.bottom_right, 6, 7,
+     bgcolor=color.new(color.black, 75), border_width=1, border_color=color.new(color.gray, 55))
+
+if show_debug and barstate.islast
+    float tf_h   = timeframe.in_seconds() / 3600.0
+    int comp_lag = int(math.round(float(lag_vix) * w_vix + float(lag_horc) * w_horc + float(lag_bei) * w_bei))
+    color HDR    = color.new(color.black, 55)
+    color PRX    = color.new(color.navy, 70)
+
+    // Header row
+    table.cell(tbl_lag, 0, 0, "Factor", text_color=color.gray,   text_size=size.small, bgcolor=HDR)
+    table.cell(tbl_lag, 1, 0, "Lag",    text_color=color.gray,   text_size=size.small, bgcolor=HDR)
+    table.cell(tbl_lag, 2, 0, "H",      text_color=color.gray,   text_size=size.small, bgcolor=HDR)
+    table.cell(tbl_lag, 3, 0, "NTE",    text_color=color.gray,   text_size=size.small, bgcolor=HDR)
+    table.cell(tbl_lag, 4, 0, "Dir",    text_color=color.gray,   text_size=size.small, bgcolor=HDR)
+    table.cell(tbl_lag, 5, 0, "State",  text_color=color.gray,   text_size=size.small, bgcolor=HDR)
+
+    // VIX row (always 23/5, no proxy)
+    table.cell(tbl_lag, 0, 1, "VIX",  text_color=color.white,  text_size=size.small)
+    table.cell(tbl_lag, 1, 1, str.tostring(lag_vix), text_color=color.white, text_size=size.small)
+    table.cell(tbl_lag, 2, 1, str.tostring(math.round(lag_vix * tf_h, 1)), text_color=color.white, text_size=size.small)
+    table.cell(tbl_lag, 3, 1, str.tostring(nte_vix,  "0.000"), text_color=nte_vix  >= 0.0 ? color.lime : color.red, text_size=size.small)
+    table.cell(tbl_lag, 4, 1, dir_vix  == 0.0 ? "−1" : "+1",  text_color=dir_vix  == 0.0 ? color.red  : color.lime, text_size=size.small)
+    table.cell(tbl_lag, 5, 1, "23/5",  text_color=color.lime,  text_size=size.small)
+
+    // HORC primary row — state + blend % in State column
+    string s_horc   = st_horc.asleep ? "sleep" : st_horc.warmup > 0 ? "warm" : "live"
+    color  c_horc   = st_horc.asleep ? color.red : st_horc.warmup > 0 ? color.orange : color.lime
+    int    hp_pct   = int(math.round(horc_ramp * 100))
+    table.cell(tbl_lag, 0, 2, "HORC/P", text_color=color.white,  text_size=size.small)
+    table.cell(tbl_lag, 1, 2, str.tostring(lag_horc), text_color=color.white, text_size=size.small)
+    table.cell(tbl_lag, 2, 2, str.tostring(math.round(lag_horc * tf_h, 1)), text_color=color.white, text_size=size.small)
+    table.cell(tbl_lag, 3, 2, str.tostring(nte_horc, "0.000"), text_color=nte_horc >= 0.0 ? color.lime : color.red, text_size=size.small)
+    table.cell(tbl_lag, 4, 2, dir_horc == 0.0 ? "−1" : "+1",   text_color=dir_horc == 0.0 ? color.red  : color.lime, text_size=size.small)
+    table.cell(tbl_lag, 5, 2, s_horc + " " + str.tostring(hp_pct) + "%", text_color=c_horc, text_size=size.small)
+
+    // HORC proxy row (SR3 spread — always 23/5; lag shown when proxy dominates)
+    bool   hx_dom  = horc_ramp < 0.5
+    int    hx_lag  = hx_dom ? lag_horc : 0
+    string hx_lstr = hx_dom ? str.tostring(hx_lag) : "—"
+    string hx_hstr = hx_dom ? str.tostring(math.round(hx_lag * tf_h, 1)) : "—"
+    string hx_st   = hx_dom ? "proxy ●" : "standby"
+    color  hx_c    = hx_dom ? color.aqua : color.new(color.gray, 40)
+    table.cell(tbl_lag, 0, 3, " └SR3",  text_color=color.new(color.aqua, 30), text_size=size.small, bgcolor=PRX)
+    table.cell(tbl_lag, 1, 3, hx_lstr,  text_color=hx_c, text_size=size.small, bgcolor=PRX)
+    table.cell(tbl_lag, 2, 3, hx_hstr,  text_color=hx_c, text_size=size.small, bgcolor=PRX)
+    table.cell(tbl_lag, 3, 3, "—",      text_color=color.new(color.gray, 40), text_size=size.small, bgcolor=PRX)
+    table.cell(tbl_lag, 4, 3, "—",      text_color=color.new(color.gray, 40), text_size=size.small, bgcolor=PRX)
+    table.cell(tbl_lag, 5, 3, hx_st,    text_color=hx_c, text_size=size.small, bgcolor=PRX)
+
+    // BEI primary row
+    string s_bei    = st_bei.asleep ? "sleep" : st_bei.warmup > 0 ? "warm" : "live"
+    color  c_bei    = st_bei.asleep ? color.red : st_bei.warmup > 0 ? color.orange : color.lime
+    int    bp_pct   = int(math.round(bei_ramp * 100))
+    table.cell(tbl_lag, 0, 4, "BEI/P",  text_color=color.white,  text_size=size.small)
+    table.cell(tbl_lag, 1, 4, str.tostring(lag_bei),  text_color=color.white, text_size=size.small)
+    table.cell(tbl_lag, 2, 4, str.tostring(math.round(lag_bei  * tf_h, 1)), text_color=color.white, text_size=size.small)
+    table.cell(tbl_lag, 3, 4, str.tostring(nte_bei,   "0.000"), text_color=nte_bei  >= 0.0 ? color.lime : color.red, text_size=size.small)
+    table.cell(tbl_lag, 4, 4, dir_bei  == 0.0 ? "−1" : "+1",   text_color=dir_bei  == 0.0 ? color.red  : color.lime, text_size=size.small)
+    table.cell(tbl_lag, 5, 4, s_bei + " " + str.tostring(bp_pct) + "%", text_color=c_bei, text_size=size.small)
+
+    // BEI proxy row (GC+ZN+CL — always 23/5; lag shown when proxy dominates)
+    bool   bx_dom  = bei_ramp < 0.5
+    int    bx_lag  = bx_dom ? lag_bei : 0
+    string bx_lstr = bx_dom ? str.tostring(bx_lag) : "—"
+    string bx_hstr = bx_dom ? str.tostring(math.round(bx_lag * tf_h, 1)) : "—"
+    string bx_st   = bx_dom ? "proxy ●" : "standby"
+    color  bx_c    = bx_dom ? color.aqua : color.new(color.gray, 40)
+    table.cell(tbl_lag, 0, 5, " └GC+ZN", text_color=color.new(color.aqua, 30), text_size=size.small, bgcolor=PRX)
+    table.cell(tbl_lag, 1, 5, bx_lstr,   text_color=bx_c, text_size=size.small, bgcolor=PRX)
+    table.cell(tbl_lag, 2, 5, bx_hstr,   text_color=bx_c, text_size=size.small, bgcolor=PRX)
+    table.cell(tbl_lag, 3, 5, "—",       text_color=color.new(color.gray, 40), text_size=size.small, bgcolor=PRX)
+    table.cell(tbl_lag, 4, 5, "—",       text_color=color.new(color.gray, 40), text_size=size.small, bgcolor=PRX)
+    table.cell(tbl_lag, 5, 5, bx_st,     text_color=bx_c, text_size=size.small, bgcolor=PRX)
+
+    // COMP row (weighted average lag, composite NTE signal)
+    table.cell(tbl_lag, 0, 6, "COMP", text_color=color.yellow, text_size=size.small)
+    table.cell(tbl_lag, 1, 6, str.tostring(comp_lag), text_color=color.yellow, text_size=size.small)
+    table.cell(tbl_lag, 2, 6, str.tostring(math.round(comp_lag * tf_h, 1)), text_color=color.yellow, text_size=size.small)
+    table.cell(tbl_lag, 3, 6, str.tostring(te_lag_comp, "0.000"), text_color=te_lag_comp >= 0.0 ? color.lime : color.red, text_size=size.small)
+    table.cell(tbl_lag, 4, 6, "—",   text_color=color.gray,   text_size=size.small)
+    table.cell(tbl_lag, 5, 6, "—",   text_color=color.gray,   text_size=size.small)
+
+// ─── SHOCK TIER LEGEND v0.4.5 ────────────────────────────────────────────────
+if shock_show_legend and barstate.islast
+    var table legend = table.new(position.top_right, 3, 6, border_width=1, border_color=color.gray, frame_width=1, frame_color=color.gray)
+    
+    // Header row
+    table.cell(legend, 0, 0, "Tier", text_color=color.white, bgcolor=color.new(color.gray, 20), text_size=size.small)
+    table.cell(legend, 1, 0, "SSS ≥", text_color=color.white, bgcolor=color.new(color.gray, 20), text_size=size.small)
+    table.cell(legend, 2, 0, "Meaning", text_color=color.white, bgcolor=color.new(color.gray, 20), text_size=size.small)
+    
+    // T4 row
+    table.cell(legend, 0, 1, "T4", text_color=color.white, bgcolor=color.new(color.red, 0), text_size=size.small)
+    table.cell(legend, 1, 1, str.tostring(t4_thr, "0.00"), text_color=color.white, text_size=size.small)
+    table.cell(legend, 2, 1, "Extreme", text_color=color.white, text_size=size.small)
+    
+    // T3 row
+    table.cell(legend, 0, 2, "T3", text_color=color.white, bgcolor=color.new(color.orange, 0), text_size=size.small)
+    table.cell(legend, 1, 2, str.tostring(t3_thr, "0.00"), text_color=color.white, text_size=size.small)
+    table.cell(legend, 2, 2, "Major", text_color=color.white, text_size=size.small)
+    
+    // T2 row
+    table.cell(legend, 0, 3, "T2", text_color=color.white, bgcolor=color.new(color.yellow, 0), text_size=size.small)
+    table.cell(legend, 1, 3, str.tostring(t2_thr, "0.00"), text_color=color.black, text_size=size.small)
+    table.cell(legend, 2, 3, "Moderate", text_color=color.black, text_size=size.small)
+    
+    // T1 row
+    table.cell(legend, 0, 4, "T1", text_color=color.white, bgcolor=color.new(color.blue, 0), text_size=size.small)
+    table.cell(legend, 1, 4, str.tostring(t1_thr, "0.00"), text_color=color.white, text_size=size.small)
+    table.cell(legend, 2, 4, "Minor", text_color=color.white, text_size=size.small)
+    
+    // Footer row (sensitivity preset)
+    table.cell(legend, 0, 5, "Preset:", text_color=color.gray, text_size=size.tiny)
+    table.cell(legend, 1, 5, shock_sensitivity, text_color=color.gray, text_size=size.tiny)
+    table.cell(legend, 2, 5, "", text_color=color.gray, text_size=size.tiny)
