@@ -16,8 +16,8 @@ grp_global_display = "Global Display Controls"
 show_setup_labels = input.bool(true, "Show Setup Labels", group=grp_global_display, tooltip="Enable/disable all setup labels (L1-L8, S1-S10, V1-V4). Turn off to reduce chart clutter.")
 
 // Loading time measurement (latched once; avoid updating on realtime ticks)
-var int load_start_ms = na
-load_start_ms := na(load_start_ms) ? timenow : load_start_ms
+// Loading time measurement — always fresh on each script compile/load
+var int load_start_ms = timenow
 var float load_secs_latched = na
 var bool load_secs_captured = false
 if barstate.islastconfirmedhistory and not load_secs_captured
